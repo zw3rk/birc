@@ -24,6 +24,7 @@
 # - Styles never leak across lines: every parse starts unstyled, and an
 #   unclosed toggle simply ends with its line.
 import Base
+import ./emoji.bend as Emoji
 import ./irc.bend as Irc
 import ./links.bend as Links
 
@@ -152,6 +153,23 @@ def parse_done(+attrs: U32, +fg: U32, +has_fg: Bool, +acc: String, segs: List<&2
 
 # Every step consumes at least one source byte (0x03 consumes itself plus
 # whatever color() eats), so fuel 1+length always suffices.
+# NOTE (D41): the two keeps below evaluate flush(acc) eagerly on the keep
+# path (Bend args are strict), re-reversing the accumulator per kept byte.
+# Threading the drop decision through a Unit-> continuation was tried and
+# reverted: Bend's termination checker requires the recursive fuel argument
+# to be a syntactically visible predecessor (1n+p), which a continuation
+# indirection hides ("expected a decreasing self-call"). Cost stays bounded
+# by the 512-byte wire cap.
+def parse_acc.keep(drop: Bool, +h: Char, +acc: String) -> String:
+  match drop:
+    case True{}: ""
+    case False{}: SCon{h, acc}
+
+def parse_segs.keep(drop: Bool, +attrs: U32, +fg: U32, +has_fg: Bool, +acc: String, segs: List<&2, Seg>) -> List<&2, Seg>:
+  match drop:
+    case True{}: flush(attrs, fg, has_fg, acc, segs)
+    case False{}: segs
+
 def parse_go(fuel: Nat, +s: String, +attrs: U32, +fg: U32, +has_fg: Bool, +acc: String, +segs: List<&2, Seg>) -> List<&2, Seg>:
   match fuel:
     case 0n: parse_done(attrs, fg, has_fg, acc, segs)
@@ -169,7 +187,7 @@ def parse_go(fuel: Nat, +s: String, +attrs: U32, +fg: U32, +has_fg: Bool, +acc: 
         case SCon{Chr{3}, t}: parse_color.apply(color(t), nfg => nhas => nrest => parse_go(p, nrest, attrs, nfg, nhas, "", flush(attrs, fg, has_fg, acc, segs)))
         case SCon{+h, +t}:
           +drop = wire_drop(h)
-          parse_go(p, t, attrs, fg, has_fg, Bool.pick(String, drop, "", SCon{h, acc}), Bool.pick(List<&2, Seg>, drop, flush(attrs, fg, has_fg, acc, segs), segs))
+          parse_go(p, t, attrs, fg, has_fg, parse_acc.keep(drop, h, acc), parse_segs.keep(drop, attrs, fg, has_fg, acc, segs))
 
 def parse(+s: String) -> List<&2, Seg>:
   parse_go(Nat.add(1n, String.length(s)), s, 0, 0, False{}, "", Nil{})
@@ -227,21 +245,24 @@ def render_runs.go(+runs: List<&2, Links.Run>, +wattrs: U32, +wfg: U32, +whas: B
       +bad = (Nat.is_eq(i, 0n) && prev_alnum) || (Bool.not(next_ok) && Bool.not(later_has_space(t)))
       stylize(run, wattrs, wfg, whas, bad) <> render_runs.go(t, wattrs, wfg, whas, prev_alnum, next_ok, Nat.add(i, 1n))
 
-def render_seg(seg: Seg, +prev_alnum: Bool, +next_ok: Bool) -> List<&2, SRun>:
+# The emoji table is built once per render (one painted line, one searched
+# row) and shared by every style segment; each segment used to rebuild the
+# ~70-row table through Links.render. Segment lexing is unchanged.
+def render_seg(+table: List<&2, Emoji.Entry>, seg: Seg, +prev_alnum: Bool, +next_ok: Bool) -> List<&2, SRun>:
   match seg:
     case Seg{+attrs, +fg, +has_fg, +text}:
-      render_runs.go(Links.render(text), attrs, fg, has_fg, prev_alnum, next_ok, 0n)
+      render_runs.go(Links.render_with(table, text), attrs, fg, has_fg, prev_alnum, next_ok, 0n)
 
-def render_segs.go(+xs: List<&2, Seg>, +prev_alnum: Bool) -> List<&2, SRun>:
-  match xs:
+def render_segs.go(+segs: List<&2, Seg>, +prev_alnum: Bool, +table: List<&2, Emoji.Entry>) -> List<&2, SRun>:
+  match segs:
     case Nil{}: Nil{}
-    case Con{+seg, +rest}: List.append(&2, SRun, render_seg(seg, prev_alnum, rest_ok(rest)), render_segs.go(rest, seg_last_alnum(seg)))
+    case Con{+seg, +rest}: List.append(&2, SRun, render_seg(table, seg, prev_alnum, rest_ok(rest)), render_segs.go(rest, seg_last_alnum(seg), table))
 
-def render_segs(+xs: List<&2, Seg>) -> List<&2, SRun>:
-  render_segs.go(xs, False{})
+def render_segs(+segs: List<&2, Seg>, +table: List<&2, Emoji.Entry>) -> List<&2, SRun>:
+  render_segs.go(segs, False{}, table)
 
 def render(+s: String) -> List<&2, SRun>:
-  render_segs(parse(s))
+  render_segs(parse(s), Links.aliases())
 
 # Shared boundary-aware URL-runs seam for View, /open, Media, and Cards.
 # Every consumer reads these same runs: wire style controls are segment

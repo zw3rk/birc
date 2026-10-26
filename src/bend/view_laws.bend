@@ -174,12 +174,20 @@ def span_hit(k: SpanKind, h: TextSpan) -> Bool:
         case _:
           False{}
 
+# A hit returns without walking the tail: the recursion lives inside the
+# taken arm (Bend args are eager, so a Bool.pick/keep would scan the tail
+# even after a match).
+def has_kind.step(hit: Bool, k: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: k(Unit{})
+
 def has_kind.go(+k: SpanKind, xs: List<&2, TextSpan>) -> Bool:
   match xs:
     case Nil{}:
       False{}
     case Con{h, t}:
-      Bool.pick(Bool, span_hit(k, h), True{}, has_kind.go(k, t))
+      has_kind.step(span_hit(k, h), _ => has_kind.go(k, t))
 
 def has_kind(+k: SpanKind, +s: String) -> Bool:
   has_kind.go(k, tokenize(s))

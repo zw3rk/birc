@@ -95,31 +95,36 @@ def is_bang_or_at(+c: Char) -> Bool:
 
 # ---- string helpers -----------------------------------------------------
 
+# The tail walk is a lazy continuation: arguments are eager, so the
+# recursion must live inside the taken arm (links.bend alias_step idiom).
+def drop_spaces.step(space: Bool, +h: Char, +t: String, k: Unit -> String) -> String:
+  match space:
+    case True{}: k(Unit{})
+    case False{}: SCon{h, t}
+
 def drop_spaces(s: String) -> String:
   match s:
     case SNil{}:
       SNil{}
     case SCon{+h, +t}:
-      Bool.pick(String, is_space(h), drop_spaces(t), SCon{h, t})
+      drop_spaces.step(is_space(h), h, t, _ => drop_spaces(t))
 
 def take_until_space.cons(+h: Char, r: String & String) -> String & String:
   match r:
     case (tok, rest):
       (SCon{h, tok}, rest)
 
-def take_until_space.fin(+h: Char, +t: String, r: String & String, space: Bool) -> String & String:
+def take_until_space.step(space: Bool, +h: Char, +t: String, k: Unit -> String & String) -> String & String:
   match space:
-    case True{}:
-      ("", SCon{h, t})
-    case False{}:
-      take_until_space.cons(h, r)
+    case True{}: ("", SCon{h, t})
+    case False{}: take_until_space.cons(h, k(Unit{}))
 
 def take_until_space(s: String) -> String & String:
   match s:
     case SNil{}:
       ("", "")
     case SCon{+h, +t}:
-      take_until_space.fin(h, t, take_until_space(t), is_space(h))
+      take_until_space.step(is_space(h), h, t, _ => take_until_space(t))
 
 # RFC 1459 casemap: ASCII upper, then []\ ↔ {}|. tilde also folds ^ ↔ ~;
 # rfc1459-strict passes False and leaves that pair alone.
@@ -312,19 +317,17 @@ def parse_numeric3(+s: String) -> U32:
     case _:
       0
 
-def nick_of_prefix.keep(+h: Char, r: String, cut: Bool) -> String:
+def nick_of_prefix.step(cut: Bool, +h: Char, k: Unit -> String) -> String:
   match cut:
-    case True{}:
-      ""
-    case False{}:
-      SCon{h, r}
+    case True{}: ""
+    case False{}: SCon{h, k(Unit{})}
 
 def nick_of_prefix(s: String) -> String:
   match s:
     case SNil{}:
       ""
     case SCon{+h, t}:
-      nick_of_prefix.keep(h, nick_of_prefix(t), is_bang_or_at(h))
+      nick_of_prefix.step(is_bang_or_at(h), h, _ => nick_of_prefix(t))
 
 # ---- parse --------------------------------------------------------------
 
@@ -389,12 +392,10 @@ def take_8_exact(+s: String) -> String:
   +sub = String.take(s, 8n)
   take_8_exact.on(sub, Nat.is_eq(String.length(sub), 8n))
 
-def take_8_hhmmss.pick(is_t: Bool, +t: String, +rest: String) -> String:
+def take_8_hhmmss.step(is_t: Bool, +t: String, k: Unit -> String) -> String:
   match is_t:
-    case True{}:
-      take_8_exact(t)
-    case False{}:
-      rest
+    case True{}: take_8_exact(t)
+    case False{}: k(Unit{})
 
 def take_8_hhmmss.go(fuel: Nat, s: String) -> String:
   match fuel:
@@ -405,7 +406,7 @@ def take_8_hhmmss.go(fuel: Nat, s: String) -> String:
         case SNil{}:
           ""
         case SCon{+h, +t}:
-          take_8_hhmmss.pick(code_is(h, 84), t, take_8_hhmmss.go(p, t))
+          take_8_hhmmss.step(code_is(h, 84), t, _ => take_8_hhmmss.go(p, t))
 
 def extract_time_val(+val: String) -> String:
   take_8_hhmmss.go(Nat.add(1n, String.length(val)), val)
@@ -559,19 +560,17 @@ def sanitize_go(fuel: Nat, ph: SanPh, +s: String, keep_style: Bool) -> String:
 def sanitize_in(+s: String) -> String:
   sanitize_go(Nat.add(1n, Nat.mul(4n, String.length(s))), SanStr{}, s, False{})
 
-def proto_soh.keep(+h: Char, r: String, soh: Bool) -> String:
+def proto_soh.step(soh: Bool, +h: Char, k: Unit -> String) -> String:
   match soh:
-    case True{}:
-      r
-    case False{}:
-      SCon{h, r}
+    case True{}: k(Unit{})
+    case False{}: SCon{h, k(Unit{})}
 
 def proto_soh(+s: String) -> String:
   match s:
     case SNil{}:
       SNil{}
     case SCon{+h, t}:
-      proto_soh.keep(h, proto_soh(t), code_is(h, 1))
+      proto_soh.step(code_is(h, 1), h, _ => proto_soh(t))
 
 # Canonical protocol atom for identity and policy comparisons: nicknames,
 # channels, mode flags, verbs, and credential words. Framed lines keep
@@ -711,19 +710,19 @@ def has_crlf(s: String) -> Bool:
     case SCon{+h, t}:
       Bool.or(is_crlf(h), has_crlf(t))
 
-def strip_ctl.keep(+h: Char, r: String, drop: Bool) -> String:
+# Recursive walker for strip_ctl: the condition is a parameter and the tail
+# walk is a lazy continuation, so no eager evaluation of both branches.
+def strip_ctl.step(drop: Bool, +h: Char, k: Unit -> String) -> String:
   match drop:
-    case True{}:
-      r
-    case False{}:
-      SCon{h, r}
+    case True{}: k(Unit{})
+    case False{}: SCon{h, k(Unit{})}
 
 def strip_ctl(s: String) -> String:
   match s:
     case SNil{}:
       SNil{}
     case SCon{+h, t}:
-      strip_ctl.keep(h, strip_ctl(t), is_crlf(h))
+      strip_ctl.step(is_crlf(h), h, _ => strip_ctl(t))
 
 
 # Style-bearing inbound bytes: SOH (CTCP framing) plus the mIRC formatting
@@ -1077,8 +1076,13 @@ def stdreply_ok(+m: Message) -> Bool:
   (Nat.is_eq(n, 3n) || Nat.is_eq(n, 4n))
     && stdreply_fields_ok(msg_param(m, 0n), msg_param(m, 1n), msg_last(m))
 
+def stdreply_context.pick(is4: Bool, +m: Message) -> String:
+  match is4:
+    case True{}: msg_param(m, 2n)
+    case False{}: ""
+
 def stdreply_context(+m: Message) -> String:
-  Bool.pick(String, Nat.is_eq(stdreply_len(m), 4n), msg_param(m, 2n), "")
+  stdreply_context.pick(Nat.is_eq(stdreply_len(m), 4n), m)
 
 def stdreply_ctx_text.empty(empty: Bool, +context: String) -> String:
   match empty:

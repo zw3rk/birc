@@ -499,6 +499,14 @@ def join_lines(+xs: List<&2, String>) -> List<&2, U32>:
 def append_octets(+a: List<&2, U32>, +b: List<&2, U32>) -> List<&2, U32>:
   List.append(&2, U32, a, b)
 
+# Mismatch short-circuits: the tail walk lives inside the taken arm
+# (Bend args are eager, so a Bool.pick/keep would scan the whole tail
+# even after the first differing byte).
+def octets_eq.step(ok: Bool, k: Unit -> Bool) -> Bool:
+  match ok:
+    case True{}: k(Unit{})
+    case False{}: False{}
+
 def octets_eq(+a: List<&2, U32>, +b: List<&2, U32>) -> Bool:
   match a:
     case Nil{}:
@@ -512,10 +520,15 @@ def octets_eq(+a: List<&2, U32>, +b: List<&2, U32>) -> Bool:
         case Nil{}:
           False{}
         case Con{+xb, tb}:
-          Bool.pick(Bool, U32.is_eq(xa, xb), octets_eq(ta, tb), False{})
+          octets_eq.step(U32.is_eq(xa, xb), _ => octets_eq(ta, tb))
 
 def str_eq(+a: String, +b: String) -> Bool:
   String.eq(a, b)
+
+def strings_eq.step(ok: Bool, k: Unit -> Bool) -> Bool:
+  match ok:
+    case True{}: k(Unit{})
+    case False{}: False{}
 
 def strings_eq(+a: List<&2, String>, +b: List<&2, String>) -> Bool:
   match a:
@@ -530,7 +543,7 @@ def strings_eq(+a: List<&2, String>, +b: List<&2, String>) -> Bool:
         case Nil{}:
           False{}
         case Con{+xb, tb}:
-          Bool.pick(Bool, str_eq(xa, xb), strings_eq(ta, tb), False{})
+          strings_eq.step(str_eq(xa, xb), _ => strings_eq(ta, tb))
 
 def roundtrip_ok.cmp(+gl: List<&2, String>, +lines: List<&2, String>, +gr: List<&2, U32>, +rem: List<&2, U32>) -> Bool:
   strings_eq(gl, lines) && octets_eq(gr, rem)

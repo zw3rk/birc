@@ -343,6 +343,11 @@ type FlagRow is Data:
 def flag_rows() -> List<&2, FlagRow>:
   FlagRow{"--demo", FDemo{}} <> FlagRow{"--frames", FFrames{}} <> FlagRow{"--connect", FConnect{}} <> FlagRow{"--port", FPort{}} <> FlagRow{"--nick", FNick{}} <> FlagRow{"--channel", FChan{}} <> FlagRow{"--replay", FReplay{}} <> FlagRow{"--sasl-user", FSaslUser{}} <> FlagRow{"--sasl-pass", FSaslPass{}} <> FlagRow{"--auth", FAuth{}} <> FlagRow{"--nickserv-prefix", FNickServPrefix{}} <> FlagRow{"--nickserv-success", FNickServSuccess{}} <> FlagRow{"--help-irc", FHelp{}} <> FlagRow{"--tls", FTls{}} <> FlagRow{"--plain", FPlain{}} <> FlagRow{"--server", FServer{}} <> Nil{}
 
+def flag_of.step(eq: Bool, f: Flag, k: Unit -> Flag) -> Flag:
+  match eq:
+    case True{}: f
+    case False{}: k(Unit{})
+
 def flag_of(xs: List<&2, FlagRow>, +h: String) -> Flag:
   match xs:
     case Nil{}:
@@ -350,7 +355,7 @@ def flag_of(xs: List<&2, FlagRow>, +h: String) -> Flag:
     case Con{row, t}:
       match row:
         case FlagRow{+name, +f}:
-          Bool.pick(Flag, String.eq(name, h), f, flag_of(t, h))
+          flag_of.step(String.eq(name, h), f, _ => flag_of(t, h))
 
 def servers_of(cfg: Cfg) -> List<&2, Ep.Endpoint>:
   match cfg:

@@ -59,12 +59,37 @@ def tick_changed(pair: Sess.Session & Bool) -> Bool:
 def tick_needs_paint(expired: Bool, ready: Bool) -> Bool:
   tick_changed(Net.on_typing_tick.retry((Sess.session0("me", "s", "#t"), expired), ready))
 
+# Paint/scan policy: output readiness may repaint (see tick_needs_paint) but
+# only typing expiry scans scrollback. Bits come from one call so the two
+# decisions stay separate downstream.
+def tick_bits(expired: Bool, ready: Bool) -> Bool & Bool:
+  Net.on_typing_tick.bits(expired, ready)
+
+def tick_bit_paint(bits: Bool & Bool) -> Bool:
+  match bits:
+    case (paint, _): paint
+
+def tick_bit_scan(bits: Bool & Bool) -> Bool:
+  match bits:
+    case (_, scan): scan
+
+def tick_needs_scan(expired: Bool, ready: Bool) -> Bool:
+  tick_bit_scan(tick_bits(expired, ready))
+
+def tick_needs_paint2(expired: Bool, ready: Bool) -> Bool:
+  tick_bit_paint(tick_bits(expired, ready))
+
 def run() -> IO(Unit):
   do IO<Unit>:
     Unit <- E.must("normal idle ticks do not repaint", Bool.not(tick_needs_paint(False{}, False{})))
     Unit <- E.must("writable short frames repaint unchanged typing", tick_needs_paint(False{}, True{}))
     Unit <- E.must("typing expiry still repaints", tick_needs_paint(True{}, False{}))
     Unit <- E.must("repair and expiry share one paint", tick_needs_paint(True{}, True{}))
+    Unit <- E.must("readiness alone does not scan scrollback", Bool.not(tick_needs_scan(False{}, True{})))
+    Unit <- E.must("idle ticks do not scan scrollback", Bool.not(tick_needs_scan(False{}, False{})))
+    Unit <- E.must("expiry scans with or without readiness", tick_needs_scan(True{}, False{}) && tick_needs_scan(True{}, True{}))
+    Unit <- E.must("bits repaint on expiry or readiness", tick_needs_paint2(True{}, False{}) && tick_needs_paint2(False{}, True{}) && tick_needs_paint2(True{}, True{}))
+    Unit <- E.must("bits skip paint when idle", Bool.not(tick_needs_paint2(False{}, False{})))
     Unit <- E.must("watcher key is not a continuation", Bool.not(Net.is_continue(Sess.UiKey{})))
     Unit <- E.must("synthetic input is a continuation", Net.is_continue(Sess.UiContinue{}))
     Unit <- E.must("idle needs no continuation", Bool.not(Net.more_pending(False{}, False{}, False{})))

@@ -134,7 +134,7 @@ def names_pref(fuel: Nat, xs: List<&2, Sub.SlashRow>, +pre: String) -> List<&2, 
     case 1n+p:
       match xs:
         case Nil{}: Nil{}
-        case Con{+h, t}: names_keep(String.starts_with(row_name(h), pre), row_name(h), names_pref(p, t, pre))
+        case Con{+h, t}: names_keep(Sub.slash_starts(row_name(h), pre), row_name(h), names_pref(p, t, pre))
 
 def command_names(+pre: String) -> List<&2, String>:
   names_pref(Sub.slash_fuel(), Sub.slash_rows(), pre)
@@ -186,7 +186,7 @@ def ghost_one.on(same: Bool, +word: String, +name: String) -> String:
     case False{}: String.drop(name, String.length(word))
 
 def ghost_one(+word: String, +name: String) -> String:
-  ghost_one.on(String.eq(word, name), word, name)
+  ghost_one.on(Sub.slash_eq(word, name), word, name)
 
 def ghost_of(+word: String, xs: List<&2, String>) -> String:
   match xs:
@@ -229,7 +229,7 @@ def page_start.go(fuel: Nat, here: Bool, +idx: Nat) -> Nat:
         case False{}: Nat.add(8n, page_start.go(p, Nat.is_lt(Nat.sub(idx, 8n), 8n), Nat.sub(idx, 8n)))
 
 def page_start(+idx: Nat) -> Nat:
-  page_start.go(8n, Nat.is_lt(idx, 8n), idx)
+  page_start.go(Nat.add(1n, idx), Nat.is_lt(idx, 8n), idx)
 
 def pick_clamp.on(over: Bool, +idx: Nat, +n: Nat) -> Nat:
   match over:
@@ -335,10 +335,16 @@ def at_boundary.empty(empty: Bool, +stem: String) -> Bool:
     case False{}: Bool.not(name_char(last_u32(stem)))
 
 def at_boundary(+pre: String) -> Bool:
-  at_boundary.empty(String.is_empty(String.take(pre, Nat.sub(String.length(pre), 1n))), String.take(pre, Nat.sub(String.length(pre), 1n)))
+  +stem = String.take(pre, Nat.sub(String.length(pre), 1n))
+  at_boundary.empty(String.is_empty(stem), stem)
 
 def emoji_aliases() -> List<&2, Emoji.Entry>:
   Emoji.aliases()
+
+# Fuel for full-table walks (find/matches/nth): derived from the table so
+# growing aliases() can never strand tail rows behind a stale literal.
+def emoji_table_fuel(+xs: List<&2, Emoji.Entry>) -> Nat:
+  Nat.add(1n, List.length(&2, Emoji.Entry, xs))
 
 def emoji_find_step(eq: Bool, +text: String, no: Unit -> String) -> String:
   match eq:
@@ -363,7 +369,8 @@ def emoji_commit.name(ok: Bool, +pre: String, +name: String, +s: String) -> Stri
   match ok:
     case False{}: s
     case True{}:
-      +glyph = emoji_find(80n, emoji_aliases(), ":" ++ name ++ ":")
+      +xs = emoji_aliases()
+      +glyph = emoji_find(emoji_table_fuel(xs), xs, ":" ++ name ++ ":")
       emoji_commit.hit(String.is_empty(glyph), glyph, pre, s)
 
 def emoji_commit.closed(c: Colon, +s: String) -> String:
@@ -423,7 +430,9 @@ def emoji_matches(fuel: Nat, xs: List<&2, Emoji.Entry>, +pre: String) -> List<&2
 def emoji_len.pre(word: Maybe<&2, String>) -> Nat:
   match word:
     case None{}: 0n
-    case Some{+pre}: List.length(&2, Emoji.Entry, emoji_matches(80n, emoji_aliases(), pre))
+    case Some{+pre}:
+      +xs = emoji_aliases()
+      List.length(&2, Emoji.Entry, emoji_matches(emoji_table_fuel(xs), xs, pre))
 
 def emoji_len(+s: String) -> Nat:
   emoji_len.pre(emoji_prefix(s))
@@ -444,17 +453,21 @@ def emoji_nth(fuel: Nat, here: Bool, +h: Emoji.Entry, xs: List<&2, Emoji.Entry>,
             case Nil{}: Emoji.Entry{"", ""}
             case Con{+n, t}: emoji_nth(p, Nat.is_eq(idx, 1n), n, t, Nat.sub(idx, 1n))
 
-def emoji_at(xs: List<&2, Emoji.Entry>, +idx: Nat) -> Emoji.Entry:
+def emoji_at.go(fuel: Nat, +xs: List<&2, Emoji.Entry>, +idx: Nat) -> Emoji.Entry:
   match xs:
     case Nil{}: Emoji.Entry{"", ""}
-    case Con{+h, t}: emoji_nth(80n, Nat.is_eq(idx, 0n), h, t, idx)
+    case Con{+h, t}: emoji_nth(fuel, Nat.is_eq(idx, 0n), h, t, idx)
+
+def emoji_at(+xs: List<&2, Emoji.Entry>, +idx: Nat) -> Emoji.Entry:
+  emoji_at.go(emoji_table_fuel(xs), xs, idx)
 
 # Shared match-list readers: ghost / glyph / lines / accept bind +ms once.
 def emoji_glyph.of(+ms: List<&2, Emoji.Entry>, +idx: Nat) -> String:
   emoji_text(emoji_at(ms, pick_clamp(idx, List.length(&2, Emoji.Entry, ms))))
 
 def emoji_glyph(+pre: String, +idx: Nat) -> String:
-  emoji_glyph.of(emoji_matches(80n, emoji_aliases(), pre), idx)
+  +xs = emoji_aliases()
+  emoji_glyph.of(emoji_matches(emoji_table_fuel(xs), xs, pre), idx)
 
 def emoji_row(first: Bool, +e: Emoji.Entry) -> String:
   menu_mark(first) ++ emoji_text(e) ++ "  " ++ emoji_name(e)
@@ -478,7 +491,9 @@ def emoji_lines.ms(+ms: List<&2, Emoji.Entry>, +idx: Nat) -> List<&2, String>:
 def emoji_lines.pre(word: Maybe<&2, String>, +idx: Nat) -> List<&2, String>:
   match word:
     case None{}: Nil{}
-    case Some{+pre}: emoji_lines.ms(emoji_matches(80n, emoji_aliases(), pre), idx)
+    case Some{+pre}:
+      +xs = emoji_aliases()
+      emoji_lines.ms(emoji_matches(emoji_table_fuel(xs), xs, pre), idx)
 
 def emoji_lines(+s: String, +idx: Nat) -> List<&2, String>:
   emoji_lines.pre(emoji_prefix(s), idx)
@@ -510,7 +525,9 @@ def emoji_ghost.ms(+ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat) -> Strin
 def emoji_ghost.pre(word: Maybe<&2, String>, +idx: Nat) -> String:
   match word:
     case None{}: ""
-    case Some{+pre}: emoji_ghost.ms(emoji_matches(80n, emoji_aliases(), pre), pre, idx)
+    case Some{+pre}:
+      +xs = emoji_aliases()
+      emoji_ghost.ms(emoji_matches(emoji_table_fuel(xs), xs, pre), pre, idx)
 
 def emoji_ghost(+s: String, +idx: Nat) -> String:
   emoji_ghost.pre(emoji_prefix(s), idx)
@@ -555,7 +572,9 @@ def compose_accept.slash(word: Maybe<&2, String>, +typed: String, +idx: Nat) -> 
 def compose_accept.pre(word: Maybe<&2, String>, +typed: String, +idx: Nat) -> String:
   match word:
     case None{}: compose_accept.slash(command_word(typed), typed, idx)
-    case Some{+pre}: compose_accept.ms(emoji_matches(80n, emoji_aliases(), pre), typed, pre, idx)
+    case Some{+pre}:
+      +xs = emoji_aliases()
+      compose_accept.ms(emoji_matches(emoji_table_fuel(xs), xs, pre), typed, pre, idx)
 
 def compose_accept(+typed: String, +idx: Nat) -> String:
   compose_accept.pre(emoji_prefix(typed), typed, idx)
@@ -569,21 +588,48 @@ def ghost_at(+typed: String, +idx: Nat) -> String:
   +slash = ghost_suffix(typed)
   ghost_at.on(String.is_empty(slash), slash, typed, idx)
 
-# Tab accepts when a picker/ghost is ready; nick CompActive keeps cycling.
-def tab_accept_ok(+typed: String, +idx: Nat) -> Bool:
+# Shared-table ghost for callers that already matched one prefix: slash still
+# wins, but the emoji side reuses the match list instead of re-parsing the
+# draft and rebuilding the alias table.
+def ghost_at.some_slash(empty: Bool, +ms: List<&2, Emoji.Entry>, +slash: String, +pre: String, +idx: Nat) -> String:
+  match empty:
+    case True{}: emoji_ghost.ms(ms, pre, idx)
+    case False{}: slash
+
+def ghost_at.some(+ms: List<&2, Emoji.Entry>, +slash: String, +pre: String, +idx: Nat) -> String:
+  ghost_at.some_slash(String.is_empty(slash), ms, slash, pre, idx)
+
+# One prefix parse, one alias-table build, and one match per Tab probe: the
+# naive shape evaluates emoji_len (parse+table+match) and then ghost_at
+# (slash, plus another parse+table+match). The boolean is unchanged.
+def tab_accept_ok.some(+ms: List<&2, Emoji.Entry>, +typed: String, +pre: String, +idx: Nat) -> Bool:
   Bool.or(
-    Nat.is_gt(emoji_len(typed), 0n),
+    Nat.is_gt(List.length(&2, Emoji.Entry, ms), 0n),
     Bool.or(
       Nat.is_gt(menu_len(typed), 1n),
-      Bool.not(String.is_empty(ghost_at(typed, idx)))))
+      Bool.not(String.is_empty(ghost_at.some(ms, ghost_suffix(typed), pre, idx)))))
+
+def tab_accept_ok.pre(word: Maybe<&2, String>, +typed: String, +idx: Nat) -> Bool:
+  match word:
+    case None{}:
+      Bool.or(
+        Nat.is_gt(menu_len(typed), 1n),
+        Bool.not(String.is_empty(ghost_at(typed, idx))))
+    case Some{+pre}:
+      +xs = emoji_aliases()
+      tab_accept_ok.some(emoji_matches(emoji_table_fuel(xs), xs, pre), typed, pre, idx)
+
+# Tab accepts when a picker/ghost is ready; nick CompActive keeps cycling.
+def tab_accept_ok(+typed: String, +idx: Nat) -> Bool:
+  tab_accept_ok.pre(emoji_prefix(typed), typed, idx)
 
 def is_help.on(exact: Bool, +typed: String) -> Bool:
   match exact:
     case True{}: True{}
-    case False{}: String.starts_with(typed, "/help ")
+    case False{}: Sub.slash_starts(typed, "/help ")
 
 def is_help(+typed: String) -> Bool:
-  is_help.on(String.eq(typed, "/help"), typed)
+  is_help.on(Sub.slash_eq(typed, "/help"), typed)
 
 def help_arg.on(exact: Bool, +typed: String) -> String:
   match exact:
@@ -591,7 +637,7 @@ def help_arg.on(exact: Bool, +typed: String) -> String:
     case False{}: Irc.drop_spaces(String.drop(typed, 6n))
 
 def help_arg(+typed: String) -> String:
-  help_arg.on(String.eq(typed, "/help"), typed)
+  help_arg.on(Sub.slash_eq(typed, "/help"), typed)
 
 def usage_line(+name: String) -> String:
   "/" ++ name ++ "  " ++ usage(name)
@@ -624,7 +670,7 @@ def help_exact(fuel: Nat, xs: List<&2, Sub.SlashRow>, +topic: String) -> String:
       match xs:
         case Nil{}: ""
         case Con{+h, t}:
-          help_exact_step(Irc.ieq(row_name(h), topic), row_name(h), _ => help_exact(p, t, topic))
+          help_exact_step(Sub.slash_eq(row_name(h), topic), row_name(h), _ => help_exact(p, t, topic))
 
 def help_topic_lines.miss(empty: Bool, +line: String) -> List<&2, String>:
   match empty:
@@ -652,6 +698,8 @@ def ghost_ok() -> Bool:
     && String.eq(ghost_suffix("/"), "")
     && String.eq(ghost_suffix("hello"), "")
     && String.eq(ghost_suffix("/join #a"), "")
+    && String.eq(ghost_suffix("/JOIN"), " ")
+    && String.eq(ghost_suffix("/J"), "oin")
 
 def menu_second_ok(xs: List<&2, String>) -> Bool:
   match xs:
@@ -740,10 +788,12 @@ def menu_ok() -> Bool:
   menu_head_ok()
     && menu_unique_ok()
     && menu_many_ok()
+    && menu_many_ok.go(menu_lines("/M"))
     && menu_more_ok.go(menu_lines("/"))
     && menu_sel_ok()
     && String.eq(compose_accept("/j", 0n), "/join")
     && String.eq(compose_accept("/", 1n), "/join ")
+    && String.eq(compose_accept("/J", 0n), "/Join")
     && tab_accept_ok("/j", 0n)
     && tab_accept_ok("/", 1n)
     && Bool.not(tab_accept_ok("hello", 0n))
@@ -767,7 +817,11 @@ def help_miss_ok() -> Bool:
 def help_ok() -> Bool:
   is_help("/help")
     && is_help("/help join")
+    && is_help("/HELP")
+    && is_help("/HELP join")
     && Bool.not(is_help("/helpjoin"))
     && String.eq(help_arg("/help join"), "join")
+    && String.eq(help_arg("/HELP join"), "join")
     && help_one_ok()
+    && help_one_ok.go(help_lines("JOIN", 4n))
     && help_miss_ok()

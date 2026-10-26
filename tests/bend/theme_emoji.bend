@@ -141,12 +141,13 @@ def stored_code() -> String:
 
 def main() -> IO(Unit):
   do IO<Unit>:
-    Unit <- E.must_eq("table has 72 entries", Nat.show(List.length(&2, Emoji.Entry, Emoji.aliases())), "72")
+    Unit <- E.must_eq("table has 84 entries", Nat.show(List.length(&2, Emoji.Entry, Emoji.aliases())), "84")
     Unit <- E.must("every entry resolves to its glyph", each_resolves(Emoji.aliases()))
     Unit <- E.must_eq("new aliases render", rendered(":smile: :check: :sun: :dog: :gem:"), "0[😄 ✅ ☀ 🐶 💎]")
     Unit <- E.must_eq("old table intact", rendered(":eyes: :thumbs-up: :+1: :joy: :heart:"), "0[👀 👍 👍 🤣 ❤]")
     Unit <- E.must_eq("sun is not sunglasses", rendered(":sun:glasses:"), "0[☀glasses:]")
     Unit <- E.must_eq("sunglasses resolves", rendered(":sunglasses:"), "0[😎]")
+    Unit <- E.must_eq("new trio resolves", rendered(":speak_no_evil: :rolling_eyes: :upside_down_face:"), "0[🙊 🙄 🙃]")
     Unit <- E.must_eq("car is not cake", rendered(":car:pet:"), "0[🚗pet:]")
     Unit <- E.must_eq("cry is not crossed_fingers", rendered(":cry:help:"), "0[😢help:]")
     Unit <- E.must_eq("repeated alias", rendered(":smile::smile:"), "0[😄😄]")

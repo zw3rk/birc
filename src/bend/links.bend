@@ -127,6 +127,10 @@ type Search is Data:
   Seek{s: String, code: Bool, previous: String}
   Found{ok: Bool}
 
+# NOTE (D54): marker builds the Seek strings eagerly on the Found path too
+# (Bend args are strict), and each Seek step re-runs take O(remaining).
+# Cost is O(w^2) with w bounded by the 512-byte wire cap (irc.bend LINE_MAX);
+# removing it needs an index-carrying scanner rewrite, deferred as disproportionate.
 def paired.marker(+s: String, +wanted: String, +stop: String, +token: String) -> Search:
   +advance = Nat.max(1n, String.length(token))
   Bool.pick(Search, String.eq(token, wanted), Found{True{}},
@@ -182,6 +186,14 @@ def paired.step(opaque: Bool, code: Bool, +s: String, wanted: String, stop: Stri
         Seek{String.drop(s, 1n), False{}, ""})
     case False{}: paired.noncode(code, s, wanted, stop, previous)
 
+# An empty Seek fails without stepping: the recursive go call lives inside
+# the taken arm (Bend args are eager, so a Bool.pick/keep would step the
+# whole remaining input even on an empty string).
+def paired.go.step(empty: Bool, k: Unit -> Bool) -> Bool:
+  match empty:
+    case True{}: False{}
+    case False{}: k(Unit{})
+
 def paired.go(fuel: Nat, j: Search, +wanted: String, +stop: String) -> Bool:
   match fuel:
     case 0n: False{}
@@ -189,8 +201,7 @@ def paired.go(fuel: Nat, j: Search, +wanted: String, +stop: String) -> Bool:
       match j:
         case Found{ok}: ok
         case Seek{+s, +code, previous}:
-          Bool.pick(Bool, String.is_empty(s), False{},
-            paired.go(p, paired.step(String.eq(wanted, "`"), code, s, wanted, stop, previous), wanted, stop))
+          paired.go.step(String.is_empty(s), _ => paired.go(p, paired.step(String.eq(wanted, "`"), code, s, wanted, stop, previous), wanted, stop))
 
 def paired(+s: String, wanted: String, stop: String) -> Bool:
   paired.go(Nat.add(1n, String.length(s)), Seek{s, False{}, ""}, wanted, stop)
@@ -347,10 +358,14 @@ def render.go(fuel: Nat, state: Scan, +xs: List<&2, Emoji.Entry>) -> List<&2, Ru
             state => render.go(p, state, xs))
 
 # Every step consumes source; raw IRC/history/composer text is never rewritten.
-# Bind the emoji table once per render; alias.go walks that shared list.
-def render(+s: String) -> List<&2, Run>:
-  +xs = aliases()
+# The emoji table is built once per render and shared by the whole scan;
+# callers that lex several segments of one line bind aliases() once and
+# reuse the table through render_with instead of rebuilding it per segment.
+def render_with(+xs: List<&2, Emoji.Entry>, +s: String) -> List<&2, Run>:
   render.go(Nat.add(1n, String.length(s)), Scan{s, 0, "", Nil{}, "", "", Nil{}}, xs)
+
+def render(+s: String) -> List<&2, Run>:
+  render_with(aliases(), s)
 
 def extract_runs(xs: List<&2, Run>) -> List<&2, String>:
   match xs:

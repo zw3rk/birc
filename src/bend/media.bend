@@ -20,17 +20,19 @@ def CAP() -> Nat:
 def PENDING_CAP() -> Nat:
   Nat.add(CAP(), CAP())
 
-def path_part.keep(stop: Bool, h: Char, rest: String) -> String:
+# Query and fragment affect the request, never the extension classification.
+# The stop condition is a parameter and the tail walk lives inside the taken
+# arm, so a query or fragment halts without forcing the rest of the walk.
+def path_part.step(stop: Bool, +h: Char, k: Unit -> String) -> String:
   match stop:
     case True{}: ""
-    case False{}: SCon{h, rest}
+    case False{}: SCon{h, k(Unit{})}
 
-# Query and fragment affect the request, never the extension classification.
 def path_part(s: String) -> String:
   match s:
     case SNil{}: ""
     case SCon{+h, t}:
-      path_part.keep(U32.is_eq(Char.to_u32(h), 63) || U32.is_eq(Char.to_u32(h), 35), h, path_part(t))
+      path_part.step(U32.is_eq(Char.to_u32(h), 63) || U32.is_eq(Char.to_u32(h), 35), h, _ => path_part(t))
 
 def suffix(+s: String, end: String) -> Bool:
   String.starts_with(String.reverse(s), String.reverse(end))
@@ -67,10 +69,12 @@ def image_closed_runs(xs: List<&2, Ws.SRun>) -> Bool:
 def media_run_hit(+previous: String, +exact: String, +tail: List<&2, Ws.SRun>) -> Bool:
   auto_url(exact) || (image_prefix.rev(String.reverse(previous)) && image_closed_runs(tail))
 
-def targets.keep(hit: Bool, url: String, tail: List<&2, String>) -> List<&2, String>:
+# Miss arm is a lazy continuation: Bend evaluates arguments eagerly, so the
+# tail walk must live inside the taken arm (links.bend alias_step idiom).
+def targets.keep(hit: Bool, url: String, k: Unit -> List<&2, String>) -> List<&2, String>:
   match hit:
-    case True{}: url <> tail
-    case False{}: tail
+    case True{}: url <> k(Unit{})
+    case False{}: k(Unit{})
 
 # Consume the same boundary-aware runs the view paints and /open collects:
 # style bytes split runs, so glued forgeries and style-infixed URLs never
@@ -84,7 +88,7 @@ def targets.go(xs: List<&2, Ws.SRun>, +previous: String) -> List<&2, String>:
           targets.go(tail, Bool.pick(String, U32.is_eq(attrs, 0), previous ++ text, ""))
         case Some{+exact}:
           targets.keep(media_run_hit(previous, exact, tail),
-            exact, targets.go(tail, ""))
+            exact, _ => targets.go(tail, ""))
 
 def targets(text: String) -> List<&2, String>:
   List.take(&2, String, targets.go(Ws.url_runs(text), ""), CAP())
@@ -192,15 +196,15 @@ def work_fields(req: Request) -> Maybe<&2, Work>:
 def pending_skip(+req: Request) -> Bool:
   request_block(req) || soft_block(req)
 
-def pending_work_count.keep(block: Bool, rest: Nat) -> Nat:
-  match block:
-    case True{}: rest
-    case False{}: (1n + rest : Nat)
+def pending_work_count.step(skip: Bool, k: Unit -> Nat) -> Nat:
+  match skip:
+    case True{}: k(Unit{})
+    case False{}: (1n + k(Unit{}) : Nat)
 
 def pending_work_count.go(xs: List<&2, Request>) -> Nat:
   match xs:
     case Nil{}: 0n
-    case Con{+h, t}: pending_work_count.keep(pending_skip(h), pending_work_count.go(t))
+    case Con{+h, t}: pending_work_count.step(pending_skip(h), _ => pending_work_count.go(t))
 
 def pending_count(state: State) -> Nat:
   match state:
@@ -286,15 +290,15 @@ def ready_has(xs: List<&2, MediaReady>, +target: Target, +url: String) -> Bool:
     case Nil{}: False{}
     case Con{+h, t}: ready_matches(h, target, url) || ready_has(t, target, url)
 
-def ready_keep(hit: Bool, h: MediaReady, tail: List<&2, MediaReady>) -> List<&2, MediaReady>:
+def ready_keep(hit: Bool, h: MediaReady, k: Unit -> List<&2, MediaReady>) -> List<&2, MediaReady>:
   match hit:
-    case True{}: tail
-    case False{}: h <> tail
+    case True{}: k(Unit{})
+    case False{}: h <> k(Unit{})
 
 def ready_without(xs: List<&2, MediaReady>, +target: Target, +url: String) -> List<&2, MediaReady>:
   match xs:
     case Nil{}: Nil{}
-    case Con{+h, t}: ready_keep(ready_matches(h, target, url), h, ready_without(t, target, url))
+    case Con{+h, t}: ready_keep(ready_matches(h, target, url), h, _ => ready_without(t, target, url))
 
 def request_matches(req: Request, +target: Target, +url: String, +gen: Nat) -> Bool:
   match req:
@@ -319,6 +323,13 @@ def manual_saturated(state: State, +url: String) -> Bool:
       Nat.is_ge(pending_work_count.go(pending), CAP())
         && Bool.not(active_has(active, Manual{}, url, gen) || request_has(pending, Manual{}, url, gen))
 
+# Manual intents clear any automatic ready entry for the same identity; the
+# condition is a parameter and the ready walk lives inside the taken arm.
+def enqueue.on.ready(manual: Bool, +ready: List<&2, MediaReady>, +target: Target, +url: String) -> List<&2, MediaReady>:
+  match manual:
+    case True{}: ready_without(ready, target, url)
+    case False{}: ready
+
 def enqueue.on(hit: Bool, +state: State, +target: Target, +url: String) -> State:
   match hit:
     case False{}: state
@@ -329,7 +340,7 @@ def enqueue.on(hit: Bool, +state: State, +target: Target, +url: String) -> State
           # new Request cannot push total past PENDING_CAP when tags fill it.
           State{on, gen, (ticket + 1n : Nat), active,
             pending_bound(List.append(&2, Request, pending, [Request{target, url, gen, ticket}])),
-            Bool.pick(List<&2, MediaReady>, manual(target), ready_without(ready, target, url), ready), display}
+            enqueue.on.ready(manual(target), ready, target, url), display}
 
 def soft_matches(req: Request, +target: Target, +url: String) -> Bool:
   match req:
@@ -341,15 +352,15 @@ def soft_has(xs: List<&2, Request>, +target: Target, +url: String) -> Bool:
     case Nil{}: False{}
     case Con{+h, t}: soft_matches(h, target, url) || soft_has(t, target, url)
 
-def soft_keep(hit: Bool, h: Request, tail: List<&2, Request>) -> List<&2, Request>:
+def soft_keep(hit: Bool, h: Request, k: Unit -> List<&2, Request>) -> List<&2, Request>:
   match hit:
-    case True{}: tail
-    case False{}: h <> tail
+    case True{}: k(Unit{})
+    case False{}: h <> k(Unit{})
 
 def pending_without_soft(xs: List<&2, Request>, +target: Target, +url: String) -> List<&2, Request>:
   match xs:
     case Nil{}: Nil{}
-    case Con{+h, t}: soft_keep(soft_matches(h, target, url), h, pending_without_soft(t, target, url))
+    case Con{+h, t}: soft_keep(soft_matches(h, target, url), h, _ => pending_without_soft(t, target, url))
 
 # Selected candidates lift soft defer so the same automatic URL can run again
 # once it is on-screen (or otherwise chosen). Hidden policy declines must not
@@ -410,18 +421,18 @@ def candidate_known(state: State, candidate: Candidate) -> Bool:
             || request_has(pending, target, url, gen)
     case _: False{}
 
-def candidate_partition.keep(keep: Bool, candidate: Candidate, tail: List<&2, Candidate>) -> List<&2, Candidate>:
+def candidate_partition.step(keep: Bool, +head: Candidate, k: Unit -> List<&2, Candidate>) -> List<&2, Candidate>:
   match keep:
-    case False{}: tail
-    case True{}: candidate <> tail
+    case True{}: head <> k(Unit{})
+    case False{}: k(Unit{})
 
 def candidate_partition(xs: List<&2, Candidate>, +state: State, +keep_known: Bool) -> List<&2, Candidate>:
   match xs:
     case Nil{}: Nil{}
     case Con{+head, tail}:
       +known = candidate_known(state, head)
-      candidate_partition.keep((known && keep_known) || (Bool.not(known) && Bool.not(keep_known)),
-        head, candidate_partition(tail, state, keep_known))
+      candidate_partition.step((known && keep_known) || (Bool.not(known) && Bool.not(keep_known)),
+        head, _ => candidate_partition(tail, state, keep_known))
 
 def candidate_has(xs: List<&2, Candidate>, +target: Target, +url: String) -> Bool:
   match xs:
@@ -453,7 +464,7 @@ def visible_ready(xs: List<&2, MediaReady>, +selected: List<&2, Candidate>, +kee
     case Con{MediaReady{+target, +url, token}, tail}:
       +hit = candidate_has(selected, target, url)
       ready_keep(Bool.not((hit && keep_selected) || (Bool.not(hit) && Bool.not(keep_selected))),
-        MediaReady{target, url, token}, visible_ready(tail, selected, keep_selected))
+        MediaReady{target, url, token}, _ => visible_ready(tail, selected, keep_selected))
 
 # The completion FIFO remains unchanged. Refresh its bounded priority only for
 # this visible-admission path, so a new preview evicts a hidden result first.
@@ -556,10 +567,10 @@ def target_in_bufs(bufs: List<&2, Cl.Buffer>, +target: Target, +url: String) -> 
 def alive(+client: Cl.Client, target: Target, url: String) -> Bool:
   target_in_bufs(Cl.client_bufs(client), target, url)
 
-def pending_keep(hit: Bool, h: Request, tail: List<&2, Request>) -> List<&2, Request>:
+def pending_keep(hit: Bool, h: Request, k: Unit -> List<&2, Request>) -> List<&2, Request>:
   match hit:
-    case True{}: h <> tail
-    case False{}: tail
+    case True{}: h <> k(Unit{})
+    case False{}: k(Unit{})
 
 def keep_pending(xs: List<&2, Request>, +client: Cl.Client, +gen: Nat) -> List<&2, Request>:
   match xs:
@@ -569,19 +580,19 @@ def keep_pending(xs: List<&2, Request>, +client: Cl.Client, +gen: Nat) -> List<&
         # Soft and sticky fences are identity-scoped: keep while the target
         # lives across same-target gen bumps. reset / dial clear pending.
         case SoftFence{target, url, _}:
-          pending_keep(alive(client, target, url), h, keep_pending(t, client, gen))
+          pending_keep(alive(client, target, url), h, _ => keep_pending(t, client, gen))
         case StickyFence{target, url}:
-          pending_keep(alive(client, target, url), h, keep_pending(t, client, gen))
+          pending_keep(alive(client, target, url), h, _ => keep_pending(t, client, gen))
         case Request{target, url, g, _}:
           pending_keep(alive(client, target, url) && Nat.is_eq(g, gen), h,
-            keep_pending(t, client, gen))
+            _ => keep_pending(t, client, gen))
 
 def keep_ready(xs: List<&2, MediaReady>, +client: Cl.Client) -> List<&2, MediaReady>:
   match xs:
     case Nil{}: Nil{}
     case Con{+h, t}:
       match h:
-        case MediaReady{target, url, _}: ready_keep(Bool.not(alive(client, target, url)), h, keep_ready(t, client))
+        case MediaReady{target, url, _}: ready_keep(Bool.not(alive(client, target, url)), h, _ => keep_ready(t, client))
 
 def maintain(state: State, +client: Cl.Client) -> State:
   match state:
@@ -617,11 +628,19 @@ def ready_drop_zero(xs: List<&2, MediaReady>) -> List<&2, MediaReady>:
 
 # Prefer dropping a token-zero slot (same as reject_full.ready) before
 # List.take can FIFO-evict a live nonzero retained token.
+def complete.ready.fit(fit: Bool, +target: Target, +url: String, +token: U32, +base: List<&2, MediaReady>) -> List<&2, MediaReady>:
+  match fit:
+    case True{}: List.take(&2, MediaReady, MediaReady{target, url, token} <> base, CAP())
+    case False{}: List.take(&2, MediaReady, MediaReady{target, url, token} <> ready_drop_zero(base), CAP())
+
 def complete.ready(+target: Target, +url: String, +token: U32, +ready: List<&2, MediaReady>) -> List<&2, MediaReady>:
   +base = ready_without(ready, target, url)
-  +fit = Bool.pick(List<&2, MediaReady>, Nat.is_lt(List.length(&2, MediaReady, base), CAP()),
-    base, ready_drop_zero(base))
-  List.take(&2, MediaReady, MediaReady{target, url, token} <> fit, CAP())
+  complete.ready.fit(Nat.is_lt(List.length(&2, MediaReady, base), CAP()), target, url, token, base)
+
+def complete.on.ready(accepted: Bool, +target: Target, +url: String, token: U32, +ready: List<&2, MediaReady>) -> List<&2, MediaReady>:
+  match accepted:
+    case True{}: complete.ready(target, url, token, ready)
+    case False{}: ready
 
 def complete.on(hit: Bool, accepted: Bool, +state: State, token: U32) -> State:
   match hit:
@@ -629,8 +648,7 @@ def complete.on(hit: Bool, accepted: Bool, +state: State, token: U32) -> State:
     case True{}:
       match state:
         case State{on, gen, ticket, Some{Request{target, url, _, _}}, pending, +ready, display}:
-          State{on, gen, ticket, None{}, pending, Bool.pick(List<&2, MediaReady>, accepted,
-            complete.ready(target, url, token, ready), ready), display}
+          State{on, gen, ticket, None{}, pending, complete.on.ready(accepted, target, url, token, ready), display}
         case _: state
 
 def complete(+state: State, +client: Cl.Client, +gen: Nat, +ticket: Nat, +url: String, token: U32) -> State:
@@ -668,16 +686,21 @@ def reject_full.ready.insert(room: Bool, +target: Target, +url: String, +ready: 
 # never FIFO-evicts a nonzero retained token: make room by dropping another
 # zero when needed; if ready is already CAP nonzero, ready insert is skipped
 # and reject_full.block records a StickyFence in pending.
+def reject_full.ready.fit(fit: Bool, +target: Target, +url: String, +base: List<&2, MediaReady>) -> List<&2, MediaReady>:
+  match fit:
+    case True{}: reject_full.ready.insert(True{}, target, url, base)
+    case False{}:
+      +dropped = ready_drop_zero(base)
+      reject_full.ready.insert(Nat.is_lt(List.length(&2, MediaReady, dropped), CAP()), target, url, dropped)
+
 def reject_full.ready(+target: Target, +url: String, +ready: List<&2, MediaReady>) -> List<&2, MediaReady>:
   +base = ready_without(ready, target, url)
-  +fit = Bool.pick(List<&2, MediaReady>, Nat.is_lt(List.length(&2, MediaReady, base), CAP()),
-    base, ready_drop_zero(base))
-  reject_full.ready.insert(Nat.is_lt(List.length(&2, MediaReady, fit), CAP()), target, url, fit)
+  reject_full.ready.fit(Nat.is_lt(List.length(&2, MediaReady, base), CAP()), target, url, base)
 
-def pending_block_keep(hit: Bool, h: Request, tail: List<&2, Request>) -> List<&2, Request>:
+def pending_block_keep(hit: Bool, h: Request, k: Unit -> List<&2, Request>) -> List<&2, Request>:
   match hit:
-    case True{}: tail
-    case False{}: h <> tail
+    case True{}: k(Unit{})
+    case False{}: h <> k(Unit{})
 
 def pending_without_block(xs: List<&2, Request>, +target: Target, +url: String) -> List<&2, Request>:
   match xs:
@@ -686,9 +709,9 @@ def pending_without_block(xs: List<&2, Request>, +target: Target, +url: String) 
       match h:
         case StickyFence{tg, u}:
           pending_block_keep(target_eq(tg, target) && String.eq(u, url), h,
-            pending_without_block(t, target, url))
+            _ => pending_without_block(t, target, url))
         case _:
-          pending_block_keep(False{}, h, pending_without_block(t, target, url))
+          pending_block_keep(False{}, h, _ => pending_without_block(t, target, url))
 
 # StickyFence outside the CAP ready FIFO. request_has blocks automatic
 # relaunch; take_work never promotes it to the physical worker. Cleared on
@@ -762,12 +785,17 @@ def admit_retained(+state: State) -> List<&2, U32>:
 def admit_room(+state: State) -> Bool:
   Nat.is_lt(List.length(&2, U32, admit_retained(state)), CAP())
 
+def token_from.step(hit: Bool, token: U32, k: Unit -> U32) -> U32:
+  match hit:
+    case True{}: token
+    case False{}: k(Unit{})
+
 def token_from(xs: List<&2, MediaReady>, +target: Target, +url: String) -> U32:
   match xs:
     case Nil{}: 0
     case Con{+h, t}:
       match h:
-        case MediaReady{_, _, +token}: Bool.pick(U32, ready_matches(h, target, url), token, token_from(t, target, url))
+        case MediaReady{_, _, +token}: token_from.step(ready_matches(h, target, url), token, _ => token_from(t, target, url))
 
 def token(state: State, target: Target, url: String) -> U32:
   match state:
@@ -777,10 +805,10 @@ def token(state: State, target: Target, url: String) -> U32:
 # Fullscreen entry target (C8 live): the newest ready result with an accepted
 # nonzero token whose source is still live. Ready is newest-first, so the head
 # hit wins. Unsupported terminals pick nothing; callers revalidate anyway.
-def fullscreen_pick.keep(hit: Bool, h: MediaReady, rest: Maybe<&2, MediaReady>) -> Maybe<&2, MediaReady>:
+def fullscreen_pick.step(hit: Bool, h: MediaReady, k: Unit -> Maybe<&2, MediaReady>) -> Maybe<&2, MediaReady>:
   match hit:
     case True{}: Some{h}
-    case False{}: rest
+    case False{}: k(Unit{})
 
 def fullscreen_pick.go(xs: List<&2, MediaReady>, +client: Cl.Client) -> Maybe<&2, MediaReady>:
   match xs:
@@ -788,7 +816,7 @@ def fullscreen_pick.go(xs: List<&2, MediaReady>, +client: Cl.Client) -> Maybe<&2
     case Con{+h, t}:
       match h:
         case MediaReady{+target, +url, +token}:
-          fullscreen_pick.keep(Bool.not(U32.is_zero(token)) && alive(client, target, url), h, fullscreen_pick.go(t, client))
+          fullscreen_pick.step(Bool.not(U32.is_zero(token)) && alive(client, target, url), h, _ => fullscreen_pick.go(t, client))
 
 def fullscreen_pick(+state: State, +client: Cl.Client) -> Maybe<&2, MediaReady>:
   match state:
@@ -798,15 +826,15 @@ def fullscreen_pick(+state: State, +client: Cl.Client) -> Maybe<&2, MediaReady>:
 def urls_ready(xs: List<&2, MediaReady>, +target: Target) -> List<&2, String>:
   match xs:
     case Nil{}: Nil{}
-    case Con{MediaReady{t, url, _}, tail}: targets.keep(target_eq(t, target), url, urls_ready(tail, target))
+    case Con{MediaReady{t, url, _}, tail}: targets.keep(target_eq(t, target), url, _ => urls_ready(tail, target))
 
 def urls_pending(xs: List<&2, Request>, +target: Target, +gen: Nat) -> List<&2, String>:
   match xs:
     case Nil{}: Nil{}
     case Con{Request{t, url, g, _}, tail}:
-      targets.keep(target_eq(t, target) && Nat.is_eq(g, gen), url, urls_pending(tail, target, gen))
+      targets.keep(target_eq(t, target) && Nat.is_eq(g, gen), url, _ => urls_pending(tail, target, gen))
     case Con{StickyFence{t, url}, tail}:
-      targets.keep(target_eq(t, target), url, urls_pending(tail, target, gen))
+      targets.keep(target_eq(t, target), url, _ => urls_pending(tail, target, gen))
     case Con{SoftFence{_, _, _}, tail}:
       urls_pending(tail, target, gen)
 

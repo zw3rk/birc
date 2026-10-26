@@ -1444,11 +1444,24 @@ def anchored_rows.step(is_recon: Bool, +h: BodyRow, +after: Nat, +text_chars: Na
     case True{}: AnchoredRow{h, Cl.ScrollAt{after, Nat.add(text_chars, 1n)}, line} <> k(text_chars)
     case False{}: anchored_rows.media(media_row(h), h, after, text_chars, media_left, line, k)
 
-def anchored_rows(rows: List<&2, BodyRow>, +after: Nat, +text_chars: Nat, +line: Cl.Line) -> List<&2, AnchoredRow>:
+# media_count(t) per row re-walks every tail, so counting inside the
+# recursion is quadratic in the window. Count media rows once up front and
+# thread the tail remainder down: the head's share is the suffix count minus
+# its own media row, which is exactly the count the old per-row call made.
+def anchored_rows.rest(is_media: Bool, +suffix_media: Nat) -> Nat:
+  match is_media:
+    case True{}: Nat.sub(suffix_media, 1n)
+    case False{}: suffix_media
+
+def anchored_rows.go(+rows: List<&2, BodyRow>, +after: Nat, +text_chars: Nat, +suffix_media: Nat, +line: Cl.Line) -> List<&2, AnchoredRow>:
   match rows:
     case Nil{}: Nil{}
     case Con{+h, +t}:
-      anchored_rows.step(recon_row(h), h, after, text_chars, media_count(t), line, next => anchored_rows(t, after, next, line))
+      +left = anchored_rows.rest(media_row(h), suffix_media)
+      anchored_rows.step(recon_row(h), h, after, text_chars, left, line, next => anchored_rows.go(t, after, next, left, line))
+
+def anchored_rows(+rows: List<&2, BodyRow>, +after: Nat, +text_chars: Nat, +line: Cl.Line) -> List<&2, AnchoredRow>:
+  anchored_rows.go(rows, after, text_chars, media_count(rows), line)
 
 def anchored_line(+rows: List<&2, BodyRow>, +after: Nat, +line: Cl.Line) -> List<&2, AnchoredRow>:
   anchored_rows(rows, after, rows_text_chars(rows), line)
@@ -1570,11 +1583,19 @@ def viewport_end.top(top: Bool, +rows: List<&2, AnchoredRow>, +height: Nat, +cou
     case False{}: clamped
     case True{}: viewport_end.top.on(Nat.is_gt(head_after(rows), after), rows, height, count)
 
+# Bool.pick evaluates both arms eagerly, so the live-bottom case would still
+# walk the window in anchor_end. Branch on a parameter match instead: the
+# anchor walk runs only for a parked (non-bottom) scroll.
+def viewport_end.raw(bottom: Bool, +count: Nat, +rows: List<&2, AnchoredRow>, want: Cl.Scroll) -> Nat:
+  match bottom:
+    case True{}: count
+    case False{}: anchor_end(rows, want, 0n)
+
 def viewport_end(+rows: List<&2, AnchoredRow>, +height: Nat, want: Cl.Scroll) -> Nat:
   match want:
     case Cl.ScrollAt{+after, +tail}:
       +count = List.length(&2, AnchoredRow, rows)
-      +raw = Bool.pick(Nat, Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), count, anchor_end(rows, Cl.ScrollAt{after, tail}, 0n))
+      +raw = viewport_end.raw(Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), count, rows, Cl.ScrollAt{after, tail})
       +clamped = Nat.sub(count, clamp_scroll(Nat.sub(count, raw), count, height))
       viewport_end.top(Nat.is_le(raw, height) && Nat.is_ge(count, height), rows, height, count, clamped, after)
 
@@ -1591,6 +1612,8 @@ def visible_anchored(+rows: List<&2, AnchoredRow>, +height: Nat, want: Cl.Scroll
 # Newest-first suffix for the live bottom. raw_lines stays oldest-first.
 # SCROLL_CAP + one synthetic preview row + PEND_MAX fits under this fuel;
 # a longer list falls back to a full reverse rather than showing the wrong tail.
+# Budget: 1024 + 1 + 32 = 1057 live rows fit under 2048 with headroom; the
+# suffix walk never scans the whole buffer history to paint the viewport.
 def rev_tail_fuel() -> Nat:
   2048n
 
@@ -1958,7 +1981,9 @@ def paint_recent_tagged(
 
 # Cover extra newest-first lines so a zero-row newest (empty + known URL
 # with no link span) cannot starve the row budget. paint_recent_more still
-# stops after `height` expanded rows.
+# stops after `height` expanded rows. Budget: height+64 tagged lines, so the
+# tag walk stays proportional to the viewport even when muted or filtered
+# rows paint nothing.
 def recent_cover(+height: Nat) -> Nat:
   Nat.add(height, 64n)
 
@@ -2348,22 +2373,37 @@ def row_anchor_at(rows: List<&2, AnchoredRow>, i: Nat) -> Cl.Scroll:
         case 0n: anchor
         case 1n+p: row_anchor_at(t, p)
 
+# Same eager-pick idiom as viewport_end: the row walk runs only when the
+# target is not the live bottom.
+def moved_anchor.pick(bottom: Bool, +rows: List<&2, AnchoredRow>, +end: Nat) -> Cl.Scroll:
+  match bottom:
+    case True{}: Cl.ScrollAt{0n, 0n}
+    case False{}: row_anchor_at(rows, Nat.sub(end, 1n))
+
 def moved_anchor(+rows: List<&2, AnchoredRow>, +height: Nat, +want: Cl.Scroll, +up: Nat, +dn: Nat) -> Cl.Scroll:
   +count = List.length(&2, AnchoredRow, rows)
   +current = viewport_end(rows, height, want)
   +target = Cl.clamp_nat(Nat.sub(Nat.add(current, dn), up), count)
   +end = Nat.sub(count, clamp_scroll(Nat.sub(count, target), count, height))
-  Bool.pick(Cl.Scroll, Nat.is_eq(end, count), Cl.ScrollAt{0n, 0n}, row_anchor_at(rows, Nat.sub(end, 1n)))
+  moved_anchor.pick(Nat.is_eq(end, count), rows, end)
 
 def shift_len(bottom: Bool, +count: Nat, +end: Nat) -> Nat:
   match bottom:
     case True{}: count
     case False{}: end
 
+# Function arguments evaluate eagerly, so passing anchor_end(...) to shift_len
+# walks the window even at the live bottom. Branch first: bottom reuses the
+# row count, and only a parked scroll pays for the anchor walk.
+def shift_len_of.at(bottom: Bool, +rows: List<&2, AnchoredRow>, want: Cl.Scroll, +count: Nat) -> Nat:
+  match bottom:
+    case True{}: shift_len(True{}, count, 0n)
+    case False{}: shift_len(False{}, count, anchor_end(rows, want, 0n))
+
 def shift_len_of(+rows: List<&2, AnchoredRow>, want: Cl.Scroll) -> Nat:
   match want:
     case Cl.ScrollAt{+after, +tail}:
-      shift_len(Bool.and(Nat.is_eq(after, 0n), Nat.is_eq(tail, 0n)), List.length(&2, AnchoredRow, rows), anchor_end(rows, want, 0n))
+      shift_len_of.at(Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), rows, Cl.ScrollAt{after, tail}, List.length(&2, AnchoredRow, rows))
 
 # Upward move with target==0: stay on the oldest painted row. Never snap to
 # live {0,0} or height-1 away from oldest.
@@ -2412,6 +2452,10 @@ def scroll_rows.join(walk: NewerWalk, +older: List<&2, AnchoredRow>) -> NewerWal
 # the newest logical line — fuel-bounded, not a hard dn+32 line cap.
 # Copy only a page of newer lines, plus a short run of hidden rows. When that
 # whole slice paints nothing, shift_anchor_of.after advances `after` by `visited`.
+# Window budget: at most up+1 older tagged lines plus the newer_go slice
+# capped at up+dn+64 lines, with the same rev_tail_fuel as the live bottom.
+# The walk never scales with buffer length; spare capacity covers muted or
+# filtered rows that paint nothing inside the slice.
 def scroll_rows(+newest: List<&2, Cl.Line>, +after: Nat, +up: Nat, +dn: Nat, +name: String, +w: U32, +show_ts: Bool, +mutes: List<&2, String>, +joins: Bool, +nicks: Bool, +server: String, +boxed: List<&2, PaintOpts>) -> NewerWalk:
   +cap = Nat.add(Nat.add(up, dn), 64n)
   # Cover is the anchor line plus `up` older lines (up=0 still tags one line).
@@ -3678,6 +3722,33 @@ def paint_body_ops(r: Rect, +xs: List<&2, BodyRow>, +boxed: List<&2, PaintOpts>)
       +n = U32.from_nat(List.length(&2, BodyRow, xs))
       paint_body_ops_go(List.length(&2, BodyRow, xs), xs, inner_x(x), body_y0(y, h, n), boxed)
 
+# A typing notice gets its own row instead of sharing the last chat row
+# (D63): when typers is non-empty the history box yields its bottom row and
+# the notice paints there. Bust rows and overlays keep their boxes; only the
+# chat rows shrink by one while typing. Anchors are message-based, so the
+# transient one-row shift cannot desync scroll position.
+def typing_line(+xs: List<&2, String>) -> String:
+  match xs:
+    case Nil{}: ""
+    case Con{+h, t}: typing_notice(h <> t)
+
+def paint_body_noticed.split(+r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+  match r:
+    case Rect{x, y, w, h}:
+      List.append(&2, DrawOp,
+        paint_body_ops(body_hist_rect(Rect{x, y, w, U32.sub(h, 1)}), bod, boxed),
+        op_text(Rect{x, U32.add(y, U32.sub(body_hist_h(h), 1)), w, h}, paint_dim(boxed), notice) <> Nil{})
+
+def paint_body_noticed.go(plain: Bool, +r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+  match plain:
+    case True{}: paint_body_ops(body_hist_rect(r), bod, boxed)
+    case False{}: paint_body_noticed.split(r, bod, notice, boxed)
+
+def paint_body_noticed(+r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+  match r:
+    case Rect{x, y, w, h}:
+      paint_body_noticed.go(Bool.or(String.is_empty(notice), Bool.not(U32.is_gt(h, 1))), Rect{x, y, w, h}, bod, notice, boxed)
+
 def paint_nick_go(xs: List<&2, String>, ok: Bool, +x: U32, +y: U32, +w: U32, +fg: U32, +max_y: U32, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   match xs:
     case Nil{}: Nil{}
@@ -3710,11 +3781,13 @@ def paint_view_kept(ops: List<&2, DrawOp>) -> List<&2, DrawOp>:
   ops
 
 # The cheat sheet used to occupy a reserved row under the box. That row is the
-# box border now, so nothing is painted there.
+# box border now, so nothing is painted there. A typing notice still gets its
+# own row (D63): the history box yields its bottom row while typers is
+# non-empty instead of painting over the last chat line.
 def paint_view_rest(+br: Rect, +bod: List<&2, BodyRow>, +preview: String, +nr: Rect, +title: String, +nicks: List<&2, String>, +sr: Rect, +st: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   paint_view_kept(
     List.append(&2, DrawOp, image_ops(br, preview),
-      List.append(&2, DrawOp, paint_body_ops(body_hist_rect(br), bod, boxed),
+      List.append(&2, DrawOp, paint_body_noticed(br, bod, st, boxed),
         paint_nicks(nr, title, nicks, boxed))))
 
 def paint_view_ops(
@@ -3766,19 +3839,21 @@ def paint_view_ops_split(
   +ntitle: String,
   +nicks: List<&2, String>,
   +status: String,
+  +typers: List<&2, String>,
   show_ts: Bool
 ) -> List<&2, DrawOp>:
   match lay0:
     case Lay{tabs, user, body, nicks_rect, status_rect}:
+      +notice = typing_line(typers)
       List.append(&2, DrawOp,
         op_tabs(tabs, U32.from_nat(active), names, alerts, bell, bell_seq)
           <> List.append(&2, DrawOp, paint_header(user, nick, server, net, boxed),
                op_split(body, axis)
                  <> List.append(&2, DrawOp, paint_body_box_role(r1, title1, boxed, split_body_role(r1, r2, True{})),
                       List.append(&2, DrawOp, image_ops(r1, preview1),
-                        List.append(&2, DrawOp, paint_body_ops(body_hist_rect(r1), body1, boxed),
+                        List.append(&2, DrawOp, paint_body_noticed(r1, body1, notice, boxed),
                           List.append(&2, DrawOp, paint_body_box_role(r2, title2, boxed, split_body_role(r1, r2, False{})),
-                            List.append(&2, DrawOp, image_ops(r2, preview2), paint_body_ops(body_hist_rect(r2), body2, boxed))))))),
+                            List.append(&2, DrawOp, image_ops(r2, preview2), paint_body_noticed(r2, body2, notice, boxed))))))),
         List.append(&2, DrawOp, paint_nicks(nicks_rect, ntitle, nicks, boxed),
           List.append(&2, DrawOp, op_text(status_rect, paint_dim(boxed), status) <> Nil{}, paint_split_composer(r1, r2, nick, boxed, show_ts))))
 
@@ -3822,7 +3897,7 @@ def paint_view_single.got(
     case (+bod, reused):
       bt nt = body_title_of(b) nicks_title_of(b)
       +ns = nicks_list_of(b)
-      (ViewModel{paint_view_ops(boxed, lay0, nick, server, net, active, names, alerts, bell, bell_seq, bod, preview_path_legacy(opt_legacy(boxed), b), bt, nt, ns, status_or_typing(status_of.buf(b), typers), ts), view_input(draft)}, bod, reused)
+      (ViewModel{paint_view_ops(boxed, lay0, nick, server, net, active, names, alerts, bell, bell_seq, bod, preview_path_legacy(opt_legacy(boxed), b), bt, nt, ns, typing_line(typers), ts), view_input(draft)}, bod, reused)
 
 def paint_view_single(+boxed: List<&2, PaintOpts>, +cl: Cl.Client, +rows: U32, +cols: U32, +draft: String, +net: String, +typers: List<&2, String>, +hold: List<&2, ScrollHold>) -> ViewModel & List<&2, BodyRow> & Bool:
   match cl:
@@ -3868,7 +3943,7 @@ def paint_view_split_rects.rest(
 ) -> List<&2, DrawOp> & List<&2, BodyRow> & Bool:
   match p2:
     case (+body2, r2ok):
-      (paint_view_ops_split(boxed, lay0, axis, nick, server, net, active, tabs, alerts, bell, bell_seq, r1, split_title(b1, focused, 0), body1, preview_path_legacy(opt_legacy(boxed), b1), r2, split_title(b2, focused, 1), body2, preview_path_legacy(opt_legacy(boxed), b2), ntitle, nicks, status_or_typing(status, typers), show_ts), List.append(&2, BodyRow, body1, body2), flag_or(r1ok, r2ok))
+      (paint_view_ops_split(boxed, lay0, axis, nick, server, net, active, tabs, alerts, bell, bell_seq, r1, split_title(b1, focused, 0), body1, preview_path_legacy(opt_legacy(boxed), b1), r2, split_title(b2, focused, 1), body2, preview_path_legacy(opt_legacy(boxed), b2), ntitle, nicks, status_or_typing(status, typers), typers, show_ts), List.append(&2, BodyRow, body1, body2), flag_or(r1ok, r2ok))
 
 def paint_view_split_rects.both(
   +boxed: List<&2, PaintOpts>,

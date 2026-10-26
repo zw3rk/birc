@@ -9,6 +9,12 @@
 # Bounds: at most ENTRY_CAP entries (one per buffer slot), TEXT_BYTES UTF-8
 # bytes per draft, LINE_CAP composition lines per draft. `set` rejects
 # over-bound text and keeps the previous draft; it never truncates.
+# TEXT_BYTES (4096) is the multiline-capable store bound, not the wire
+# bound: one IRC message carries at most LINE_MAX content bytes, so a long
+# draft line rides the wire as several chunks via message_parts. Text the
+# store cannot hold cannot ride either: over-bound submits warn explicitly
+# with over_text_note and emit no wire, instead of flooding the wire with
+# chunks no draft, recall entry, or reseed could ever name back.
 # Separators are ASCII CR, CRLF, and LF, which cannot occur inside a UTF-8
 # multibyte sequence, so splitting never breaks a cluster. Wire chunks reuse
 # message_chunks.split at TimUI common-cluster boundaries, and credential
@@ -140,6 +146,16 @@ def nonempty(+xs: List<&2, String>) -> List<&2, String>:
 
 def fits_bytes(+text: String) -> Bool:
   Nat.is_le(Irc.utf8_len(text), TEXT_BYTES())
+
+# Over-bound text warns explicitly at submit time (submit_lines below):
+# the composer keeps the text and no wire is emitted, so the 4096-byte
+# store bound and the ~510-byte wire chunking stay aligned by admission
+# rather than by silent truncation or an unbounded chunk flood.
+def over_text(+text: String) -> Bool:
+  Bool.not(fits_bytes(text))
+
+def over_text_note() -> String:
+  "message exceeds " ++ Nat.show(TEXT_BYTES()) ++ "-byte draft limit"
 
 def fits_lines(+text: String) -> Bool:
   Nat.is_le(List.length(&2, String, split_lines(text)), LINE_CAP())
@@ -789,10 +805,17 @@ def submit_lines.resolved(+cl: Cl.Client, +bi: Nat, +target: String, +lines: Lis
     case False{}:
       (Sub.echo_err(cl, "read-only buffer"), Nil{})
 
+def submit_lines.over(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool, over: Bool) -> Cl.Client & List<&2, String>:
+  match over:
+    case True{}:
+      (Sub.echo_err(cl, over_text_note()), Nil{})
+    case False{}:
+      +lines = nonempty(split_lines(text))
+      submit_lines.resolved(cl, bi, target, lines, notice,
+        Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))))
+
 def submit_lines(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool) -> Cl.Client & List<&2, String>:
-  +lines = nonempty(split_lines(text))
-  submit_lines.resolved(cl, bi, target, lines, notice,
-    Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))))
+  submit_lines.over(cl, bi, target, text, notice, over_text(text))
 
 def submit_lines_echo.gated(+cl: Cl.Client, +bi: Nat, +target: String, +lines: List<&2, String>, +notice: Bool, ready: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
   match ready:
@@ -822,10 +845,17 @@ def submit_lines_echo.resolved(+cl: Cl.Client, +bi: Nat, +target: String, +lines
     case False{}:
       (Sub.echo_err(cl, "read-only buffer"), Nil{})
 
+def submit_lines_echo.over(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool, +echo_ok: Bool, over: Bool) -> Cl.Client & List<&2, String>:
+  match over:
+    case True{}:
+      (Sub.echo_err(cl, over_text_note()), Nil{})
+    case False{}:
+      +lines = nonempty(split_lines(text))
+      submit_lines_echo.resolved(cl, bi, target, lines, notice,
+        Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))), echo_ok)
+
 def submit_lines_echo(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
-  +lines = nonempty(split_lines(text))
-  submit_lines_echo.resolved(cl, bi, target, lines, notice,
-    Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))), echo_ok)
+  submit_lines_echo.over(cl, bi, target, text, notice, echo_ok, over_text(text))
 
 # ---- modal ------------------------------------------------------------
 # A pending modal (upload consent) blocks Enter in session; the typed text

@@ -707,6 +707,13 @@ type NumRow is Data:
 def num_rows() -> List<&2, NumRow>:
   NumRow{1, N001{}} <> NumRow{332, N332{}} <> NumRow{353, N353{}} <> NumRow{366, N366{}} <> NumRow{433, N433{}} <> NumRow{437, N433{}} <> Nil{}
 
+# A code match returns its kind without walking the tail (same eager-args
+# rationale as has_kind.step in view_laws.bend).
+def num_kind.step(hit: Bool, k: NumK, rest: Unit -> NumK) -> NumK:
+  match hit:
+    case True{}: k
+    case False{}: rest(Unit{})
+
 def num_kind(xs: List<&2, NumRow>, +n: U32) -> NumK:
   match xs:
     case Nil{}:
@@ -714,7 +721,7 @@ def num_kind(xs: List<&2, NumRow>, +n: U32) -> NumK:
     case Con{row, t}:
       match row:
         case NumRow{+code, +k}:
-          Bool.pick(NumK, U32.is_eq(code, n), k, num_kind(t, n))
+          num_kind.step(U32.is_eq(code, n), k, _ => num_kind(t, n))
 
 def feed_hidden() -> String:
   "[channel key hidden]"
@@ -854,9 +861,10 @@ def feed_join_with.gated(+cl: Cl.Client, +isc: Cl.Iso, +m: Irc.Message, self: Bo
 
 # Labeled-response ACK: a bare or labeled server acknowledgement renders one
 # server-log info line so the user can correlate it visually with the labeled
-# request. Overlong ACK arities stay on the unknown-command path. The label
-# arrives from the wire tags (Message carries no tags); both dispatchers
-# thread it from raw_tags at the feed entry.
+# request. Only a validated server source is acknowledged: a peer-forged or
+# prefix-less ACK, like an overlong arity, stays on the unknown-command path.
+# The label arrives from the wire tags (Message carries no tags); both
+# dispatchers thread it from raw_tags at the feed entry.
 def ack_text.labeled(+label: String) -> String:
   "acknowledged " ++ label
 
@@ -877,8 +885,8 @@ def feed_ack.render(+cl: Cl.Client, +m: Irc.Message, label: Maybe<&2, String>, o
     case False{}:
       feed_unk(cl, m)
 
-def feed_ack(+cl: Cl.Client, +m: Irc.Message, label: Maybe<&2, String>) -> Cl.Client:
-  feed_ack.render(cl, m, label, ack_ok(m))
+def feed_ack(+cl: Cl.Client, +prefix: String, +m: Irc.Message, label: Maybe<&2, String>) -> Cl.Client:
+  feed_ack.render(cl, m, label, CapNotify.server_source(prefix) && ack_ok(m))
 
 # IRCv3 standard replies: FAIL/WARN/NOTE render on the server log; anything
 # malformed or peer-forged falls through to the unknown-command path.
@@ -940,7 +948,7 @@ def feed_msg_with.cmd(+cl: Cl.Client, +isc: Cl.Iso, +prefix: String, +m: Irc.Mes
     case Irc.Tagmsg{}:
       cl
     case Irc.Ack{}:
-      feed_ack(cl, m, label)
+      feed_ack(cl, prefix, m, label)
     case Irc.Error{}:
       Cl.client_log(cl, 0n, Cl.Error{}, fmt_err(Irc.msg_param(m, 0n)))
     case Irc.StdFail{}:

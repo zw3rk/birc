@@ -54,12 +54,17 @@ def octet_both(+s: String, v_ok: Bool) -> Bool:
 def octet_ok(+s: String) -> Bool:
   octet_both(s, octet_val(U32.read(s)))
 
+def ipv4_go.step(ok: Bool, k: Unit -> Bool) -> Bool:
+  match ok:
+    case True{}: k(Unit{})
+    case False{}: False{}
+
 def ipv4_go(xs: List<&2, String>, +n: U32) -> Bool:
   match xs:
     case Nil{}:
       U32.is_eq(n, 4)
     case Con{+h, t}:
-      Bool.pick(Bool, octet_ok(h), ipv4_go(t, U32.add(n, 1)), False{})
+      ipv4_go.step(octet_ok(h), _ => ipv4_go(t, U32.add(n, 1)))
 
 def is_ipv4_xs(+xs: List<&2, String>) -> Bool:
   ipv4_go(xs, 0)

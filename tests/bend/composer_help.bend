@@ -68,6 +68,21 @@ def keys_up(+typed: String) -> Sess.Keys:
 def draft_of(trip: Sess.Session & Sess.NetCmd & Bool) -> String:
   Sess.session_draft(st_of(trip))
 
+# Recall shelves the typed draft on the first step back and restores it on
+# the step past the newest entry.
+def recall_stash_ok() -> Bool:
+  +seeded = st_of(Sess.step_enter(st_of(Sess.step_enter(demo(), "first")), "second"))
+  +typed = st_of(Sess.step_keys(seeded, keys_code("draft", 0)))
+  +up1 = st_of(Sess.step_keys(typed, keys_up("draft")))
+  +up2 = st_of(Sess.step_keys(up1, keys_up("second")))
+  +dn1 = st_of(Sess.step_keys(up2, keys_down("first")))
+  +dn2 = st_of(Sess.step_keys(dn1, keys_down("second")))
+  String.eq(Sess.session_draft(typed), "draft")
+    && String.eq(Sess.session_draft(up1), "second")
+    && String.eq(Sess.session_draft(up2), "first")
+    && String.eq(Sess.session_draft(dn1), "second")
+    && String.eq(Sess.session_draft(dn2), "draft")
+
 def picked(trip: Sess.Session & Sess.NetCmd & Bool, +want: String) -> Bool:
   match trip:
     case (+st, _, _):
@@ -120,6 +135,9 @@ def main() -> IO(Unit):
     )
     Unit <- E.must_eq("emoji_find fuel1 first hit", Cu.emoji_find(1n, Emoji.Entry{":eyes:", "👀"} <> Emoji.Entry{":wave:", "👋"} <> Nil{}, ":eyes:"), "👀")
     Unit <- E.must("help lines", Cu.help_ok())
+    Unit <- E.must("slash case-insensitive", Sess.slash_case_ok())
+    Unit <- E.must("recall shelves draft", Sess.hist_stash_ok())
+    Unit <- E.must("recall restores typed draft", recall_stash_ok())
     Unit <- E.must_eq("F8 key", U32.show(Sess.KEY_F8()), "22")
     Unit <- E.must_eq("help opens locally", opened_show(Sess.step_enter(demo(), "/help join")), ";H:join;;1;N")
     Unit <- E.must("right accepts ghost", ghosted_ok(Sess.step_keys(demo(), keys_code("/j", 2))))

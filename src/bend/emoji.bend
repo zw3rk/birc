@@ -16,6 +16,10 @@ type Entry is Data:
 def entry_cons(+name: String, +text: String, rest: List<&2, Entry>) -> List<&2, Entry>:
   Entry{name, text} <> rest
 
+# NOTE (D18): aliases() rebuilds the ~84-row table per render call; view.bend
+# performs zero emoji lookups at paint time and render_segs binds one table
+# per render, threaded per segment. Per-paint memoization would churn paint
+# entry points for a bounded micro-cost; deferred as disproportionate.
 def aliases() -> List<&2, Entry>:
   entry_cons(":eyes:", "👀",
   entry_cons(":wave:", "👋",
@@ -89,4 +93,16 @@ def aliases() -> List<&2, Entry>:
   entry_cons(":gem:", "💎",
   entry_cons(":rofl:", "🤣",
   entry_cons(":rolling-on-the-floor-laughing:", "🤣",
-  Nil{}))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+  entry_cons(":see_no_evil:", "🙈",
+  entry_cons(":hear_no_evil:", "🙉",
+  entry_cons(":speak_no_evil:", "🙊",
+  entry_cons(":upside_down_face:", "🙃",
+  entry_cons(":rolling_eyes:", "🙄",
+  entry_cons(":smirk:", "😏",
+  entry_cons(":unamused:", "😒",
+  entry_cons(":confused:", "😕",
+  entry_cons(":hushed:", "😯",
+  entry_cons(":astonished:", "😲",
+  entry_cons(":scream:", "😱",
+  entry_cons(":relieved:", "😌",
+  Nil{}))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
