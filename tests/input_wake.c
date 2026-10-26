@@ -104,7 +104,6 @@ static int fixture_start(Fixture *f) {
   CHECK(f->state != NULL);
   f->state->st.text = f->state->composer;
   f->state->st.cap = sizeof f->state->composer;
-  f->state->last_tab = -1;
   f->ui->cfg.userdata = f->state;
   birc_ui_live = f->ui;
   return 0;

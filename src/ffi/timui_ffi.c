@@ -143,7 +143,6 @@ typedef struct {
 typedef struct {
   char composer[BIRC_COMPOSER_CAP];
   TimuiTextAreaState st;
-  int last_tab;
   uint32_t last_bell_seq;
   int bell_seen;
   int bell_pending;
@@ -689,7 +688,6 @@ Term timui_open_run(Env e, Term *f, IoWork *w) {
   st->st.text = st->composer;
   st->st.cap = sizeof st->composer;
   st->composer_pane = -1;
-  st->last_tab = -1;
   st->profile_enabled = getenv("BIRC_FRAME_PROFILE") != NULL;
   cfg.title = "birc";
   cfg.flags = TIMUI_FLAG_ALT_SCREEN | TIMUI_FLAG_RESTORE_ON_EXIT |
@@ -794,6 +792,7 @@ static int birc_draw_str(Env e, Term s, BircUi *bu, const char **out, size_t *ou
         next = (char *)realloc(bu->paint_buf, need);
         if (!next) {
           spare_free(e, cls_fit(2), sp);
+          term_sink(e, fb[1]);
           *out = "";
           *out_n = 0;
           return 0;
@@ -908,6 +907,11 @@ static int birc_str_list(Env e, Term xs, char store[][BIRC_TAB_LABEL],
     Term h = birc_cons_head(e, xs, &t);
     xs = t;
     s = io_cstr(e, h, &len);
+    /* OOM (NULL with a nonzero length) ends the list here; the tail below
+     * is sunk, not painted as empty labels. A NULL empty source still
+     * stores "". */
+    if (!s && len != 0)
+      break;
     /* Keep the byte/code-point cap, then back up past a partial cluster.
      * 63 is BIRC_TAB_LABEL-1. test-utf8-fit greps this expression; the
      * Makefile owns that check, so the spelling stays literal. */
@@ -1158,8 +1162,6 @@ static void birc_draw_op(Env e, TimuiFrame *fr, Term op, BircLay *ly) {
     orig = sel;
     /* Tab index changes repaint via the cell diff; full_redraw is reserved
      * for grid size changes (timui_ui_resize_pixels above). */
-    if (ly && ly->bu)
-      ly->bu->last_tab = orig;
     if (fr && ntabs > 0)
       (void)timui_tabs(fr, TIMUI_ID("birc.bufs"), r, labs, ntabs, &sel);
     /* f[0..7] are OpTabs as declared in view.bend. BIRC_TAB_MENTION_BG and
@@ -1411,10 +1413,19 @@ static Term birc_frame_emit(Env e, BircFrameOut *st) {
   Timui *ui = st->ui;
   BircUi *bu = birc_state(ui);
   const char *typed = bu ? bu->composer : "";
+  uint32_t click = st->click;
+  const char *link = bu ? bu->link_url : "";
+  const char *clip = bu && bu->clipboard ? bu->clipboard : "";
+  if (birc_output_failure) {
+    /* A discarded capture never painted: its out-of-band latches die with
+     * it. Report them only once their frame's bytes were really accepted. */
+    click = 0;
+    link = "";
+    clip = "";
+  }
   Term out = birc_uikeys(e, ui, st->enter, typed, st->tlen, st->rows, st->cols,
-                         st->click, st->key, st->mods, st->codepoint, st->wheel,
-                         st->more, bu ? bu->link_url : "",
-                         bu && bu->clipboard ? bu->clipboard : "");
+                         click, st->key, st->mods, st->codepoint, st->wheel,
+                         st->more, link, clip);
   if (bu) {
     free(bu->clipboard);
     bu->clipboard = NULL;
@@ -1651,7 +1662,15 @@ Term timui_frame_run(Env e, Term *f, IoWork *w) {
   int saved_write_flags;
   (void)w;
   birc_profile_view_end(bu, profile_t0);
-  input = io_cstr(e, f[2], &n_in);
+  /* The reseed string restores composer state only when seed != 0. Build it
+   * lazily so ordinary frames skip a pointless decode of an unused operand. */
+  if (seed != 0) {
+    input = io_cstr(e, f[2], &n_in);
+  } else {
+    term_sink(e, f[2]);
+    input = NULL;
+    n_in = 0;
+  }
   if (!ui) {
     free(input);
     birc_drop_ops(e, ops);

@@ -78,6 +78,10 @@ int getentropy(void *buffer, size_t size);
 #define BIRC_MF_MAX_URL 4096u
 #define BIRC_MF_MAX_HOST 253u
 #define BIRC_MF_MAX_PATH 4096u
+/* Remote-source cache bounds: at most 64 private entries and 64 MiB total
+   (FIFO by oldest mtime), plus one atomic staging file of at most 8 MiB
+   (BIRC_MF_MAX_DOWNLOAD) per fetch. Local previews never enter the disk
+   cache. See AGENTS.md "optional remote-source cache". */
 #define BIRC_MF_MAX_DOWNLOAD (8u * 1024u * 1024u)
 #define BIRC_MF_MAX_LOCAL (16u * 1024u * 1024u)
 #define BIRC_MF_MAX_HTML (256u * 1024u)
@@ -983,6 +987,13 @@ static int birc_mf_open_cards(int parent, int create, int *out) {
   return 0;
 }
 
+/* Wedge diagnostics: one bounded stderr line per aborted scan. Only a
+ * blown scan budget is reported (not transient fstat races), so a healthy
+ * cache stays silent. Safe stage labels and numeric counts only. */
+static void birc_mf_note_wedge(const char *stage, unsigned seen) {
+  fprintf(stderr, "birc-mf: %s scan hit %u-entry budget; write skipped\n", stage, seen);
+}
+
 static int birc_mf_usage(int dirfd, const char *suffix, uint32_t *count, uint64_t *bytes) {
   int scanfd = dup(dirfd);
   DIR *dir;
@@ -997,15 +1008,23 @@ static int birc_mf_usage(int dirfd, const char *suffix, uint32_t *count, uint64_
     (void)close(scanfd);
     return -1;
   }
+  /* dup shares the directory offset with dirfd: a previous scan leaves it at
+   * end-of-directory and a fresh fdopendir would yield nothing. Rewind so
+   * every scan observes the current entries, like the Python oracle's
+   * independent scandir. */
+  rewinddir(dir);
   while ((ent = readdir(dir))) {
     struct stat info;
+    /* Count only cache candidates toward the scan budget. Unrelated entries
+     * (., .., .lock, the cards subdirectory, strays) must not wedge usage. */
+    if (!birc_mf_payload_name(ent->d_name, suffix) && !birc_mf_staging_name(ent->d_name))
+      continue;
     if (seen >= BIRC_MF_MAX_CACHE_SCAN) {
+      birc_mf_note_wedge("usage", seen);
       (void)closedir(dir);
       return -1;
     }
     seen++;
-    if (!birc_mf_payload_name(ent->d_name, suffix) && !birc_mf_staging_name(ent->d_name))
-      continue;
     if (fstatat(dirfd, ent->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0
         || !birc_mf_file_owned(&info)) {
       (void)closedir(dir);
@@ -1203,15 +1222,21 @@ static void birc_mf_cache_write(int parent, int cards, const char *url,
       (void)close(scanfd);
       goto done;
     }
+    /* dup shares the directory offset with dirfd: rewind so eviction observes
+     * the current entries even after an earlier scan parked at EOF. */
+    rewinddir(dir);
     while ((ent = readdir(dir))) {
       struct stat info;
+      /* Count only cache candidates toward the scan budget. Unrelated entries
+       * (., .., .lock, strays) must not wedge eviction and block writes. */
+      if (!birc_mf_payload_name(ent->d_name, suffix) && !birc_mf_staging_name(ent->d_name))
+        continue;
       if (seen >= BIRC_MF_MAX_CACHE_SCAN) {
+        birc_mf_note_wedge("eviction scan", seen);
         (void)closedir(dir);
         goto done;
       }
       seen++;
-      if (!birc_mf_payload_name(ent->d_name, suffix) && !birc_mf_staging_name(ent->d_name))
-        continue;
       if (fstatat(dirfd, ent->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0
           || !birc_mf_file_owned(&info)) {
         (void)closedir(dir);
@@ -1220,6 +1245,7 @@ static void birc_mf_cache_write(int parent, int cards, const char *url,
       if (strcmp(ent->d_name, name) == 0)
         continue;
       if (ent_n >= BIRC_MF_MAX_CACHE_SCAN) {
+        birc_mf_note_wedge("eviction collect", ent_n);
         (void)closedir(dir);
         goto done;
       }
@@ -1869,36 +1895,49 @@ static uint32_t birc_mf_remote(int cards, const char *url, char **out, size_t *o
         if (birc_mf_read_cached(dirfd, name, BIRC_MF_MAX_HTML + BIRC_MF_MAX_BASE + 1u,
                                 &cached, &cached_n)) {
           const unsigned char *sep = memchr(cached, '\n', cached_n);
+          rc = 1;
           if (sep && (size_t)(sep - cached) <= BIRC_MF_MAX_BASE) {
             char head[BIRC_MF_MAX_URL + 1u];
             size_t hlen = (size_t)(sep - cached);
             if (hlen < sizeof head) {
               memcpy(head, cached, hlen);
               head[hlen] = 0;
-              if (birc_media_parse_url(head, 1, &parts)) {
+              if (birc_media_parse_url(head, 1, &parts))
                 rc = birc_cards_parse(sep + 1, cached_n - hlen - 1u, head, out, out_n);
-                free(cached);
-                (void)close(dirfd);
-                (void)close(parent);
-                return rc;
-              }
+              else
+                rc = birc_cards_parse(cached, cached_n, url, out, out_n);
+            } else {
+              rc = birc_cards_parse(cached, cached_n, url, out, out_n);
             }
+          } else {
+            rc = birc_cards_parse(cached, cached_n, url, out, out_n);
           }
-          rc = birc_cards_parse(cached, cached_n, url, out, out_n);
           free(cached);
+          cached = NULL;
           (void)close(dirfd);
-          (void)close(parent);
-          return rc;
+          dirfd = -1;
+          if (rc == 0) {
+            (void)close(parent);
+            parent = -1;
+            return 0;
+          }
+          /* Undecodable entry: fetch fresh below. A good fetch replaces it;
+           * a failed fetch keeps it (no unsafe deletion on failure). */
         }
-        (void)close(dirfd);
       }
     } else {
       birc_mf_sha_name(url, ".img", name, sizeof name);
       if (birc_mf_read_cached(parent, name, BIRC_MF_MAX_DOWNLOAD, &cached, &cached_n)) {
         rc = birc_media_encode(cached, cached_n, out, out_n);
         free(cached);
-        (void)close(parent);
-        return rc;
+        cached = NULL;
+        if (rc == 0) {
+          (void)close(parent);
+          parent = -1;
+          return 0;
+        }
+        /* Undecodable entry: fetch fresh below. A good fetch replaces it;
+         * a failed fetch keeps it (no unsafe deletion on failure). */
       }
     }
     (void)close(parent);

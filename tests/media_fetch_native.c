@@ -253,6 +253,102 @@ int main(void) {
     must(rmdir(cards) == 0 && rmdir(root) == 0, "rmdir cap");
   }
 
+  {
+    char wroot[] = "/tmp/birc-mf-wedge-XXXXXX";
+    char admit[512], junk[512], lockpath[160];
+    const char *wurl = "https://example.test/wedge.png";
+    const unsigned char img[] = {1, 2, 3, 4};
+    unsigned i;
+    int wparent, wr;
+    uint32_t wcount = 0;
+    uint64_t wbytes = 0;
+    must(mkdtemp(wroot) != NULL, "wedge dir");
+    must(chmod(wroot, 0700) == 0, "wedge mode");
+    for (i = 0; i < BIRC_MF_MAX_CACHE_SCAN + 44u; i++) {
+      FILE *jf;
+      wr = snprintf(junk, sizeof junk, "%s/junk-%04u.txt", wroot, i);
+      must(wr > 0 && (size_t)wr < sizeof junk, "junk path");
+      jf = fopen(junk, "wb");
+      must(jf != NULL, "junk fopen");
+      must(fwrite("x", 1, 1, jf) == 1, "junk write");
+      must(fclose(jf) == 0, "junk fclose");
+    }
+    wparent = open(wroot, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    must(wparent >= 0, "wedge parent");
+    /* Unrelated entries must not consume the scan budget or block writes. */
+    must(birc_mf_usage(wparent, ".img", &wcount, &wbytes) == 0, "wedge usage");
+    must(wcount == 0 && wbytes == 0, "wedge usage counts");
+    birc_mf_cache_write(wparent, 0, wurl, img, sizeof img, NULL);
+    image_path(wroot, wurl, admit, sizeof admit);
+    must(regular_file(admit), "admit past junk");
+    must(birc_mf_usage(wparent, ".img", &wcount, &wbytes) == 0, "wedge usage hit");
+    must(wcount == 1 && wbytes == sizeof img, "wedge usage payload");
+    must(close(wparent) == 0, "wedge close");
+    must(unlink(admit) == 0, "wedge unlink admit");
+    for (i = 0; i < BIRC_MF_MAX_CACHE_SCAN + 44u; i++) {
+      wr = snprintf(junk, sizeof junk, "%s/junk-%04u.txt", wroot, i);
+      must(wr > 0 && (size_t)wr < sizeof junk && unlink(junk) == 0, "unlink junk");
+    }
+    wr = snprintf(lockpath, sizeof lockpath, "%s/.lock", wroot);
+    must(wr > 0 && (size_t)wr < sizeof lockpath && unlink(lockpath) == 0, "unlink wedge lock");
+    must(rmdir(wroot) == 0, "rmdir wedge");
+  }
+
+  {
+    /* A candidate flood past the scan budget must fail closed *and* say so:
+     * the diagnostic line names the wedged stage. stderr is captured to a
+     * file because the failure itself is asserted through must(). */
+    char sroot[] = "/tmp/birc-mf-wedgelog-XXXXXX";
+    char spath[512], sline[512], hex[70];
+    unsigned i;
+    int sparent, wr, errkeep, found = 0;
+    uint32_t scount = 0;
+    uint64_t sbytes = 0;
+    FILE *cap;
+    must(mkdtemp(sroot) != NULL, "scan dir");
+    must(chmod(sroot, 0700) == 0, "scan mode");
+    for (i = 0; i < BIRC_MF_MAX_CACHE_SCAN + 4u; i++) {
+      FILE *pf;
+      wr = snprintf(hex, sizeof hex, "%064x.img", i);
+      must(wr > 0 && (size_t)wr < sizeof hex, "scan name");
+      wr = snprintf(spath, sizeof spath, "%s/%s", sroot, hex);
+      must(wr > 0 && (size_t)wr < sizeof spath, "scan path");
+      pf = fopen(spath, "wb");
+      must(pf != NULL, "scan fopen");
+      must(fwrite("x", 1, 1, pf) == 1, "scan write");
+      must(fclose(pf) == 0, "scan fclose");
+    }
+    sparent = open(sroot, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    must(sparent >= 0, "scan parent");
+    wr = snprintf(spath, sizeof spath, "%s/stderr.log", sroot);
+    must(wr > 0 && (size_t)wr < sizeof spath, "scan log path");
+    errkeep = dup(STDERR_FILENO);
+    must(errkeep >= 0, "scan errkeep");
+    must(freopen(spath, "w", stderr) != NULL, "scan redirect");
+    wr = birc_mf_usage(sparent, ".img", &scount, &sbytes);
+    fflush(stderr);
+    cap = fopen(spath, "r");
+    if (cap != NULL) {
+      found = fgets(sline, sizeof sline, cap) != NULL &&
+        strstr(sline, "birc-mf: usage scan hit") != NULL;
+      fclose(cap);
+    }
+    dup2(errkeep, STDERR_FILENO);
+    close(errkeep);
+    must(wr != 0, "scan wedge detected");
+    must(found, "scan wedge diagnosed");
+    must(close(sparent) == 0, "scan close");
+    for (i = 0; i < BIRC_MF_MAX_CACHE_SCAN + 4u; i++) {
+      wr = snprintf(hex, sizeof hex, "%064x.img", i);
+      must(wr > 0 && (size_t)wr < sizeof hex, "scan rm name");
+      wr = snprintf(spath, sizeof spath, "%s/%s", sroot, hex);
+      must(wr > 0 && (size_t)wr < sizeof spath && unlink(spath) == 0, "unlink scan");
+    }
+    wr = snprintf(spath, sizeof spath, "%s/stderr.log", sroot);
+    must(wr > 0 && (size_t)wr < sizeof spath && unlink(spath) == 0, "unlink scan log");
+    must(rmdir(sroot) == 0, "rmdir scan");
+  }
+
   printf("media_fetch_native=ok\n");
   return 0;
 }
