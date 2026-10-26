@@ -31,10 +31,21 @@ def operation_ids.buffers(bufs: List<&2, Cl.Buffer>) -> List<&2, Nat>:
 def operation_ids(snapshot: Cl.Client) -> List<&2, Nat>:
   operation_ids.buffers(Cl.log_buffers(snapshot))
 
+# `ids` is ascending (install.allowed sorts operation_ids once below), so
+# the scan stops past the target instead of walking the whole ledger per
+# line. Membership results match the old linear scan on sorted input.
+def operation_id.go(eq: Bool, past: Bool, rest: Unit -> Bool) -> Bool:
+  match eq:
+    case True{}: True{}
+    case False{}:
+      match past:
+        case True{}: False{}
+        case False{}: rest(Unit{})
+
 def operation_id(ids: List<&2, Nat>, +id: Nat) -> Bool:
   match ids:
     case Nil{}: False{}
-    case Con{head, rest}: Nat.is_eq(head, id) || operation_id(rest, id)
+    case Con{+head, rest}: operation_id.go(Nat.is_eq(head, id), Nat.is_gt(head, id), _ => operation_id(rest, id))
 
 def operation_line(line: Cl.Line, ids: List<&2, Nat>) -> Bool:
   match line:
@@ -252,7 +263,7 @@ def install.allowed(ok: Bool, +current: Cl.Client, +snapshot: Cl.Client) -> Cl.C
   match ok:
     case False{}: current
     case True{}:
-      install.buffers(snapshot.buffers(Cl.client_bufs(snapshot), operation_ids(snapshot)), current, Cl.settings_hist_cap(Cl.get_settings(current)))
+      install.buffers(snapshot.buffers(Cl.client_bufs(snapshot), List.sort(~Nat, ~Nat.is_le, operation_ids(snapshot))), current, Cl.settings_hist_cap(Cl.get_settings(current)))
 
 # Exact host:port strings. Outer archive_current / reload_match also check this;
 # this defense rejects host-colliding different ports when a caller skips them.

@@ -154,12 +154,12 @@ def search_nlines(+cl: Cl.Client) -> Nat:
 def search_loop_exact(+path: String, +size: Nat) -> IO(Hs.DiskResult):
   do IO<Hs.DiskResult>:
     f : File <- IO.try(File, File.open(path, "r"))
-    Hs.search_loop(Nat.add(1n, size), f, Hs.DiskQuery{"needle", ""}, "a:6667", size, Hs.scan_initial(), size)
+    HSIO.search_loop(Nat.add(1n, size), f, Hs.DiskQuery{"needle", ""}, "a:6667", size, Hs.scan_initial(), size)
 
 def search_loop_over(+path: String, +size: Nat, +extra: Nat) -> IO(Hs.DiskResult):
   do IO<Hs.DiskResult>:
     f : File <- IO.try(File, File.open(path, "r"))
-    Hs.search_loop(Nat.add(1n, Nat.add(size, extra)), f, Hs.DiskQuery{"needle", ""}, "a:6667",
+    HSIO.search_loop(Nat.add(1n, Nat.add(size, extra)), f, Hs.DiskQuery{"needle", ""}, "a:6667",
       Nat.add(size, extra), Hs.scan_initial(), Nat.add(size, extra))
 
 def fixture_client() -> Cl.Client:

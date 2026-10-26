@@ -200,25 +200,26 @@ def lines_after.keep(new: Bool, +line: Cl.Line, rest: List<&2, Cl.Line>) -> List
     case False{}: rest
 
 # Event identity, not text equality: two equal messages are distinct additions.
-def lines_after(lines: List<&2, Cl.Line>, +seq: Nat) -> List<&2, Cl.Line>:
-  match lines:
-    case Nil{}: Nil{}
-    case Con{+line, t}:
-      match line:
-        case Cl.Line{_, _, _, _, +id}:
-          lines_after.keep(Nat.is_gt(id, seq), line, lines_after(t, seq))
+# Exclusion variants (below): imported archive rows (the drain's claimed IDs)
+# become the next baseline instead of being appended again. Live rows are
+# never excluded: claim sets only ever hold fresh import IDs.
 
-# Exclusion variant: imported archive rows (the drain's claimed IDs) become
-# the next baseline instead of being appended again. Live rows are never
-# excluded: claim sets only ever hold fresh import IDs.
-def lines_after_except(lines: List<&2, Cl.Line>, +seq: Nat, +excluded: List<&2, Nat>) -> List<&2, Cl.Line>:
-  match lines:
-    case Nil{}: Nil{}
-    case Con{+line, t}:
-      match line:
-        case Cl.Line{_, _, _, _, +id}:
-          lines_after.keep(Nat.is_gt(id, seq) && Bool.not(List.contains(~Nat, ~Nat.is_eq, excluded, id)),
-            line, lines_after_except(t, seq, excluded))
+# Ascending-ID membership with an early exit: once the head passes the
+# target, no later element can match. Callers pass ascending lists
+# (new_entries_except sorts once at entry), so this keeps List.contains
+# results while scanning only to the target.
+def excluded_member.go(eq: Bool, past: Bool, rest: Unit -> Bool) -> Bool:
+  match eq:
+    case True{}: True{}
+    case False{}:
+      match past:
+        case True{}: False{}
+        case False{}: rest(Unit{})
+
+def excluded_member(sorted: List<&2, Nat>, +id: Nat) -> Bool:
+  match sorted:
+    case Nil{}: False{}
+    case Con{+head, rest}: excluded_member.go(Nat.is_eq(head, id), Nat.is_gt(head, id), _ => excluded_member(rest, id))
 
 # Newest-first. Stop at the first id already saved. Id 0 is not a checkpoint.
 def lines_newest.stop(+id: Nat, +seq: Nat) -> Bool:
@@ -229,13 +230,22 @@ def lines_newest.rest(stop: Bool, take: Bool, +line: Cl.Line, rest: List<&2, Cl.
     case True{}: Nil{}
     case False{}: lines_after.keep(take, line, rest)
 
+# A stopped head skips the tail walk: the recursion lives inside the taken
+# arm (Bend args are eager, so passing lines_newest(t, seq) directly would
+# traverse the full tail even after stop turned true). Sticky stop is sound
+# newest-first: once an id is already saved, every older id is too.
+def lines_newest.go(stop: Bool, take: Bool, +line: Cl.Line, k: Unit -> List<&2, Cl.Line>) -> List<&2, Cl.Line>:
+  match stop:
+    case True{}: Nil{}
+    case False{}: lines_newest.rest(stop, take, line, k(Unit{}))
+
 def lines_newest(lines: List<&2, Cl.Line>, +seq: Nat) -> List<&2, Cl.Line>:
   match lines:
     case Nil{}: Nil{}
     case Con{+line, t}:
       match line:
         case Cl.Line{_, _, _, _, +id}:
-          lines_newest.rest(lines_newest.stop(id, seq), Nat.is_gt(id, seq), line, lines_newest(t, seq))
+          lines_newest.go(lines_newest.stop(id, seq), Nat.is_gt(id, seq), line, _ => lines_newest(t, seq))
 
 def lines_newest_except(lines: List<&2, Cl.Line>, +seq: Nat, +excluded: List<&2, Nat>) -> List<&2, Cl.Line>:
   match lines:
@@ -243,9 +253,9 @@ def lines_newest_except(lines: List<&2, Cl.Line>, +seq: Nat, +excluded: List<&2,
     case Con{+line, t}:
       match line:
         case Cl.Line{_, _, _, _, +id}:
-          lines_newest.rest(lines_newest.stop(id, seq),
-            Nat.is_gt(id, seq) && Bool.not(List.contains(~Nat, ~Nat.is_eq, excluded, id)),
-            line, lines_newest_except(t, seq, excluded))
+          lines_newest.go(lines_newest.stop(id, seq),
+            Nat.is_gt(id, seq) && Bool.not(excluded_member(excluded, id)),
+            line, _ => lines_newest_except(t, seq, excluded))
 
 def extract_new_buf.text(synthetic: Bool, +name: String, +newest: List<&2, Cl.Line>, +seq: Nat) -> String:
   match synthetic:
@@ -290,13 +300,20 @@ def new_entries(bufs: List<&2, Cl.Buffer>, +seq: Nat, first: Bool) -> List<&2, H
         new_entries.one(Cl.target_is_synthetic(name), name, newest, seq, first),
         new_entries(t, seq, False{}))
 
-def new_entries_except(bufs: List<&2, Cl.Buffer>, +seq: Nat, first: Bool, +excluded: List<&2, Nat>) -> List<&2, HistEntry>:
+# Sort the claim set once here (not per buffer or per line): production
+# claim sets already arrive ascending from batch_claimed_ids, and sorting is
+# order-indifferent for membership, so every caller keeps its results while
+# the per-line scans below early-exit on the sorted spine.
+def new_entries_except.sorted(bufs: List<&2, Cl.Buffer>, +seq: Nat, first: Bool, +excluded: List<&2, Nat>) -> List<&2, HistEntry>:
   match bufs:
     case Nil{}: Nil{}
     case Con{Cl.Buffer{+name, _, _, _, _, _, +newest, _}, t}:
       List.append(&2, HistEntry,
         new_entries.one_except(Cl.target_is_synthetic(name), name, newest, seq, first, excluded),
-        new_entries_except(t, seq, False{}, excluded))
+        new_entries_except.sorted(t, seq, False{}, excluded))
+
+def new_entries_except(bufs: List<&2, Cl.Buffer>, +seq: Nat, first: Bool, +excluded: List<&2, Nat>) -> List<&2, HistEntry>:
+  new_entries_except.sorted(bufs, seq, first, List.sort(~Nat, ~Nat.is_le, excluded))
 
 def entry_line(entry: HistEntry) -> Cl.Line:
   match entry:
@@ -319,28 +336,16 @@ def extract_new_history_for.rows(+endpoint: String, +old_cl: Cl.Client, +new_cl:
     case Cl.Client{_, _, bufs, _, _, _, _, _, _}:
       serialize_entries(List.sort(~HistEntry, ~entry_id_le, new_entries(bufs, Cl.log_seq_of(old_cl), True{})), endpoint)
 
-# Equal log sequences are not a checkpoint. A rewind can leave an id above
-# log_seq, so both arms still emit those rows from the new client.
-def extract_new_history_for.same(same: Bool, +endpoint: String, +old_cl: Cl.Client, +new_cl: Cl.Client) -> String:
-  match same:
-    case True{}: extract_new_history_for.rows(endpoint, old_cl, new_cl)
-    case False{}: extract_new_history_for.rows(endpoint, old_cl, new_cl)
-
 def extract_new_history_for(+endpoint: String, +old_cl: Cl.Client, +new_cl: Cl.Client) -> String:
-  extract_new_history_for.same(Nat.is_eq(Cl.log_seq_of(old_cl), Cl.log_seq_of(new_cl)), endpoint, old_cl, new_cl)
+  extract_new_history_for.rows(endpoint, old_cl, new_cl)
 
 def extract_new_history_for_except.rows(+endpoint: String, +old_cl: Cl.Client, +new_cl: Cl.Client, +excluded: List<&2, Nat>) -> String:
   match new_cl:
     case Cl.Client{_, _, bufs, _, _, _, _, _, _}:
       serialize_entries(List.sort(~HistEntry, ~entry_id_le, new_entries_except(bufs, Cl.log_seq_of(old_cl), True{}, excluded)), endpoint)
 
-def extract_new_history_for_except.same(same: Bool, +endpoint: String, +old_cl: Cl.Client, +new_cl: Cl.Client, +excluded: List<&2, Nat>) -> String:
-  match same:
-    case True{}: extract_new_history_for_except.rows(endpoint, old_cl, new_cl, excluded)
-    case False{}: extract_new_history_for_except.rows(endpoint, old_cl, new_cl, excluded)
-
 def extract_new_history_for_except(+endpoint: String, +old_cl: Cl.Client, +new_cl: Cl.Client, +excluded: List<&2, Nat>) -> String:
-  extract_new_history_for_except.same(Nat.is_eq(Cl.log_seq_of(old_cl), Cl.log_seq_of(new_cl)), endpoint, old_cl, new_cl, excluded)
+  extract_new_history_for_except.rows(endpoint, old_cl, new_cl, excluded)
 
 # ---- applying history on load ---------------------------------------------
 
@@ -512,10 +517,17 @@ def apply_entries_iso(entries: List<&2, HistEntry>, cl: Cl.Client, +isc: Cl.Iso)
 def add_markers_cl(+cl: Cl.Client, +now: String) -> Cl.Client:
   Cl.reconnect_markers(cl, now)
 
+# Match before trim: take_last walks the whole spine, so the synthetic arm
+# keeps `lines` without evaluating the trim (Bool.pick evaluates both arms).
+def cap_buf_history.keep(synthetic: Bool, +lines: List<&2, Cl.Line>, +cap: U32) -> List<&2, Cl.Line>:
+  match synthetic:
+    case True{}: lines
+    case False{}: Cl.take_last(lines, U32.to_nat(cap))
+
 def cap_buf_history(b: Cl.Buffer, cap: U32) -> Cl.Buffer:
   match b:
     case Cl.Buffer{+name, is_ch, +topic, +lines, +nicks, scroll, _, _}:
-      Cl.buf_indexed(name, is_ch, topic, Bool.pick(List<&2, Cl.Line>, Cl.target_is_synthetic(name), lines, Cl.take_last(lines, U32.to_nat(cap))), nicks, scroll)
+      Cl.buf_indexed(name, is_ch, topic, cap_buf_history.keep(Cl.target_is_synthetic(name), lines, cap), nicks, scroll)
 
 def cap_bufs_history(bufs: List<&2, Cl.Buffer>, +cap: U32) -> List<&2, Cl.Buffer>:
   match bufs:
@@ -600,15 +612,6 @@ def read_finish.sealed(snapshot: Bool, cl: Cl.Client, +now: String) -> Cl.Client
 def read_finish.client(snapshot: Bool, cl: Cl.Client, now: String) -> Cl.Client:
   read_finish.sealed(snapshot, Cl.client_hist_seal(cl), now)
 
-# A worker snapshot spends its bounded row capacity only on archive records.
-# The UI adds its divider after import, when spare capacity is known.
-def read_finish.mode(snapshot: Bool, f: File, state: ReadState, now: String) -> IO(Cl.Client):
-  match state:
-    case ReadState{cl, _, _, _}:
-      do IO<Cl.Client>:
-        Unit <- File.close(f)
-        return read_finish.client(snapshot, cl, now)
-
 def read_failure_text(error: U32 & String, +stage: String) -> String:
   match error:
     case (code, +msg): "history " ++ stage ++ " (" ++ U32.show(code) ++ "): " ++ msg
@@ -620,17 +623,7 @@ def read_error(snapshot: Bool, cl: Cl.Client, error: U32 & String, stage: String
     case True{}: Cl.diagnostic(cl, Cl.Error{}, read_failure_text(error, stage))
     case False{}: Cl.client_log(cl, 0n, Cl.Error{}, read_failure_text(error, stage))
 
-def read_failure.mode(+snapshot: Bool, f: File, state: ReadState, now: String, error: U32 & String, stage: String) -> IO(Cl.Client):
-  do IO<Cl.Client>:
-    cl : Cl.Client <- read_finish.mode(snapshot, f, state, now)
-    return read_error(snapshot, cl, error, stage)
-
-# One native read. The pure walk of that chunk does not park, so the
-# fiber yields once per chunk and then scans it straight through.
-def hist_read_chunk() -> Nat:
-  65536n
-
-# Byte walk only. The caller opens the queues and seals them.
+# Byte walk only. Bounds come from the caller's cap.
 def read_walk(fuel: Nat, +bytes: List<&2, U32>, state: ReadState, +endpoint: String, +cap: U32) -> ReadState & List<&2, U32>:
   match fuel:
     case 0n: (state, bytes)
@@ -639,109 +632,20 @@ def read_walk(fuel: Nat, +bytes: List<&2, U32>, state: ReadState, +endpoint: Str
         case Nil{}: (state, Nil{})
         case Con{+byte, +t}: read_walk(p, t, read_step(endpoint, cap, state, byte), endpoint, cap)
 
-def read_pace.open_state(state: ReadState, +cap: U32) -> ReadState:
-  match state:
-    case ReadState{+cl, rev, count, dropping}:
-      ReadState{Cl.client_hist_open(cl, hist_keep(cap)), rev, count, dropping}
-
-def read_pace.seal_pair(pair: ReadState & List<&2, U32>) -> ReadState & List<&2, U32>:
+# Paced walk for queue probes: a nonzero cap opens the bounded queues before
+# the walk and seals them after, per chunk. A zero cap parses nothing and
+# must not trim buffers the caller already holds.
+def read_pace.step.sealed(pair: ReadState & List<&2, U32>) -> ReadState & List<&2, U32>:
   match pair:
     case (ReadState{+cl, rev, count, dropping}, +rest):
       (ReadState{Cl.client_hist_seal(cl), rev, count, dropping}, rest)
 
-# A zero cap parses nothing and must not trim buffers the caller already holds.
-def read_pace.step.mode(zero: Bool, fuel: Nat, +bytes: List<&2, U32>, state: ReadState, +endpoint: String, +cap: U32) -> ReadState & List<&2, U32>:
-  match zero:
-    case True{}: read_walk(fuel, bytes, state, endpoint, cap)
-    case False{}: read_pace.seal_pair(read_walk(fuel, bytes, read_pace.open_state(state, cap), endpoint, cap))
-
 def read_pace.step(fuel: Nat, +bytes: List<&2, U32>, state: ReadState, +endpoint: String, +cap: U32) -> ReadState & List<&2, U32>:
-  read_pace.step.mode(U32.is_eq(cap, 0), fuel, bytes, state, endpoint, cap)
-
-def read_pace.unpack(pair: ReadState & List<&2, U32>, k: List<&2, U32> -> ReadState -> IO(Cl.Client)) -> IO(Cl.Client):
-  match pair:
-    case (state, +bytes): k(bytes, state)
-
-def read_pace.spent(rest: List<&2, U32>, +drop: Nat) -> Nat:
-  match rest:
-    case Nil{}: drop
-    case _: Nat.sub(drop, List.length(&2, U32, rest))
-
-# The Bend event loop is one thread. Yield once, then walk this chunk,
-# so a resize or a key can run between chunks without a park per 256 bytes.
-def read_pace.begin(+bytes: List<&2, U32>, +drop: Nat, f: File, state: ReadState, +endpoint: String, +cap: U32, +remaining: Nat, next: File -> ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  do IO<Cl.Client>:
-    Unit <- IO.sleep(0)
-    read_pace.unpack(read_walk(drop, bytes, state, endpoint, cap), rest => st => next(f, st, Nat.sub(remaining, read_pace.spent(rest, drop))))
-
-def read_loop.empty.mode(empty: Bool, snapshot: Bool, f: File, +bytes: List<&2, U32>, state: ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  match empty:
-    case True{}: read_finish.mode(snapshot, f, state, now)
-    case False{}: read_pace.begin(bytes, List.length(&2, U32, bytes), f, state, endpoint, cap, remaining, next)
-
-def read_loop.got.mode(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, snapshot: Bool, state: ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  match pair:
-    case (f, Fail{error}): read_failure.mode(snapshot, f, state, now, error, "read failed; only completed records were restored")
-    case (f, Done{+bytes}): read_loop.empty.mode(Nat.is_eq(List.length(&2, U32, bytes), 0n), snapshot, f, bytes, state, endpoint, cap, now, remaining, next)
-
-def read_loop.got(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, state: ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  read_loop.got.mode(pair, False{}, state, endpoint, cap, now, remaining, next)
-
-def read_loop.read.mode(done: Bool, +snapshot: Bool, f: File, state: ReadState, +endpoint: String, +cap: U32, +now: String, +remaining: Nat, next: File -> ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  match done:
-    case True{}: read_finish.mode(snapshot, f, state, now)
-    case False{}:
-      do IO<Cl.Client>:
-        pair : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, U32.from_nat(Cl.clamp_nat(remaining, hist_read_chunk())))
-        read_loop.got.mode(pair, snapshot, state, endpoint, cap, now, remaining, next)
-
-# The file's initial size bounds the loop. Appends during loading cannot keep it
-# alive forever. Short reads still consume the full snapshot; state holds at most 8192 bytes and
-# MAX_BUFFERS * min(cap, SCROLL_CAP) lines, regardless of file size.
-def read_loop.mode(fuel: Nat, +snapshot: Bool, f: File, state: ReadState, +endpoint: String, +cap: U32, +now: String, +remaining: Nat) -> IO(Cl.Client):
-  match fuel:
-    case 0n: read_finish.mode(snapshot, f, state, now)
-    case 1n+p:
-      read_loop.read.mode(Nat.is_eq(remaining, 0n), snapshot, f, state, endpoint, cap, now, remaining,
-        f2 => st2 => rest => read_loop.mode(p, snapshot, f2, st2, endpoint, cap, now, rest))
-
-# Cap 0 restores nothing and must leave an existing client unchanged.
-def read_prepare.mode(zero: Bool, cl: Cl.Client, +cap: U32) -> Cl.Client:
-  match zero:
-    case True{}: cl
-    case False{}: Cl.client_hist_open(cl, hist_keep(cap))
-
-def read_size.mode(pair: File & Result<&1, &1, U32 & String, U32>, snapshot: Bool, cl: Cl.Client, endpoint: String, +cap: U32, now: String) -> IO(Cl.Client):
-  match pair:
-    case (f, Fail{error}): read_failure.mode(snapshot, f, ReadState{cl, Nil{}, 0n, False{}}, now, error, "size unavailable")
-    case (f, Done{+size}): read_loop.mode(1n+U32.to_nat(size), snapshot, f, ReadState{read_prepare.mode(U32.is_eq(cap, 0), cl, cap), Nil{}, 0n, False{}}, endpoint, cap, now, U32.to_nat(size))
-
-# ENOENT is the normal first-run case on this POSIX runtime. Other open
-# failures must be visible; an inaccessible history file is not an empty one.
-def read_open.error.mode(missing: Bool, snapshot: Bool, cl: Cl.Client, error: U32 & String) -> IO(Cl.Client):
-  match missing:
-    case True{}: IO.pure(Cl.Client, cl)
-    case False{}: IO.pure(Cl.Client, read_error(snapshot, cl, error, "open failed"))
-
-def read_open.failed.mode(error: U32 & String, snapshot: Bool, cl: Cl.Client) -> IO(Cl.Client):
-  match error:
-    case (+code, +msg): read_open.error.mode(U32.is_eq(code, 2), snapshot, cl, (code, msg))
-
-def read_open.mode(result: Result<&1, &1, U32 & String, File>, +snapshot: Bool, cl: Cl.Client, +endpoint: String, +cap: U32, +now: String) -> IO(Cl.Client):
-  match result:
-    case Fail{error}: read_open.failed.mode(error, snapshot, cl)
-    case Done{f}:
-      do IO<Cl.Client>:
-        pair : File & Result<&1, &1, U32 & String, U32> <- File.size(f)
-        read_size.mode(pair, snapshot, cl, endpoint, cap, now)
-
-def read_open(result: Result<&1, &1, U32 & String, File>, cl: Cl.Client, endpoint: String, cap: U32, now: String) -> IO(Cl.Client):
-  read_open.mode(result, False{}, cl, endpoint, cap, now)
-
-def history_snapshot_client(+path: String, +endpoint: String, +cap: U32, cl: Cl.Client) -> IO(Cl.Client):
-  do IO<Cl.Client>:
-    result : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
-    read_open.mode(result, True{}, cl, endpoint, cap, "")
+  match state:
+    case ReadState{+cl, rev, count, dropping}:
+      match cap:
+        case 0: read_walk(fuel, bytes, ReadState{cl, rev, count, dropping}, endpoint, cap)
+        case _: read_pace.step.sealed(read_walk(fuel, bytes, ReadState{Cl.client_hist_open(cl, hist_keep(cap)), rev, count, dropping}, endpoint, cap))
 
 def save_error(error: U32 & String, +stage: String) -> String:
   match error:
@@ -792,18 +696,3 @@ def resolve_history_cap() -> IO(U32):
   do IO<U32>:
     b : Result<&1, &1, U32 & String, String> <- IO.get_env("BIRC_HISTORY_LINES")
     IO.pure(U32, resolve_history_cap.val(b))
-
-def history_load_client.pick(skip: Bool, +path: String, +endpoint: String, +cap: U32, +cl: Cl.Client, +now: String) -> IO(Cl.Client):
-  match skip:
-    case True{}: IO.pure(Cl.Client, cl)
-    case False{}:
-      do IO<Cl.Client>:
-        result : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
-        read_open(result, cl, endpoint, cap, now)
-
-# Endpoint switches reset the buffers before this call. Load into that client,
-# not a fresh init: settings, authentication, and global event IDs must survive.
-def history_load_client(+path: String, +endpoint: String, +cap: U32, +cl: Cl.Client) -> IO(Cl.Client):
-  match cl:
-    case Cl.Client{_, _, _, _, +now, _, _, _, _}:
-      history_load_client.pick(String.is_empty(path) || Bool.not(Cl.settings_history(Cl.get_settings(cl))), path, endpoint, cap, cl, now)

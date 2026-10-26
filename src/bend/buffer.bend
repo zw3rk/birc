@@ -710,9 +710,13 @@ def reanchor_lines.id(lines: List<&2, Line>, index: Nat) -> Maybe<&2, Nat>:
         case 0n: Some{id}
         case 1n+p: reanchor_lines.id(t, p)
 
-def reanchor_lines.find.hit(hit: Bool, +id: Nat, +target: Nat, tail: Nat, after: Nat, rest: Maybe<&2, Scroll>) -> Maybe<&2, Scroll>:
+# Match before recurse: the newest eligible row wins, so a hit returns
+# without evaluating the older-rows walk. The miss arm takes a lazy Unit->
+# continuation (Bend args are eager, so a plain recurse argument would walk
+# the whole spine even after the anchor is found).
+def reanchor_lines.find.hit(hit: Bool, +id: Nat, +target: Nat, tail: Nat, after: Nat, rest: Unit -> Maybe<&2, Scroll>) -> Maybe<&2, Scroll>:
   match hit:
-    case False{}: rest
+    case False{}: rest(Unit{})
     case True{}: Some{ScrollAt{after, Bool.pick(Nat, Nat.is_eq(id, target), tail, 0n)}}
 
 def reanchor_lines.find(lines: List<&2, Line>, +target: Nat, +tail: Nat, +after: Nat) -> Maybe<&2, Scroll>:
@@ -720,7 +724,7 @@ def reanchor_lines.find(lines: List<&2, Line>, +target: Nat, +tail: Nat, +after:
     case Nil{}: None{}
     case Con{Line{_, _, _, _, +id}, t}:
       reanchor_lines.find.hit(Nat.is_gt(id, 0n) && Nat.is_le(id, target), id, target, tail, after,
-        reanchor_lines.find(t, target, tail, Nat.add(after, 1n)))
+        _ => reanchor_lines.find(t, target, tail, Nat.add(after, 1n)))
 
 def reanchor_lines.identified(zero: Bool, +lines: List<&2, Line>, id: Nat, +scroll: Scroll) -> Scroll:
   match zero:
@@ -1085,14 +1089,15 @@ def mark_unread_idx(+cl: Client, +i: Nat, is_hl: Bool) -> Client:
 # ---- buffer find/get ----------------------------------------------------
 
 # Skip index 0 (the server buffer). First later match wins.
-# One recursive call per step: Bool.pick evaluates both arms, so a recurse
-# in each arm is exponential in the buffer count (X1 / I7).
-def buf_find.rest(cont: Maybe<&2, Nat>, hit: Bool, +i: Nat) -> Maybe<&2, Nat>:
+# Match before recurse: a hit returns without evaluating the tail walk.
+# The miss arm takes a lazy Unit-> continuation (Bend args are eager, so a
+# plain recurse argument would scan the whole tail even on a hit).
+def buf_find.rest(hit: Bool, +i: Nat, cont: Unit -> Maybe<&2, Nat>) -> Maybe<&2, Nat>:
   match hit:
     case True{}:
       Some{i}
     case False{}:
-      cont
+      cont(Unit{})
 
 def buf_find_cm.go(xs: List<&2, Buffer>, +cm: String, +name: String, +i: Nat) -> Maybe<&2, Nat>:
   match xs:
@@ -1101,7 +1106,7 @@ def buf_find_cm.go(xs: List<&2, Buffer>, +cm: String, +name: String, +i: Nat) ->
     case Con{h, +t}:
       match h:
         case Buffer{+n, _, _, _, _, _, _, _}:
-          buf_find.rest(buf_find_cm.go(t, cm, name, 1n+i), buf_eq_cm(cm, n, name), i)
+          buf_find.rest(buf_eq_cm(cm, n, name), i, _ => buf_find_cm.go(t, cm, name, 1n+i))
 
 def buf_find_cm.skip0(xs: List<&2, Buffer>, +cm: String, +name: String) -> Maybe<&2, Nat>:
   match xs:
@@ -1201,8 +1206,11 @@ def buf_log.scroll(scroll: Scroll) -> Scroll:
     case ScrollAt{+after, +tail}:
       buf_log.scroll.on(Nat.is_gt(after, 0n) || Nat.is_gt(tail, 0n), after, tail)
 
-# Under the cap, cons the new line onto the newest-first spine. At the cap,
-# drop the oldest line and rebuild both orders once.
+# Under the cap this is one append onto the oldest-first spine plus one
+# cons onto the newest-first mirror; the append copies the oldest-first
+# spine, so steady-state push is linear in the (capped) buffer length.
+# At the cap, drop the oldest line and rebuild both orders once through
+# buf_indexed. The over-split keeps the rebuild off the push path.
 def buf_push.over(over: Bool, +name: String, +ch: Bool, +topic: String, +lines: List<&2, Line>, +nicks: List<&2, String>, +scroll: Scroll, +newest: List<&2, Line>, +count: Nat, +line: Line, +cap: Nat) -> Buffer:
   match over:
     case True{}:
@@ -1759,6 +1767,12 @@ def log_id.line(acc: Nat, line: Line) -> Nat:
 def log_id.lines(+lines: List<&2, Line>, +acc: Nat) -> Nat:
   List.foldl(~&2, ~Line, ~Nat, ~log_id.line, lines, acc)
 
+# Sealed buffers mirror every line in both spines (`lines` oldest-first and
+# `newest` newest-first), so this fold walks up to 2*cap rows per buffer.
+# Queue-mode buffers under history import instead hold a disjoint oldest
+# prefix in `lines` and a newer suffix in `newest`, so both folds stay
+# required: one spine alone would miss ids. Live allocation always scans
+# sealed buffers; restore/import paths use 1n+seq and never call this fold.
 def log_id.buf(acc: Nat, b: Buffer) -> Nat:
   match b:
     case Buffer{_, _, _, +lines, _, _, +newest, _}:

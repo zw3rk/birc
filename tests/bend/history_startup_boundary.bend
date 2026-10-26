@@ -40,7 +40,7 @@ def control_rows(cl: Cl.Client) -> List<&2, Cl.Line>:
 def failed_read(path: String, snapshot: Cl.Client) -> IO(Cl.Client):
   do IO<Cl.Client>:
     f : File <- IO.try(File, File.open(path, "r"))
-    Hist.read_loop.got.mode((f, Fail{(5, "synthetic read failure")}), True{}, Hist.ReadState{snapshot, Nil{}, 0n, False{}},
+    HistIO.read_loop.got.mode((f, Fail{(5, "synthetic read failure")}), True{}, Hist.ReadState{snapshot, Nil{}, 0n, False{}},
       "irc.example:6667", 1024, "12:00:00", 1n,
       f2 => state => rest => do IO<Cl.Client>:
         Unit <- File.close(f2)

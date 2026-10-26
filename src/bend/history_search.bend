@@ -11,9 +11,9 @@
 # registry (CapNotify.chathistory_ok) feeds the `negotiated` argument
 # through chat_negotiated. This module never owns CAP END.
 # MERGE POINTS (flagged, Session/Net owned): history_search_io.open_private
-# runs the descriptor-checked native open and feeds search_opened directly
-# (search_open_admitted keeps the pure admission policy for laws); the live
-# loop stamps tickets/generations/endpoints and checks
+# runs the descriptor-checked native open and feeds its retained-descriptor
+# scan directly (search_open_admitted keeps the pure admission policy for
+# laws); the live loop stamps tickets/generations/endpoints and checks
 # search_completion_admitted (history_page_admitted for paged fetches)
 # before import. The completion loop discards the returned log_seq because
 # a *search* import does not mint event ids.
@@ -306,11 +306,6 @@ def search_finish_page(state: ScanState) -> DiskPage:
     case ScanState{+kept, +evicted, _, _, _, _, _}:
       DiskPage{kept, next_cursor(kept), Nat.add(List.length(&2, DiskMatch, kept), evicted), Nat.is_eq(evicted, 0n)}
 
-def search_finish(state: ScanState, f: File) -> IO(DiskResult):
-  do IO<DiskResult>:
-    Unit <- File.close(f)
-    return DiskFound{search_finish_page(state)}
-
 # Pure scan of retained-descriptor bytes. The helper and native scans hand
 # Bend the exact checked-fd content as one String; this folds it through
 # the SAME octet core as the File driver in bounded windows (windows are
@@ -337,11 +332,6 @@ def scan_content(+content: String, +query: DiskQuery, +endpoint: String, +cursor
 def SEARCH_CURSOR_FRESH() -> Nat:
   16777216n
 
-def search_failure(f: File, +stage: String, error: U32 & String) -> IO(DiskResult):
-  do IO<DiskResult>:
-    Unit <- File.close(f)
-    return DiskFailed{Hist.read_failure_text(error, stage)}
-
 # An empty read with bytes still expected means the file shrank under the
 # snapshot size: report truncation (restart the search), never partial
 # DiskFound success. Only an empty read at remaining 0 is a complete file.
@@ -358,57 +348,6 @@ def search_evidence_truncated(+bits: U32) -> Bool:
 # production scanners fail an early-EOF snapshot with this exact text.
 def scan_changed_text() -> String:
   "history changed; restart search"
-
-def search_loop.truncated(f: File, state: ScanState) -> IO(DiskResult):
-  do IO<DiskResult>:
-    Unit <- File.close(f)
-    return DiskFailed{scan_changed_text()}
-
-def search_loop.eof(truncated: Bool, f: File, state: ScanState) -> IO(DiskResult):
-  match truncated:
-    case True{}: search_loop.truncated(f, state)
-    case False{}: search_finish(state, f)
-
-def search_loop.empty(empty: Bool, f: File, +bytes: List<&2, U32>, +query: DiskQuery, +endpoint: String, +cursor: Nat, state: ScanState, +remaining: Nat, next: File -> ScanState -> Nat -> IO(DiskResult)) -> IO(DiskResult):
-  match empty:
-    case True{}: search_loop.eof(scan_eof_truncated(remaining, True{}), f, state)
-    case False{}:
-      next(f, scan_chunk(bytes, state, query, endpoint, cursor), Nat.sub(remaining, List.length(&2, U32, bytes)))
-
-def search_loop.got(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, +query: DiskQuery, +endpoint: String, +cursor: Nat, state: ScanState, +remaining: Nat, next: File -> ScanState -> Nat -> IO(DiskResult)) -> IO(DiskResult):
-  match pair:
-    case (f, Fail{error}): search_failure(f, "read failed; partial matches were discarded", error)
-    case (f, Done{+bytes}):
-      search_loop.empty(Nat.is_eq(List.length(&2, U32, bytes), 0n), f, bytes, query, endpoint, cursor, state, remaining, next)
-
-def search_loop.read(done: Bool, f: File, +query: DiskQuery, +endpoint: String, +cursor: Nat, state: ScanState, +remaining: Nat, next: File -> ScanState -> Nat -> IO(DiskResult)) -> IO(DiskResult):
-  match done:
-    case True{}: search_finish(state, f)
-    case False{}:
-      do IO<DiskResult>:
-        pair : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, U32.from_nat(Cl.clamp_nat(remaining, SCAN_CHUNK())))
-        search_loop.got(pair, query, endpoint, cursor, state, remaining, next)
-
-def search_loop(fuel: Nat, f: File, +query: DiskQuery, +endpoint: String, +cursor: Nat, state: ScanState, +remaining: Nat) -> IO(DiskResult):
-  match fuel:
-    case 0n: search_finish(state, f)
-    case 1n+p:
-      search_loop.read(Nat.is_eq(remaining, 0n), f, query, endpoint, cursor, state, remaining,
-        f2 => st2 => rest => search_loop(p, f2, query, endpoint, cursor, st2, rest))
-
-def search_size.over(moved: Bool, f: File, +size: Nat, +query: DiskQuery, +endpoint: String, +cursor: Nat) -> IO(DiskResult):
-  match moved:
-    case True{}:
-      do IO<DiskResult>:
-        Unit <- File.close(f)
-        return DiskFailed{scan_changed_text()}
-    case False{}: search_loop(1n+size, f, query, endpoint, cursor, scan_initial(), size)
-
-def search_size(pair: File & Result<&1, &1, U32 & String, U32>, +query: DiskQuery, +endpoint: String, +cursor: Nat) -> IO(DiskResult):
-  match pair:
-    case (f, Fail{error}): search_failure(f, "size unavailable", error)
-    case (f, Done{+size}):
-      search_size.over(Nat.is_gt(cursor, U32.to_nat(size)), f, U32.to_nat(size), query, endpoint, cursor)
 
 # ---- admission predicates (open gates) --------------------------------------
 # Pure rules for integrator-owned Session/CAP decisions. Each names the
@@ -528,44 +467,11 @@ def parse_search_evidence.stripped(nl: Bool, +line: String) -> SearchEvidence:
 def parse_search_evidence(+line: String) -> SearchEvidence:
   parse_search_evidence.stripped(String.ends_with(line, "\n"), line)
 
-# Retained-descriptor scan: the caller holds a private File (opened through
-# the checked native open behind search_open_admitted) and this scan runs
-# bounded 4096-byte chunks to the initial snapshot size, failing closed on
-# size/read/early-EOF errors. No path handling here, so a scan never
-# re-opens by path mid-search.
-# Open-result mapping for the affine-FD seam: the checked native open
-# reports missing as ENOENT (2) and every refusal (symlink, non-regular,
-# foreign, non-private) as EACCES (13) on both backends.
-def search_open.refused(refused: Bool, +code: U32, +msg: String) -> IO(DiskResult):
-  match refused:
-    case True{}: IO.pure(DiskResult, DiskFailed{"history search refused: file not admitted"})
-    case False{}: IO.pure(DiskResult, DiskFailed{Hist.read_failure_text((code, msg), "open failed")})
-
-def search_open.missing(missing: Bool, +code: U32, +msg: String) -> IO(DiskResult):
-  match missing:
-    case True{}: IO.pure(DiskResult, DiskFound{DiskPage{Nil{}, 0n, 0n, True{}}})
-    case False{}: search_open.refused(U32.is_eq(code, 13), code, msg)
-
-def search_open.failed(error: U32 & String) -> IO(DiskResult):
-  match error:
-    case (+code, +msg): search_open.missing(U32.is_eq(code, 2), code, msg)
-
-def search_open_file(f: File, +endpoint: String, +query: DiskQuery, +cursor: Nat) -> IO(DiskResult):
-  do IO<DiskResult>:
-    pair : File & Result<&1, &1, U32 & String, U32> <- File.size(f)
-    search_size(pair, query, endpoint, cursor)
-
-def search_opened(+query: DiskQuery, +endpoint: String, +cursor: Nat, result: Result<&1, &1, U32 & String, File>) -> IO(DiskResult):
-  match result:
-    case Fail{error}: search_open.failed(error)
-    case Done{f}: search_open_file(f, endpoint, query, cursor)
-
 # Path-based scans enter through history_search_io.search_file_checked,
 # which opens the retained descriptor behind the checked native open and
-# feeds search_opened directly. No probe-then-reopen window remains
-# anywhere: the helper and native drivers hand scan_content the exact
-# checked-descriptor bytes, and the retained-handle entry above stays for
-# caller-held Files.
+# feeds the retained-descriptor scan in history_search_io directly. No
+# probe-then-reopen window remains anywhere: the helper and native drivers
+# hand scan_content the exact checked-descriptor bytes.
 # ---- draft/chathistory capability ---------------------------------------
 # Detection mirrors the SASL cap check. Negotiation state and CAP END stay
 # with the CAP lane; these builders only gate on the given flag.
@@ -794,12 +700,20 @@ def tag_seg.got(pair: String & String) -> String:
 def tag_seg(+line: String) -> String:
   tag_seg.got(Irc.take_until_space(String.drop(line, 1n)))
 
+# Match before recurse: the first matching tag wins, so a hit returns its
+# value without evaluating the tail walk. The miss arm takes a lazy Unit->
+# continuation (Bend args are eager, so the old Bool.pick scanned the whole
+# tail even after a match).
+def tag_value.step(hit: Bool, +h: String, +key: String, rest: Unit -> String) -> String:
+  match hit:
+    case True{}: String.drop(h, Nat.add(String.length(key), 1n))
+    case False{}: rest(Unit{})
+
 def tag_value.tags(tags: List<&2, String>, +key: String) -> String:
   match tags:
     case Nil{}: ""
     case Con{+h, t}:
-      Bool.pick(String, String.starts_with(h, key ++ "="),
-        String.drop(h, Nat.add(String.length(key), 1n)), tag_value.tags(t, key))
+      tag_value.step(String.starts_with(h, key ++ "="), h, key, _ => tag_value.tags(t, key))
 
 def tag_value.seg(+line: String, +key: String, tagged: Bool) -> String:
   match tagged:
@@ -1067,8 +981,22 @@ def batch_claimed_range.go(fuel: Nat, +lo: Nat) -> List<&2, Nat>:
 def batch_claimed_ids(+pre: Nat, +post: Nat) -> List<&2, Nat>:
   batch_claimed_range.go(Nat.sub(post, pre), pre)
 
+# `claimed` is ascending by construction (batch_claimed_ids builds ascending
+# ranges and hist_live_note_archived stores them as-is), so the scan stops
+# past the target instead of walking the whole ledger per line. Membership
+# results match List.contains on ascending input.
+def batch_claimed_member.go(eq: Bool, past: Bool, rest: Unit -> Bool) -> Bool:
+  match eq:
+    case True{}: True{}
+    case False{}:
+      match past:
+        case True{}: False{}
+        case False{}: rest(Unit{})
+
 def batch_claimed_member(+claimed: List<&2, Nat>, +id: Nat) -> Bool:
-  List.contains(~Nat, ~Nat.is_eq, claimed, id)
+  match claimed:
+    case Nil{}: False{}
+    case Con{+head, rest}: batch_claimed_member.go(Nat.is_eq(head, id), Nat.is_gt(head, id), _ => batch_claimed_member(rest, id))
 
 def batch_claimed_quiet(+claimed: List<&2, Nat>, +id: Nat) -> Bool:
   batch_claimed_member(claimed, id)

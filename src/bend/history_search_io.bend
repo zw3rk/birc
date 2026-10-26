@@ -7,6 +7,7 @@
 # helper seam beyond the admitted bytes; refusals and helper failures
 # fail closed with fixed diagnostics, never child output.
 import Base
+import ./buffer.bend as Cl
 import ./history_search.bend as Hs
 import ./history.bend as Hist
 import ./session.bend as Sess
@@ -124,6 +125,99 @@ def disk_search_checked.gated(disabled: Bool, +path: String, +endpoint: String, 
 def disk_search_checked(+path: String, +endpoint: String, +query: Hs.DiskQuery, +cursor: Nat, +history_on: Bool) -> IO(Hs.DiskResult):
   disk_search_checked.gated(String.is_empty(path) || Bool.not(history_on), path, endpoint, query, cursor)
 
+# ---- retained-descriptor scan -------------------------------------------
+# The helper and native scans above are production. This bounded File chain
+# runs the same octet core (Hs.scan_chunk) for caller-held descriptors; it
+# lives in the IO layer, not the proof-facing search module.
+# Open-result mapping for the affine-FD seam: the checked native open
+# reports missing as ENOENT (2) and every refusal (symlink, non-regular,
+# foreign, non-private) as EACCES (13) on both backends.
+
+def search_finish(state: Hs.ScanState, f: File) -> IO(Hs.DiskResult):
+  do IO<Hs.DiskResult>:
+    Unit <- File.close(f)
+    return Hs.DiskFound{Hs.search_finish_page(state)}
+
+def search_failure(f: File, +stage: String, error: U32 & String) -> IO(Hs.DiskResult):
+  do IO<Hs.DiskResult>:
+    Unit <- File.close(f)
+    return Hs.DiskFailed{Hist.read_failure_text(error, stage)}
+
+def search_loop.truncated(f: File, state: Hs.ScanState) -> IO(Hs.DiskResult):
+  do IO<Hs.DiskResult>:
+    Unit <- File.close(f)
+    return Hs.DiskFailed{Hs.scan_changed_text()}
+
+def search_loop.eof(truncated: Bool, f: File, state: Hs.ScanState) -> IO(Hs.DiskResult):
+  match truncated:
+    case True{}: search_loop.truncated(f, state)
+    case False{}: search_finish(state, f)
+
+def search_loop.empty(empty: Bool, f: File, +bytes: List<&2, U32>, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat, state: Hs.ScanState, +remaining: Nat, next: File -> Hs.ScanState -> Nat -> IO(Hs.DiskResult)) -> IO(Hs.DiskResult):
+  match empty:
+    case True{}: search_loop.eof(Hs.scan_eof_truncated(remaining, True{}), f, state)
+    case False{}:
+      next(f, Hs.scan_chunk(bytes, state, query, endpoint, cursor), Nat.sub(remaining, List.length(&2, U32, bytes)))
+
+def search_loop.got(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat, state: Hs.ScanState, +remaining: Nat, next: File -> Hs.ScanState -> Nat -> IO(Hs.DiskResult)) -> IO(Hs.DiskResult):
+  match pair:
+    case (f, Fail{error}): search_failure(f, "read failed; partial matches were discarded", error)
+    case (f, Done{+bytes}):
+      search_loop.empty(Nat.is_eq(List.length(&2, U32, bytes), 0n), f, bytes, query, endpoint, cursor, state, remaining, next)
+
+def search_loop.read(done: Bool, f: File, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat, state: Hs.ScanState, +remaining: Nat, next: File -> Hs.ScanState -> Nat -> IO(Hs.DiskResult)) -> IO(Hs.DiskResult):
+  match done:
+    case True{}: search_finish(state, f)
+    case False{}:
+      do IO<Hs.DiskResult>:
+        pair : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, U32.from_nat(Cl.clamp_nat(remaining, Hs.SCAN_CHUNK())))
+        search_loop.got(pair, query, endpoint, cursor, state, remaining, next)
+
+def search_loop(fuel: Nat, f: File, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat, state: Hs.ScanState, +remaining: Nat) -> IO(Hs.DiskResult):
+  match fuel:
+    case 0n: search_finish(state, f)
+    case 1n+p:
+      search_loop.read(Nat.is_eq(remaining, 0n), f, query, endpoint, cursor, state, remaining,
+        f2 => st2 => rest => search_loop(p, f2, query, endpoint, cursor, st2, rest))
+
+def search_size.over(moved: Bool, f: File, +size: Nat, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
+  match moved:
+    case True{}:
+      do IO<Hs.DiskResult>:
+        Unit <- File.close(f)
+        return Hs.DiskFailed{Hs.scan_changed_text()}
+    case False{}: search_loop(1n+size, f, query, endpoint, cursor, Hs.scan_initial(), size)
+
+def search_size(pair: File & Result<&1, &1, U32 & String, U32>, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
+  match pair:
+    case (f, Fail{error}): search_failure(f, "size unavailable", error)
+    case (f, Done{+size}):
+      search_size.over(Nat.is_gt(cursor, U32.to_nat(size)), f, U32.to_nat(size), query, endpoint, cursor)
+
+def search_open.refused(refused: Bool, +code: U32, +msg: String) -> IO(Hs.DiskResult):
+  match refused:
+    case True{}: IO.pure(Hs.DiskResult, Hs.DiskFailed{"history search refused: file not admitted"})
+    case False{}: IO.pure(Hs.DiskResult, Hs.DiskFailed{Hist.read_failure_text((code, msg), "open failed")})
+
+def search_open.missing(missing: Bool, +code: U32, +msg: String) -> IO(Hs.DiskResult):
+  match missing:
+    case True{}: IO.pure(Hs.DiskResult, Hs.DiskFound{Hs.DiskPage{Nil{}, 0n, 0n, True{}}})
+    case False{}: search_open.refused(U32.is_eq(code, 13), code, msg)
+
+def search_open.failed(error: U32 & String) -> IO(Hs.DiskResult):
+  match error:
+    case (+code, +msg): search_open.missing(U32.is_eq(code, 2), code, msg)
+
+def search_open_file(f: File, +endpoint: String, +query: Hs.DiskQuery, +cursor: Nat) -> IO(Hs.DiskResult):
+  do IO<Hs.DiskResult>:
+    pair : File & Result<&1, &1, U32 & String, U32> <- File.size(f)
+    search_size(pair, query, endpoint, cursor)
+
+def search_opened(+query: Hs.DiskQuery, +endpoint: String, +cursor: Nat, result: Result<&1, &1, U32 & String, File>) -> IO(Hs.DiskResult):
+  match result:
+    case Fail{error}: search_open.failed(error)
+    case Done{f}: search_open_file(f, endpoint, query, cursor)
+
 # Affine-FD seam: one checked native open (lstat, O_NOFOLLOW, fstat
 # admission) hands the retained descriptor out as an affine File; refusals
 # arrive already closed. No probe-then-reopen window remains: the scan runs
@@ -142,7 +236,7 @@ def search_file_checked.gated(disabled: Bool, +path: String, +endpoint: String, 
     case False{}:
       do IO<Hs.DiskResult>:
         result : Result<&1, &1, U32 & String, File> <- open_private(path)
-        Hs.search_opened(query, endpoint, cursor, result)
+        search_opened(query, endpoint, cursor, result)
 
 def search_file_checked(+path: String, +endpoint: String, +query: Hs.DiskQuery, +cursor: Nat, +history_on: Bool) -> IO(Hs.DiskResult):
   search_file_checked.gated(String.is_empty(path) || Bool.not(history_on), path, endpoint, query, cursor)

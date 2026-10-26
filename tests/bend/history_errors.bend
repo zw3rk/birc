@@ -48,7 +48,7 @@ def size_pair(pair: File & Result<&1, &1, U32 & String, U32>) -> IO(Unit):
 
 def read_error(f: File) -> IO(Unit):
   do IO<Unit>:
-    cl : Cl.Client <- H.read_loop.got((f, Fail{(5, "injected I/O failure")}), H.ReadState{configured(), 65 <> Nil{}, 1n, False{}}, "a:6667", 3, "14:00:00", 1n,
+    cl : Cl.Client <- HistIO.read_loop.got((f, Fail{(5, "injected I/O failure")}), H.ReadState{configured(), 65 <> Nil{}, 1n, False{}}, "a:6667", 3, "14:00:00", 1n,
       f2 => state => rest => do IO<Cl.Client>:
         Unit <- File.close(f2)
         IO.die(Cl.Client, 1, "read error called continuation"))
