@@ -2107,3 +2107,18 @@ def Laws.peer_kick_preserves_intent():
 
 def Laws.url_runs_share_view_exclusions():
   {==}
+
+def Laws.feed_hidden_rejoin_detects_split_marker():
+  {==}
+
+def Laws.feed_hidden_absent_without_marker():
+  {==}
+
+def Laws.hist_stay_keeps_draft_and_stash():
+  {==}
+
+def Laws.hist_step_back_from_bottom_shelves_draft():
+  {==}
+
+def Laws.hist_shelve_keeps_stash_off_bottom():
+  {==}

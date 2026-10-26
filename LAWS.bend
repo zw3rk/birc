@@ -53,6 +53,7 @@ import ./src/bend/history_search.bend as Hs
 import ./src/bend/session_cards.bend as SessionCards
 import ./src/bend/cards_view.bend as CardsView
 import ./src/bend/wire_style.bend as Ws
+import ./src/bend/session_keys.bend as Sk
 
 law first_server_welcome_assigns_nickname:
   {Sess.registration_client(False{}, Cl.init("me", "s"), ":s 001 Guest42 :welcome") == Some{Cl.init("Guest42", "s")} : Maybe<&2, Cl.Client>}
@@ -1975,3 +1976,18 @@ law url_runs_share_view_exclusions:
 
 law peer_kick_preserves_intent:
   {JoinPlan.desired_names(JoinPlan.received(JoinPlan.initial("#room"), Cl.init("me", "s"), ":op!u@h KICK #room alice :bye")) == ["#room"] : List<&2, String>}
+
+law feed_hidden_rejoin_detects_split_marker:
+  {Feed.has_hidden(Irc.Message{"", "", "324", 324, ["#c", "+k", "[channel", "key", "hidden]"]}) == True{} : Bool}
+
+law feed_hidden_absent_without_marker:
+  {Feed.has_hidden(Irc.Message{"", "", "324", 324, ["#c", "+k", "opaque-secret"]}) == False{} : Bool}
+
+law hist_stay_keeps_draft_and_stash:
+  {Sk.hist_move(["a", "b"], 1n, "S", "D", Sk.StepStay{}) == Sk.Recall{1n, "D", "D"} : Sk.Recall}
+
+law hist_step_back_from_bottom_shelves_draft:
+  {Sk.hist_move(["a", "b"], 2n, "S", "D", Sk.StepPrev{}) == Sk.Recall{1n, "b", "D"} : Sk.Recall}
+
+law hist_shelve_keeps_stash_off_bottom:
+  {Sk.hist_prev.shelve(False{}, "D", "S") == "S" : String}
