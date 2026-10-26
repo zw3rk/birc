@@ -189,6 +189,9 @@ def cleared_status_show() -> String:
 def known_show() -> String:
   "isupport chantypes=#&+! status=@+ chanmodes=b,k,s,l modes=3 prefix=(ov)@+ extra=~&% nicklen=9 channellen=50 topiclen=390 kicklen=390 network= casemapping=rfc1459 maxlist= updated=true"
 
+def withdrawn_show() -> String:
+  "isupport chantypes=#&+! status=@+ chanmodes=,,, modes=3 prefix=(ov)@+ extra=~&% nicklen=9 channellen=50 topiclen=390 kicklen=390 network= casemapping=rfc1459 maxlist= updated=true"
+
 def lifecycle_neg_show() -> String:
   "isupport chantypes=#&+! status=@ chanmodes=b,k,l,imnpst modes=3 prefix=(o)^ extra= nicklen=9 channellen=50 topiclen=390 kicklen=390 network= casemapping=rfc1459 maxlist= updated=true"
 
@@ -200,7 +203,7 @@ def repairs() -> IO(Unit):
     Unit <- E.must_eq("-NICKLEN resets the previous burst value", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me NICKLEN=31 :x"), ":s 005 me -NICKLEN :x")), default_updated_show())
     Unit <- E.must_eq("-PREFIX restores modes, sigils, and extras", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me PREFIX=(q)~ :x"), ":s 005 me -PREFIX :x")), default_updated_show())
     Unit <- E.must_eq("-STATUSMSG disables support", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me STATUSMSG=@ :x"), ":s 005 me -STATUSMSG :x")), cleared_status_show())
-    Unit <- E.must_eq("-CHANMODES restores the default classes", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me CHANMODES=eIbq,k,flj,CFLMPQScgimnprstz :x"), ":s 005 me -CHANMODES :x")), default_updated_show())
+    Unit <- E.must_eq("-CHANMODES clears the classes and drops certainty", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me CHANMODES=eIbq,k,flj,CFLMPQScgimnprstz :x"), ":s 005 me -CHANMODES :x")), withdrawn_show())
     Unit <- E.must_eq("-CASEMAPPING restores rfc1459", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me CASEMAPPING=ascii :x"), ":s 005 me -CASEMAPPING :x")), default_updated_show())
     Unit <- E.must_eq("-UNKNOWN is ignored", Is.show(Is.apply_line(burst(), ":s 005 me -FOO :x")), Is.show(Is.apply_line(burst(), ":s 005 me :x")))
     Unit <- E.must_eq("lowercase removal is accepted", Is.show(Is.apply_line(Is.apply_line(Is.defaults(), ":s 005 me NICKLEN=31 :x"), ":s 005 me -nicklen :x")), default_updated_show())
@@ -269,7 +272,7 @@ def third_review() -> IO(Unit):
     Unit <- E.must_eq("known l is flag", cls(known_map(), ch("l")), "flag")
     Unit <- E.must_eq("known s is set-only", cls(known_map(), ch("s")), "set")
     Unit <- E.must("known l takes no arg", Bool.not(Is.takes_arg(known_map(), ch("l"), True{})))
-    Unit <- E.must_eq("withdrawn show still defaults", Is.show(withdrawn()), default_updated_show())
+    Unit <- E.must_eq("withdrawn show clears the classes", Is.show(withdrawn()), withdrawn_show())
     Unit <- E.must("withdrawn CHANMODES is uncertain", Bool.not(Is.cm_known(withdrawn())))
     Unit <- E.must_eq("withdrawn +lks hides all", idx(Is.key_index(withdrawn(), "+lks", ["s3cret", "50"])), "none")
     Unit <- E.must_eq("withdrawn l is unknown", cls(withdrawn(), ch("l")), "unknown")
@@ -277,6 +280,8 @@ def third_review() -> IO(Unit):
     Unit <- E.must_eq("withdrawn o stays arg", cls(withdrawn(), ch("o")), "arg")
     Unit <- E.must("withdrawn l takes arg (unknown)", Is.takes_arg(withdrawn(), ch("l"), True{}))
     Unit <- E.must("readvertised CHANMODES is certain", Is.cm_known(readvertised()))
+    Unit <- E.must("malformed CHANMODES drops certainty", Bool.not(Is.cm_known(Is.apply_line(known_map(), ":s 005 me CHANMODES=k,l,im :are supported"))))
+    Unit <- E.must("non-letter CHANMODES drops certainty", Bool.not(Is.cm_known(Is.apply_line(known_map(), ":s 005 me CHANMODES=b1,k,l,im :are supported"))))
     Unit <- E.must_eq("readvertised +lks finds key at 0", idx(Is.key_index(readvertised(), "+lks", ["s3cret", "50"])), "0")
     Unit <- E.must_eq("readvertised show matches known", Is.show(readvertised()), known_show())
     Unit <- E.must_eq("lifecycle_neg show stores stale @", Is.show(lifecycle_neg()), lifecycle_neg_show())

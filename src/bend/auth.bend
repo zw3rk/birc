@@ -307,8 +307,23 @@ def step_for.parsed(+cl: Cl.Client, +live_port: U32, prefix: String, m: Maybe<&2
     case None{}: unchanged(Cl.get_auth(cl))
     case Some{msg}: step_for.config(Cl.client_auth_config(cl), cl, live_port, prefix, msg)
 
+# Steady-state fast path (D60): a completed handshake returns unchanged
+# for every line (step() on Done is the identity; the SASL sub-path can only
+# reach unchanged(Done) too), so skip the per-line parse + prefix entirely.
+# NickWait/Held/Profile must still parse: 001 advances NickWait, Held
+# resumes, and only the phase gate (not config) decides.
+def step_for.gated(+phase: Cl.AuthPhase, config: Cl.AuthConfig, +cl: Cl.Client, +line: String, +live_port: U32) -> Reply:
+  match phase:
+    case Cl.AuthDone{}: unchanged(phase)
+    case _: step_for.parsed(cl, live_port, Irc.source_prefix(line), Irc.parse(line))
+
+def step_for.ready(config: Cl.AuthConfig, +cl: Cl.Client, +line: String, +live_port: U32) -> Reply:
+  match config:
+    case Cl.AuthDisabled{}: unchanged(Cl.get_auth(cl))
+    case _: step_for.gated(Cl.get_auth(cl), config, cl, line, live_port)
+
 def step_for(+cl: Cl.Client, +line: String, +live_port: U32) -> Reply:
-  step_for.parsed(cl, live_port, Irc.source_prefix(line), Irc.parse(line))
+  step_for.ready(Cl.client_auth_config(cl), cl, line, live_port)
 
 # Suppress only the trusted identity probe and exact confirmation controls.
 # Submit owns the shared automatic/manual credential self-echo classifier.
@@ -323,8 +338,14 @@ def consume_line.parsed(+cl: Cl.Client, +prefix: String, m: Maybe<&2, Irc.Messag
     case None{}: False{}
     case Some{msg}: consume_line.phase(Cl.get_auth(cl), cl, prefix, msg)
 
+def consume_line.probe(phase: Cl.AuthPhase, +cl: Cl.Client, +line: String) -> Bool:
+  match phase:
+    case Cl.AuthNickProbe{}: consume_line.parsed(cl, Irc.source_prefix(line), Irc.parse(line))
+    case Cl.AuthNickResult{}: consume_line.parsed(cl, Irc.source_prefix(line), Irc.parse(line))
+    case _: False{}
+
 def consume_line(+cl: Cl.Client, +line: String) -> Bool:
-  consume_line.parsed(cl, Irc.source_prefix(line), Irc.parse(line))
+  consume_line.probe(Cl.get_auth(cl), cl, line)
 
 def log_notice(+cl: Cl.Client, notice: Notice) -> Cl.Client:
   match notice:

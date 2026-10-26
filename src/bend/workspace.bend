@@ -25,7 +25,8 @@
 #   Bracketed endpoints still fail in Endpoint.parse. IPv6 literals stay
 #   unsupported on the IRC endpoint.
 # - Admission mirrors the actor guards exactly: cmd_admitted is
-#   Sid.cmd_current (server + generation for Dial/Pump/Begin), msg_admitted
+#   Sid.cmd_current (server + generation for Dial/Pump/Pong/Begin/Search),
+#   msg_admitted
 #   is Sid.evt_current, writer_done_acked is Sid.writer_done_current. Cross-
 #   server, stale-generation, unknown-part, and invalid-id traffic is
 #   dropped (fail closed); reader EOF never acknowledges shutdown.
@@ -114,43 +115,43 @@ def ws_nparts(+ws: Workspace) -> Nat:
 
 # ---- part lookup --------------------------------------------------------
 
-def find_part.pick(hit: Bool, +h: Part, +cont: Maybe<&2, Part>) -> Maybe<&2, Part>:
+# Short-circuit: stop at the first matching part instead of walking the
+# whole spine (Bend args are eager, so passing the recursive tail as a plain
+# argument traverses every part even after a hit). The helper takes the
+# continuation as a parameter and never names the recursion, so the
+# callee-before-caller order holds. Parts are capped at MAX_SERVERS, so
+# this is a small constant win plus tail sharing.
+def find_part.step(hit: Bool, +h: Part, k: Unit -> Maybe<&2, Part>) -> Maybe<&2, Part>:
   match hit:
     case True{}: Some{h}
-    case False{}: cont
-
-def find_part.buf(+h: Part, +cont: Maybe<&2, Part>, +id: Key.ServerId) -> Maybe<&2, Part>:
-  match h:
-    case Part{+pid, _, _, _}:
-      find_part.pick(Key.eq(pid, id), h, cont)
+    case False{}: k(Unit{})
 
 def find_part.go(+xs: List<&2, Part>, +id: Key.ServerId) -> Maybe<&2, Part>:
   match xs:
     case Nil{}: None{}
     case Con{+h, +t}:
-      +cont = find_part.go(t, id)
-      find_part.buf(h, cont, id)
+      match h:
+        case Part{+pid, _, _, _}: find_part.step(Key.eq(pid, id), h, _ => find_part.go(t, id))
 
 def find_part(+ws: Workspace, +id: Key.ServerId) -> Maybe<&2, Part>:
   match ws:
     case Workspace{+parts, _, _, _}: find_part.go(parts, id)
 
-def replace_part.pick(hit: Bool, +p: Part, +h: Part, +rest: List<&2, Part>) -> List<&2, Part>:
+# Short-circuit: keep the original tail instead of rebuilding it. On a hit
+# the new part conses onto the untouched tail; misses rebuild one cons cell
+# each (same eager-args rationale as find_part.step above). The continuation
+# carries the recursive call so this helper never names go itself.
+def replace_part.step(hit: Bool, +p: Part, +h: Part, +id: Key.ServerId, +t: List<&2, Part>, k: Unit -> List<&2, Part>) -> List<&2, Part>:
   match hit:
-    case True{}: p <> rest
-    case False{}: h <> rest
-
-def replace_part.buf(+h: Part, +rest: List<&2, Part>, +id: Key.ServerId, +p: Part) -> List<&2, Part>:
-  match h:
-    case Part{+pid, _, _, _}:
-      replace_part.pick(Key.eq(pid, id), p, h, rest)
+    case True{}: p <> t
+    case False{}: h <> k(Unit{})
 
 def replace_part.go(+xs: List<&2, Part>, +id: Key.ServerId, +p: Part) -> List<&2, Part>:
   match xs:
     case Nil{}: Nil{}
     case Con{+h, +t}:
-      +rest = replace_part.go(t, id, p)
-      replace_part.buf(h, rest, id, p)
+      match h:
+        case Part{+pid, _, _, _}: replace_part.step(Key.eq(pid, id), p, h, id, t, _ => replace_part.go(t, id, p))
 
 def replace_part(+ws: Workspace, +p: Part) -> Workspace:
   match ws:
@@ -849,16 +850,25 @@ def on_routed_fail.recon(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts
   match recon:
     case (+st3, +cmd): on_routed_fail.cmd(parts, cur, ds, rt, id, gen, scope, st3, cmd)
 
-def on_routed_fail.gated(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts.Drafts, +rt: List<&2, SlotEpoch>, +id: Key.ServerId, +gen: U32, +scope: Sid.Scope, +st: Sess.Session, +ts: String, +fail_msg: String, admitted: Bool) -> FailResult:
+# A stale-generation failure still informs: record the notice on the part's
+# current log without touching connection/framer state, issuing no command
+# and no reconnect intent. Full logs and unknown senders stay silent.
+def on_routed_fail.stale(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts.Drafts, +rt: List<&2, SlotEpoch>, +id: Key.ServerId, +gen: U32, +scope: Sid.Scope, +st: Sess.Session, +ts: String, +fail_msg: String, gen_ok: Bool) -> FailResult:
+  match gen_ok:
+    case True{}: FailResult{Workspace{parts, cur, ds, rt}, None{}, None{}}
+    case False{}:
+      FailResult{Workspace{replace_part.go(parts, id, Part{id, gen, scope, clamp_part(Sess.session_error(Sess.session_set_now(st, ts), fail_msg), id)}), cur, ds, rt}, None{}, None{}}
+
+def on_routed_fail.gated(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts.Drafts, +rt: List<&2, SlotEpoch>, +id: Key.ServerId, +gen: U32, +scope: Sid.Scope, +st: Sess.Session, +ts: String, +fail_msg: String, admitted: Bool, gen_ok: Bool) -> FailResult:
   match admitted:
-    case False{}: FailResult{Workspace{parts, cur, ds, rt}, None{}, None{}}
+    case False{}: on_routed_fail.stale(parts, cur, ds, rt, id, gen, scope, st, ts, fail_msg, gen_ok)
     case True{}:
       on_routed_fail.recon(parts, cur, ds, rt, id, gen, scope, Sess.session_autoreconnect(Sess.session_fail(Sess.session_set_now(st, ts), fail_msg)))
 
 def on_routed_fail.part(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts.Drafts, +rt: List<&2, SlotEpoch>, +rm: Sid.RoutedMsg, +p: Part, +ts: String, +fail_msg: String) -> FailResult:
   match p:
     case Part{+id, +gen, +scope, +st}:
-      on_routed_fail.gated(parts, cur, ds, rt, id, gen, scope, st, ts, fail_msg, ids_admitted(Sid.evt_current(rm, id, gen), st, id))
+      on_routed_fail.gated(parts, cur, ds, rt, id, gen, scope, st, ts, fail_msg, ids_admitted(Sid.evt_current(rm, id, gen), st, id), Sid.evt_current(rm, id, gen))
 
 def on_routed_fail.found(+parts: List<&2, Part>, +cur: Key.ServerId, +ds: Drafts.Drafts, +rt: List<&2, SlotEpoch>, +rm: Sid.RoutedMsg, +got: Maybe<&2, Part>, +ts: String, +fail_msg: String) -> FailResult:
   match got:

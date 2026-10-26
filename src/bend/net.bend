@@ -593,10 +593,18 @@ def frame_result.pol(
           pol_hot(tab, click, up, dn, hist, enter, comp, focus) || Bool.not(Sess.size_eq(Sess.session_size(st), Sess.Size{rows, cols}))
         )
 
+# Restore-only draft upload (D51): the eager Bool.pick built (and threw
+# away) a full Session draft on every frame. Branch first; the upload runs
+# only when restore actually needs it.
+def frame_result.restore.go(restore: Bool, ui: T.Ui, +st: Sess.Session, cmd: Sess.NetCmd, halt: Bool, more: Bool, typed: String) -> T.Ui & Sess.Session & Sess.NetCmd & Bool & Bool:
+  match restore:
+    case True{}: (ui, Sess.session_upload_draft(st, typed, 1), cmd, halt, more)
+    case False{}: (ui, st, cmd, halt, more)
+
 def frame_result.restore(packed: T.Ui & Sess.Session & Sess.NetCmd & Bool & Bool, restore: Bool, typed: String) -> T.Ui & Sess.Session & Sess.NetCmd & Bool & Bool:
   match packed:
     case (ui, +st, cmd, halt, more):
-      (ui, Bool.pick(Sess.Session, restore, Sess.session_upload_draft(st, typed, 1), st), cmd, halt, more)
+      frame_result.restore.go(restore, ui, st, cmd, halt, more, typed)
 
 def frame_result.hot(result: (T.Ui & Sess.Session & Sess.NetCmd & Bool & Bool) & Bool, +handled: Bool, restore: Bool, typed: String) -> (T.Ui & Sess.Session & Sess.NetCmd & Bool & Bool) & Bool:
   match result:
@@ -1012,11 +1020,50 @@ def on_from(
       on_evt(e, ui, st, evt, cmd, ack, gen, k)
 
 
-def on_typing_tick.painted(acc: T.Ui & Sess.Session & U32 & Bool, k: (Bool & (T.Ui & Sess.Session & U32 & Bool)) -> IO(Unit)) -> IO(Unit):
-  k((True{}, acc))
+# Readiness and scan are separate bits. Output readiness (retry) repaints an
+# unchanged tick, but only typing expiry (changed) scans scrollback: a
+# writable short frame must not force a media/cards/upload observe pass.
+# The pure paint decision stays in on_typing_tick.retry (pinned by
+# ui_input_queue); this chain threads scan = changed to live_step.tick.
+def on_typing_tick.painted_scan(acc: T.Ui & Sess.Session & U32 & Bool, +scan: Bool, k: (Bool & (T.Ui & Sess.Session & U32 & Bool)) -> IO(Unit)) -> IO(Unit):
+  k((scan, acc))
+
+def on_typing_tick.paint(
+  paint: Bool,
+  +scan: Bool,
+  +st2: Sess.Session,
+  ui: T.Ui,
+  +evt: Chan(Sess.UiMsg),
+  +cmd: Chan(Sess.NetCmd),
+  +ack: Chan(Unit),
+  +gen: U32,
+  k: (Bool & (T.Ui & Sess.Session & U32 & Bool)) -> IO(Unit)
+) -> IO(Unit):
+  match paint:
+    case False{}:
+      k((scan, (ui, st2, gen, False{})))
+    case True{}:
+      do IO<Unit>:
+        got : T.Ui & T.UiKeys <- paint_session(ui, st2)
+        on_chunk.paint(got, st2, evt, cmd, ack, gen, acc => on_typing_tick.painted_scan(acc, scan, k))
+
+# Paint/scan policy, pinned by ui_input_queue: output readiness (ready) may
+# repaint an unchanged tick, but only typing expiry (changed) scans
+# scrollback. Each bit is consumed exactly once: expiry fans out by match,
+# readiness flows only into the idle branch.
+def on_typing_tick.bits(changed: Bool, ready: Bool) -> Bool & Bool:
+  match changed:
+    case True{}: (True{}, True{})
+    case False{}: (ready, False{})
+
+def on_typing_tick.paint2(bits: Bool & Bool, +st2: Sess.Session, ui: T.Ui, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (Bool & (T.Ui & Sess.Session & U32 & Bool)) -> IO(Unit)) -> IO(Unit):
+  match bits:
+    case (paint, scan):
+      on_typing_tick.paint(paint, scan, st2, ui, evt, cmd, ack, gen, k)
 
 def on_typing_tick.pick(
   pair: Sess.Session & Bool,
+  ready: Bool,
   ui: T.Ui,
   +evt: Chan(Sess.UiMsg),
   +cmd: Chan(Sess.NetCmd),
@@ -1026,13 +1073,7 @@ def on_typing_tick.pick(
 ) -> IO(Unit):
   match pair:
     case (+st2, changed):
-      match changed:
-        case False{}:
-          k((False{}, (ui, st2, gen, False{})))
-        case True{}:
-          do IO<Unit>:
-            got : T.Ui & T.UiKeys <- paint_session(ui, st2)
-            on_chunk.paint(got, st2, evt, cmd, ack, gen, acc => on_typing_tick.painted(acc, k))
+      on_typing_tick.paint2(on_typing_tick.bits(changed, ready), st2, ui, evt, cmd, ack, gen, k)
 
 def on_typing_tick.retry(pair: Sess.Session & Bool, retry: Bool) -> Sess.Session & Bool:
   match pair:
@@ -1040,9 +1081,12 @@ def on_typing_tick.retry(pair: Sess.Session & Bool, retry: Bool) -> Sess.Session
 
 # G6 live: the tick expires inbound typing beside stepping outbound typing.
 # At most one TAGMSG wire leaves through the bounded actor path per tick.
+# ready (output readiness) and changed (typing expiry) stay separate: ready
+# can repaint, but only changed becomes the downstream scan bit.
 def on_typing_tick.emit(
   ticked: Sess.Session & List<&2, String>,
   changed: Bool,
+  ready: Bool,
   ui: T.Ui,
   +evt: Chan(Sess.UiMsg),
   +cmd: Chan(Sess.NetCmd),
@@ -1054,7 +1098,7 @@ def on_typing_tick.emit(
     case (+st3, +outs):
       do IO<Unit>:
         gen2 : U32 <- emit_outs(cmd, outs, gen, List.is_empty(&2, String, outs))
-        on_typing_tick.pick((st3, changed), ui, evt, cmd, ack, gen2, k)
+        on_typing_tick.pick((st3, changed), ready, ui, evt, cmd, ack, gen2, k)
 
 def on_typing_tick.typed(
   expired: Sess.Session & Bool,
@@ -1069,7 +1113,7 @@ def on_typing_tick.typed(
 ) -> IO(Unit):
   match expired:
     case (+st2, changed):
-      on_typing_tick.emit(Sess.session_tick_typing(st2, now_ms), changed || retry, ui, evt, cmd, ack, gen, k)
+      on_typing_tick.emit(Sess.session_tick_typing(st2, now_ms), changed, retry, ui, evt, cmd, ack, gen, k)
 
 def on_typing_tick.ready(
   got: T.Ui & U32,
@@ -1829,26 +1873,9 @@ def live_step.recv(
     case Some{+m}:
       live_step.dispatch(m, ui, st, evt, cmd, ack, gen, scheduled, hist_path, ctx, k)
 
-# Keep the recursive Session cell intact across Chan.recv; Ui and the
-# affine received message stay outside it. An absent internal cell fails
-# closed through the existing owned shutdown path, never a demo substitute.
-def live_step.recv_wait(
-  +saved: List<&2, Sess.Session>,
-  g: Maybe<&1, Sess.UiMsg>,
-  ui: T.Ui,
-  +evt: Chan(Sess.UiMsg),
-  +cmd: Chan(Sess.NetCmd),
-  +ack: Chan(Unit),
-  +gen: U32,
-  +scheduled: Bool,
-  +hist_path: String,
-  +ctx: PrefLive.Context,
-  k: ((T.Ui & Sess.Session & U32 & Bool) & PrefLive.Context) -> IO(Unit)
-) -> IO(Unit):
-  match saved:
-    case Nil{}: shutdown_failed(ui, cmd, ack, "birc: missing live session wait state")
-    case Con{+st, _}: live_step.recv(g, ui, st, evt, cmd, ack, gen, scheduled, hist_path, ctx, k)
-
+# The live Session carries across Chan.recv directly; Ui and the affine
+# received message stay outside it. The cell is a direct parameter, so no
+# absent-cell arm exists; cmd-close still exits through preferences_exit.
 def live_step(
   ui: T.Ui,
   +st: Sess.Session,
@@ -1861,10 +1888,9 @@ def live_step(
   +ctx: PrefLive.Context,
   k: ((T.Ui & Sess.Session & U32 & Bool) & PrefLive.Context) -> IO(Unit)
 ) -> IO(Unit):
-  +saved: List<&2, Sess.Session> = [st]
   do IO<Unit>:
     g : Maybe<&1, Sess.UiMsg> <- Chan.recv(Sess.UiMsg, evt)
-    live_step.recv_wait(saved, g, ui, evt, cmd, ack, gen, scheduled, hist_path, ctx, k)
+    live_step.recv(g, ui, st, evt, cmd, ack, gen, scheduled, hist_path, ctx, k)
 
 def live_go(
   fuel: Nat,

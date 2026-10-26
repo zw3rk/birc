@@ -569,7 +569,7 @@ def s4_full() -> AD:
 
 def s5_hist.hist(+hist: Sess.Hist) -> String:
   match hist:
-    case Sess.Hist{lines, _}: String.join(lines, "|")
+    case Sess.Hist{lines, _, _}: String.join(lines, "|")
 
 def s5_hist.st(+st: Sess.Session) -> String:
   match st:

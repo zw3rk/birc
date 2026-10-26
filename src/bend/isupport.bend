@@ -13,8 +13,10 @@
 #
 # A `-TOKEN` burst entry removes that token: the field returns to its default
 # below, except `-STATUSMSG` which disables support entirely (the server
-# offers no STATUSMSG) and `-CHANMODES` which restores the compiled classes
-# but marks them uncertain (`cm_known` false) until a valid readvertisement.
+# offers no STATUSMSG) and `-CHANMODES` which clears the classes and marks
+# them uncertain (`cm_known` false) until a valid readvertisement. Nothing
+# about the withdrawn map is kept: redaction already hides every argument
+# while uncertain, and the display no longer presents compiled guesses.
 # A removal takes no value: `-TOKEN=value` is malformed and keeps prior
 # metadata. An empty `STATUSMSG=` instead clears the audience entirely. A bare
 # `STATUSMSG` with no `=` keeps the previous value, like every other valueless
@@ -320,10 +322,15 @@ def chanmodes.classes(+a: String, +b: String, +c: String, +d: String) -> Bool:
     && Nat.is_le(String.length(c), 32n) && Nat.is_le(String.length(d), 32n)
     && chanmodes.disjoint(a, b, c, d)
 
+def chans_chanmodes.unsure(+ch: Chans) -> Chans:
+  match ch:
+    case Chans{+types, +status, +a, +b, +c, +d, +mpl, +ml, +known}:
+      Chans{types, status, a, b, c, d, mpl, ml, False{}}
+
 def chans_chanmodes.keep(+types: String, +status: String, +oa: String, +ob: String, +oc: String, +od: String, +mpl: U32, +ml: String, +known: Bool, +a: String, +b: String, +c: String, +d: String, ok: Bool) -> Chans:
   match ok:
     case True{}: Chans{types, status, a, b, c, d, mpl, ml, True{}}
-    case False{}: Chans{types, status, oa, ob, oc, od, mpl, ml, known}
+    case False{}: Chans{types, status, oa, ob, oc, od, mpl, ml, False{}}
 
 def chans_chanmodes.valid(+ch: Chans, +a: String, +b: String, +c: String, +d: String, ok: Bool) -> Chans:
   match ch:
@@ -334,7 +341,7 @@ def chans_chanmodes.parts(+ch: Chans, +parts: List<&2, String>) -> Chans:
   match parts:
     case Con{+a, Con{+b, Con{+c, Con{+d, Nil{}}}}}:
       chans_chanmodes.valid(ch, a, b, c, d, chanmodes.classes(a, b, c, d))
-    case _: ch
+    case _: chans_chanmodes.unsure(ch)
 
 def chans_chanmodes(+ch: Chans, +val: String, +has_eq: Bool) -> Chans:
   match has_eq:
@@ -540,7 +547,7 @@ def reset_statusmsg(+ch: Chans) -> Chans:
 def reset_chanmodes(+ch: Chans) -> Chans:
   match ch:
     case Chans{+types, +status, _, _, _, _, +mpl, +ml, _}:
-      Chans{types, status, dflt_cm_a(), dflt_cm_b(), dflt_cm_c(), dflt_cm_d(), mpl, ml, False{}}
+      Chans{types, status, "", "", "", "", mpl, ml, False{}}
 
 def reset_mpl(+ch: Chans) -> Chans:
   match ch:

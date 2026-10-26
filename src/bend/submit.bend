@@ -1637,6 +1637,18 @@ def slash_rows() -> List<&2, SlashRow>:
 def slash_fuel() -> Nat:
   64n
 
+# Slash verbs are ASCII-only commands. Every slash comparison — dispatch,
+# completion prefix, ghost suffix, and help lookup — folds with plain ASCII
+# upper case through these two predicates, never the negotiated CASEMAPPING.
+# The catalog holds only lowercase ASCII names, so this agrees with every
+# mapping on every current verb; a future non-ASCII verb still compares the
+# same way in all four paths by construction.
+def slash_eq(+a: String, +b: String) -> Bool:
+  String.eq(String.to_upper(a), String.to_upper(b))
+
+def slash_starts(+name: String, +pre: String) -> Bool:
+  String.starts_with(String.to_upper(name), String.to_upper(pre))
+
 # hit is a parameter so the miss path is the only recursive call. Fuel is
 # matched first and decreases on that call. A hit returns on the next entry
 # without scanning the tail, so the initial fuel must exceed the catalog.
@@ -1653,7 +1665,7 @@ def slash_lookup(fuel: Nat, hit: Bool, +found: Slash, xs: List<&2, SlashRow>, +v
             case Nil{}:
               Unknown{}
             case Con{SlashRow{+name, +c}, t}:
-              slash_lookup(p, Irc.ieq(name, verb), c, t, verb)
+              slash_lookup(p, slash_eq(name, verb), c, t, verb)
 
 def slash_of(+verb: String) -> Slash:
   slash_lookup(slash_fuel(), False{}, Unknown{}, slash_rows(), verb)
@@ -2348,10 +2360,20 @@ def submit_is_connect.parsed(input: Input) -> Bool:
 def submit_is_connect(+input: String) -> Bool:
   submit_is_connect.parsed(parse_input(input))
 
+# /reconnect takes no arguments: anything beyond whitespace is refused
+# (parity with /connect's extra-port-token refusal).
+def connect_from_input.recon_go(empty: Bool) -> Conn:
+  match empty:
+    case True{}: ConnReconnect{}
+    case False{}: ConnBad{}
+
+def connect_from_input.recon(+rest: String) -> Conn:
+  connect_from_input.recon_go(String.is_empty(Irc.drop_spaces(rest)))
+
 def connect_from_input.verb(is_recon: Bool, +rest: String) -> Conn:
   match is_recon:
     case True{}:
-      ConnReconnect{}
+      connect_from_input.recon(rest)
     case False{}:
       connect_parse(Irc.drop_spaces(rest))
 

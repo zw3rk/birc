@@ -40,9 +40,11 @@ def route_current(+r: Routed, +server: Key.ServerId, +gen: U32) -> Bool:
     case Routed{+s, +g}: current_id(s, server) && U32.is_eq(g, gen)
 
 # ---- command / event routing ------------------------------------------------------
-# Server identity gates every command. Generation gates only the variants that
-# carry one; Cont/Drop/OpenUrl apply to the server's current connection, as
-# today. Events compose the existing Session generation guards unchanged.
+# Server identity gates every command. Generation gates every variant that
+# carries one (Dial/Pump/Pong/Begin plus Search via its stamped workspace
+# generation); Cont/Drop/Hangup/OpenUrl carry none and apply to the server's
+# current connection, as today. Events compose the existing Session
+# generation guards unchanged.
 
 type RoutedCmd is Data:
   RoutedCmd{server: Key.ServerId, cmd: Sess.NetCmd}
@@ -53,6 +55,7 @@ def cmd_gen_ok(cmd: Sess.NetCmd, +gen: U32) -> Bool:
     case Sess.Pump{+g}: U32.is_eq(g, gen)
     case Sess.Pong{+g, _, _}: U32.is_eq(g, gen)
     case Sess.Begin{+g}: U32.is_eq(g, gen)
+    case Sess.Search{_, _, _, _, _, _, _, _, +w}: U32.is_eq(w, gen)
     case _: True{}
 
 def cmd_current(+rc: RoutedCmd, +server: Key.ServerId, +gen: U32) -> Bool:
@@ -165,6 +168,9 @@ def reconnect_ok(+i: Intent, +server: Key.ServerId, +gen: U32, +s: Scope) -> Boo
 
 # ---- proof-facing predicates ---------------------------------------------------------------
 
+def search_at(+wgen: U32) -> RoutedCmd:
+  RoutedCmd{Key.ServerId{0n}, Sess.Search{"t", "c", 0n, "o", "e", False{}, 0n, 0n, wgen}}
+
 def routing_ok() -> Bool:
   route_current(Routed{Key.ServerId{1n}, 7}, Key.ServerId{1n}, 7)
     && Bool.not(route_current(Routed{Key.ServerId{1n}, 7}, Key.ServerId{2n}, 7))
@@ -172,6 +178,9 @@ def routing_ok() -> Bool:
     && cmd_current(dial_for(Key.ServerId{0n}, "h", 6697, 3, "me"), Key.ServerId{0n}, 3)
     && Bool.not(cmd_current(dial_for(Key.ServerId{0n}, "h", 6697, 3, "me"), Key.ServerId{0n}, 4))
     && Bool.not(cmd_current(dial_for(Key.ServerId{0n}, "h", 6697, 3, "me"), Key.ServerId{1n}, 3))
+    && cmd_current(search_at(5), Key.ServerId{0n}, 5)
+    && Bool.not(cmd_current(search_at(5), Key.ServerId{0n}, 6))
+    && Bool.not(cmd_current(search_at(5), Key.ServerId{1n}, 5))
     && route_current(Routed{Key.ServerId{3n}, 9}, Key.ServerId{3n}, 9)
     && Bool.not(route_current(Routed{Key.ServerId{3n}, 9}, Key.ServerId{3n}, 10))
     && Bool.not(route_current(Routed{Key.ServerId{4n}, 7}, Key.ServerId{4n}, 7))

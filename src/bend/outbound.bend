@@ -1,8 +1,35 @@
 # Pure outbound queue and credit rules. Actor IO consumes these batches.
+# pending and pending_txn always share a FIFO prefix: element i of pending
+# carries the stage-5 txn at index i of pending_txn. Every queue step
+# appends and truncates both lists together, so the lengths stay equal and
+# the total never exceeds PENDING_CAP.
 import Base
 
 def SEND_CAP() -> Nat:
   8n
+
+# Bound on queued-but-unsent lines. The live path sends at most SEND_CAP
+# per tick; anything beyond PENDING_CAP is discarded without retry (the
+# actor seam reports the drop count), so a stalled connection cannot grow
+# the queue without bound.
+def PENDING_CAP() -> Nat:
+  512n
+
+def bound_kept.go(over: Bool, +total: Nat) -> Nat:
+  match over:
+    case True{}: PENDING_CAP()
+    case False{}: total
+
+def bound_kept(+total: Nat) -> Nat:
+  bound_kept.go(Nat.is_gt(total, PENDING_CAP()), total)
+
+def bound_dropped.go(over: Bool, +total: Nat) -> Nat:
+  match over:
+    case True{}: Nat.sub(total, PENDING_CAP())
+    case False{}: 0n
+
+def bound_dropped(+total: Nat) -> Nat:
+  bound_dropped.go(Nat.is_gt(total, PENDING_CAP()), total)
 
 def split_at.go(n: Nat, xs: List<&2, String>, acc: List<&2, String>) -> List<&2, String> & List<&2, String>:
   match n:

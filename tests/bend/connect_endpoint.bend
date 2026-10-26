@@ -25,6 +25,8 @@ def main() -> IO(Unit):
     Unit <- E.must_eq("current plaintext port is inherited", at(6667, "/connect next.example"), "dial:next.example:6667")
     Unit <- E.must_eq("separate port overrides inherited port", at(7000, "/connect next.example 7001"), "dial:next.example:7001")
     Unit <- E.must_eq("reconnect preserves exact saved endpoint", at(7000, "/reconnect"), "dial:old.example:7000")
+    Unit <- E.must_eq("reconnect trailing args are refused", at(7000, "/reconnect extra"), "cont")
+    Unit <- E.must_eq("reconnect trailing whitespace is ignored", at(7000, "/reconnect   "), "dial:old.example:7000")
     Unit <- E.must_eq("empty host is refused", demo("/connect :7000"), "cont")
     Unit <- E.must_eq("missing inline port is refused", demo("/connect irc.example.net:"), "cont")
     Unit <- E.must_eq("zero inline port is refused", demo("/connect irc.example.net:0"), "cont")

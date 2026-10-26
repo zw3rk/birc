@@ -663,10 +663,14 @@ def cmd_connect_ok() -> Bool:
 # Bend constructors are namespace-owned, so moving the types would fork them.
 # Recall steps and composer key/panel decisions live in session_keys.bend.
 type Hist is Data:
-  Hist{lines: List<&2, String>, pos: Nat}
+  Hist{lines: List<&2, String>, pos: Nat, stash: String}
 
+# `stash` holds the unsubmitted composer text shelved by the first HistPrev
+# from the bottom: stepping back past the newest entry restores it instead
+# of clearing the composer. Typing at the bottom reseeds it; an accepted
+# submit clears it with the new entry.
 def hist0() -> Hist:
-  Hist{Nil{}, 0n}
+  Hist{Nil{}, 0n, ""}
 
 def HIST_CAP() -> Nat:
   64n
@@ -676,7 +680,7 @@ def take_last_str(+xs: List<&2, String>, n: Nat) -> List<&2, String>:
 
 def hist_len(h: Hist) -> Nat:
   match h:
-    case Hist{+lines, _}:
+    case Hist{+lines, _, _}:
       List.length(&2, String, lines)
 
 def hist_push.on(+line: String, empty: Bool, h: Hist) -> Hist:
@@ -685,9 +689,9 @@ def hist_push.on(+line: String, empty: Bool, h: Hist) -> Hist:
       h
     case False{}:
       match h:
-        case Hist{+lines, _}:
+        case Hist{+lines, _, _}:
           +xs = take_last_str(List.append(&2, String, lines, line <> Nil{}), HIST_CAP())
-          Hist{xs, List.length(&2, String, xs)}
+          Hist{xs, List.length(&2, String, xs), ""}
 
 def hist_push(+h: Hist, +line: String) -> Hist:
   hist_push.on(line, String.is_empty(line), h)
@@ -720,15 +724,37 @@ def sk_dir(dir: HistDir) -> Sk.HistStep:
     case HistPrev{}: Sk.StepPrev{}
     case HistNext{}: Sk.StepNext{}
 
-def hist_move.at(+lines: List<&2, String>, pair: Nat & String) -> Hist & String:
-  match pair:
-    case (+pos, +shown):
-      (Hist{lines, pos}, shown)
+def hist_move.at(+lines: List<&2, String>, recall: Sk.Recall) -> Hist & String:
+  match recall:
+    case Sk.Recall{+pos, +shown, +stash}:
+      (Hist{lines, pos, stash}, shown)
 
 def hist_move(+h: Hist, +draft: String, dir: HistDir) -> Hist & String:
   match h:
-    case Hist{+lines, +pos}:
-      hist_move.at(lines, Sk.hist_move(lines, pos, draft, sk_dir(dir)))
+    case Hist{+lines, +pos, +stash}:
+      hist_move.at(lines, Sk.hist_move(lines, pos, stash, draft, sk_dir(dir)))
+
+# Recall shelves the unsubmitted draft on the first step back and restores it
+# on the step past the newest entry; typing reseeds the shelf. Each step
+# consumes its Hist & Bool pair once: the bool accumulates the checks.
+def hist_stash.checked(pair: Hist & String, +want: String, ok: Bool) -> Hist & Bool:
+  match pair:
+    case (+h2, +shown): (h2, ok && String.eq(shown, want))
+
+def hist_stash.check(+h: Hist, +draft: String, dir: HistDir, +want: String, ok: Bool) -> Hist & Bool:
+  hist_stash.checked(hist_move(h, draft, dir), want, ok)
+
+def hist_stash.step(pair: Hist & Bool, +draft: String, dir: HistDir, +want: String) -> Hist & Bool:
+  match pair:
+    case (+h, +ok): hist_stash.check(h, draft, dir, want, ok)
+
+def hist_stash.done(pair: Hist & Bool) -> Bool:
+  match pair:
+    case (_, +ok): ok
+
+def hist_stash_ok() -> Bool:
+  +h2 = hist_push(hist_push(hist0(), "one"), "two")
+  hist_stash.done(hist_stash.step(hist_stash.step(hist_stash.step(hist_stash.step(hist_stash.check(h2, "typed", HistStay{}, "typed", True{}), "typed", HistPrev{}, "two"), "two", HistPrev{}, "one"), "one", HistNext{}, "two"), "two", HistNext{}, "typed"))
 
 def click_of.on(+n: U32, z: Bool) -> Maybe<&2, Nat>:
   match z:
@@ -1140,7 +1166,7 @@ def match_slash.go(xs: List<&2, String>, +word: String) -> List<&2, String>:
       Nil{}
     case Con{+h, +t}:
       +rest = match_slash.go(t, word)
-      match_slash.keep(h, rest, String.starts_with(Irc.rfc1459(h), Irc.rfc1459(word)))
+      match_slash.keep(h, rest, Sub.slash_starts(h, word))
 
 def comp_format.choice(+pre: String, +item: String, slash: Bool) -> String:
   match slash:
@@ -1169,8 +1195,9 @@ def comp_pick.on(
 
 # ---- negotiated completion (I2 dynamic) -----------------------------------
 # Nick completion folds under the Session CASEMAPPING (ascii/strict/rfc1459
-# differ exactly on []\^~); slash commands stay fixed (ASCII-only, identical
-# under every mapping).
+# differ exactly on []\^~); slash commands compare ASCII-only through the
+# shared Sub.slash_eq/slash_starts predicates, identical under every mapping
+# in dispatch, completion, ghost, and help alike.
 def nick_match_iso(+iso: Isupport.State, +cand: String, +my_nick: String, +word: String) -> Bool:
   nick_match.ok(Isupport.cm_eq(iso, cand, my_nick), String.starts_with(Isupport.cm_fold(iso, cand), Isupport.cm_fold(iso, word)))
 
@@ -1191,6 +1218,21 @@ def comp_candidates_iso.on(+iso: Isupport.State, +cl: Cl.Client, +word: String, 
 
 def comp_candidates_iso(+iso: Isupport.State, +cl: Cl.Client, +word: String) -> List<&2, String>:
   comp_candidates_iso.on(iso, cl, word, is_slash_word(word))
+
+# Slash verbs dispatch, complete, and ghost ASCII case-insensitively through
+# the shared Sub.slash_eq/slash_starts predicates, never the negotiated
+# CASEMAPPING.
+def slash_dispatch_join(input: Sub.Input) -> Bool:
+  match input:
+    case Sub.CommandInput{Sub.Join{}, _, _}: True{}
+    case _: False{}
+
+def slash_case_ok() -> Bool:
+  String.eq(String.join(comp_candidates_iso(Isupport.defaults(), Cl.init("me", "s"), "/LO"), "|"), "/log")
+    && Sub.slash_known("JOIN")
+    && Sub.slash_known("join")
+    && Bool.not(Sub.slash_known("nope"))
+    && slash_dispatch_join(Sub.parse_input("/JOIN #x"))
 
 def comp_step_iso.active(+iso: Isupport.State, +cl: Cl.Client, +pre: String, +word: String, +idx: Nat, +typed: String) -> Comp & String & U32:
   +matches = comp_candidates_iso(iso, cl, word)
@@ -1231,8 +1273,9 @@ def comp_step_ok.got(trip: Comp & String & U32) -> Bool:
     case (c, str, seed):
       comp_step_ok.check(c, str, seed)
 
-# Slash-command completion under defaults is identical to every CASEMAPPING
-# (ASCII-only verbs). Laws and tests call the negotiated ladder.
+# Slash-command completion under defaults is identical to every CASEMAPPING:
+# verbs compare through the shared Sub.slash_eq/slash_starts predicates.
+# Laws and tests call the negotiated ladder.
 def comp_step_ok() -> Bool:
   comp_step_ok.got(comp_step_iso(Isupport.defaults(), Cl.init("me", "s"), comp0(), "/j"))
 
@@ -3196,13 +3239,13 @@ def panel_dismiss(comp: Comp) -> Comp:
 def pick_idx(comp: Comp) -> Nat:
   Sk.pick_idx(view_of(comp))
 
-def key_plan.placed(+lines: List<&2, String>, +pos: Nat, +draft: String) -> Hist & String:
-  (Hist{lines, pos}, draft)
+def key_plan.placed(+lines: List<&2, String>, +pos: Nat, +draft: String, +stash: String) -> Hist & String:
+  (Hist{lines, pos, stash}, draft)
 
-def key_plan.use_hist(+st: Session, +cl: Cl.Client, +cmd: NetCmd, +hist: Hist, halt: Bool, +seed: U32, +comp: Comp, split: Sp.State, +pos: Nat, +draft: String, +hold: List<&2, View.ScrollHold>) -> Session & NetCmd & Bool:
+def key_plan.use_hist(+st: Session, +cl: Cl.Client, +cmd: NetCmd, +hist: Hist, halt: Bool, +seed: U32, +comp: Comp, split: Sp.State, +pos: Nat, +draft: String, +stash: String, +hold: List<&2, View.ScrollHold>) -> Session & NetCmd & Bool:
   match hist:
-    case Hist{+lines, _}:
-      finish_hist(st, cl, cmd, halt, seed, comp, split, key_plan.placed(lines, pos, draft), hold)
+    case Hist{+lines, _, _}:
+      finish_hist(st, cl, cmd, halt, seed, comp, split, key_plan.placed(lines, pos, draft, stash), hold)
 
 # Wire/history keep raw shortcodes. Explicit Tab/Right accept commits glyphs
 # via compose_accept; ordinary typed frames must not auto-rewrite the draft.
@@ -3212,16 +3255,16 @@ def key_plan.use(+st: Session, +cl: Cl.Client, +cmd: NetCmd, +hist: Hist, +comp:
   match plan:
     case Sk.KeyCycle{}:
       finish_comp(st, cl, cmd, hist, split, comp_step_iso(session_iso(st), cl, comp, typed), hold)
-    case Sk.KeyApply{halt, +seed, view, +pos, +draft}:
-      key_plan.use_hist(st, cl, cmd, hist, halt, seed, comp_of(view), split, pos, draft, hold)
+    case Sk.KeyApply{halt, +seed, view, +pos, +draft, +stash}:
+      key_plan.use_hist(st, cl, cmd, hist, halt, seed, comp_of(view), split, pos, draft, stash, hold)
 
-def finish_keys.comp.at(+lines: List<&2, String>, +pos: Nat, +st: Session, +code: U32, +cl: Cl.Client, +cmd: NetCmd, +comp: Comp, split: Sp.State, +typed: String, +draft: String, +prev: String, hdir: HistDir, enter: Bool, +hold: List<&2, View.ScrollHold>) -> Session & NetCmd & Bool:
-  key_plan.use(st, cl, cmd, Hist{lines, pos}, comp, split, typed, Sk.finish_keys.comp(code, lines, pos, view_of(comp), typed, draft, prev, sk_dir(hdir), enter), hold)
+def finish_keys.comp.at(+lines: List<&2, String>, +pos: Nat, +stash: String, +st: Session, +code: U32, +cl: Cl.Client, +cmd: NetCmd, +comp: Comp, split: Sp.State, +typed: String, +draft: String, +prev: String, hdir: HistDir, enter: Bool, +hold: List<&2, View.ScrollHold>) -> Session & NetCmd & Bool:
+  key_plan.use(st, cl, cmd, Hist{lines, pos, stash}, comp, split, typed, Sk.finish_keys.comp(code, lines, pos, stash, view_of(comp), typed, draft, prev, sk_dir(hdir), enter), hold)
 
 def finish_keys.comp(+st: Session, +code: U32, +cl: Cl.Client, +cmd: NetCmd, +hist: Hist, +comp: Comp, split: Sp.State, +typed: String, +draft: String, +prev: String, +hdir: HistDir, +enter: Bool, +hold: List<&2, View.ScrollHold>) -> Session & NetCmd & Bool:
   match hist:
-    case Hist{+lines, +pos}:
-      finish_keys.comp.at(lines, pos, st, code, cl, cmd, comp, split, typed, draft, prev, hdir, enter, hold)
+    case Hist{+lines, +pos, +stash}:
+      finish_keys.comp.at(lines, pos, stash, st, code, cl, cmd, comp, split, typed, draft, prev, hdir, enter, hold)
 
 def finish_keys.nav(+st: Session, step: NavStep, +code: U32, +cmd: NetCmd, +hist: Hist, +comp: Comp, +typed: String, +draft: String, +prev: String, +hdir: HistDir, +enter: Bool) -> Session & NetCmd & Bool:
   match step:
@@ -3348,29 +3391,50 @@ def step_keys.base.ctx(dyn: Bool, +iso: Isupport.State, +echo_ok: Bool) -> Sub.S
     case True{}: Sub.submit_ctx_iso(iso, echo_ok)
     case False{}: Sub.submit_ctx_plain(echo_ok)
 
-def step_keys.base.keep(enter: Bool, +iso: Isupport.State, +cl: Cl.Client, input: Sub.Input) -> Bool:
+# Plain chat text the draft store cannot hold cannot ride the wire either:
+# the same TEXT_BYTES bound gates single-line submits with an explicit echo,
+# so oversized pastes warn instead of flooding the wire with chunks no
+# draft, recall entry, or reseed could name back. Commands keep their own
+# wire limits and are never capped here.
+def step_keys.base.over(+typed: String, +input: Sub.Input) -> Bool:
+  match input:
+    case Sub.PlainInput{_}: Drafts.over_text(typed)
+    case _: False{}
+
+def step_keys.base.keep(enter: Bool, +iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, +typed: String) -> Bool:
   match enter:
     case False{}: False{}
-    case True{}: Bool.not(Sub.input_sensitive_iso.parsed(iso, cl, input))
+    case True{}: Bool.not(Sub.input_sensitive_iso.parsed(iso, cl, input)) && Bool.not(step_keys.base.over(typed, input))
 
 def step_keys.base.dyn(enter: Bool, +st: Session, input: Sub.Input) -> Bool:
   match enter:
     case False{}: False{}
     case True{}: step_keys.base.dyn.input(st, input)
 
-def step_keys.base.submit(+st: Session, +keys: Keys, +hist2: Hist, dyn: Bool, input: Sub.Input) -> Session & NetCmd & Bool:
+def step_keys.base.capped(over: Bool, +st: Session, +keys: Keys, +hist2: Hist, dyn: Bool, +input: Sub.Input) -> Session & NetCmd & Bool:
+  match over:
+    case True{}:
+      match keys:
+        case Keys{+typed, _, _, _, _, _, _, _, _}:
+          finish_keys.quad(st, keys, hist2, (Sub.echo_err(session_cl(st), Drafts.over_text_note()), typed, Cont{Nil{}}, session_split(st)))
+    case False{}:
+      match keys:
+        case Keys{+typed, enter, _, _, _, _, _, _, _}:
+          +negotiated = session_negotiated(st)
+          +echo_ok = session_echo_ok(st)
+          finish_keys.quad(st, keys, hist2, submit_or_split(session_cm(st), step_keys.base.ctx(dyn, session_iso(st), echo_ok), session_cl(st), session_split(st), session_net(st), session_port(st), typed, enter, negotiated, input))
+
+def step_keys.base.submit(+st: Session, +keys: Keys, +hist2: Hist, dyn: Bool, +input: Sub.Input) -> Session & NetCmd & Bool:
   match keys:
     case Keys{+typed, enter, _, _, _, _, _, _, _}:
-      +negotiated = session_negotiated(st)
-      +echo_ok = session_echo_ok(st)
-      finish_keys.quad(st, keys, hist2, submit_or_split(session_cm(st), step_keys.base.ctx(dyn, session_iso(st), echo_ok), session_cl(st), session_split(st), session_net(st), session_port(st), typed, enter, negotiated, input))
+      step_keys.base.capped(enter && step_keys.base.over(typed, input), st, keys, hist2, dyn, input)
 
 def step_keys.base(+st: Session, +keys: Keys, +input: Sub.Input) -> Session & NetCmd & Bool:
   match st:
     case Session{+cl, drop, +rem, _, joined, +chan, net, +hist, size, _, +comp, split, +typing, port, +media, +plan, +edits, +iso, +hlbox, _, _, _, labelsbox, +pends}:
       match keys:
         case Keys{+typed, enter, _, _, _, _, _, _, _}:
-          +hist2 = hist_after_enter(hist, typed, step_keys.base.keep(enter, unbox_iso(iso), cl, input))
+          +hist2 = hist_after_enter(hist, typed, step_keys.base.keep(enter, unbox_iso(iso), cl, input, typed))
           step_keys.base.submit(st, keys, hist2, step_keys.base.dyn(enter, st, input), input)
 
 def session_media(st: Session) -> M.State:
@@ -3722,7 +3786,7 @@ def multiline_sensitive.go(+iso: Isupport.State, +lines: List<&2, String>, +cl: 
     case Con{+h, +t}: multiline_sensitive.any(multiline_sensitive.go(iso, t, cl, target), multiline_sensitive.line(iso, cl, target, h))
 
 def hist_after_typed(+hist: Hist, +cl: Cl.Client, +target: String, +typed: String, +iso: Isupport.State) -> Hist:
-  hist_after_enter(hist, typed, Bool.not(multiline_sensitive.go(iso, Drafts.nonempty(Drafts.split_lines(typed)), cl, target) || Sub.input_sensitive_iso(iso, cl, typed)))
+  hist_after_enter(hist, typed, Drafts.fits_bytes(typed) && Bool.not(multiline_sensitive.go(iso, Drafts.nonempty(Drafts.split_lines(typed)), cl, target) || Sub.input_sensitive_iso(iso, cl, typed)))
 
 def multiline_held.triple.r1(+cm: String, rest: String & NetCmd, +cl_err: Cl.Client, split: Sp.State, +typed: String) -> Cl.Client & String & NetCmd & Sp.State:
   match rest:
@@ -3926,7 +3990,7 @@ def seam_outs(+cmd: NetCmd) -> String:
 
 def seam_hist(+hist: Hist) -> String:
   match hist:
-    case Hist{+lines, _}: String.join(lines, "|")
+    case Hist{+lines, _, _}: String.join(lines, "|")
 
 def seam_quad(+cl: Cl.Client, split: Sp.State) -> Cl.Client & String & NetCmd & Sp.State:
   (cl, "", Cont{"PRIVMSG #b :aa" <> "PRIVMSG #b :bb" <> Nil{}}, split)
@@ -4164,9 +4228,6 @@ def live_is_dynamic.parsed(parsed: Maybe<&2, Irc.Message>) -> Bool:
     case None{}: False{}
     case Some{+m}: live_is_dynamic.cmd(Irc.classify(m), m)
 
-def live_is_dynamic(+line: String) -> Bool:
-  live_is_dynamic.parsed(Irc.parse(line))
-
 def live_step.registered_with(registered: Maybe<&2, Cl.Client>, acc: LiveAcc, +line: String, stamp: Maybe<&2, String>, +isc: Cl.Iso, welcomed: Bool, +port: U32) -> LiveAcc:
   match registered:
     case None{}: acc
@@ -4183,19 +4244,19 @@ def live_step.registered_with(registered: Maybe<&2, Cl.Client>, acc: LiveAcc, +l
 # split through the live fold with the evolving iso cm, gated by the same
 # registration + auth/credential admission as the Client feed. Reuses the
 # negotiated rename_query.line_cm owner per line; no raw prepass remains.
-def live_split_admitted.consumed(consumed: Bool, +cm2: String, split: Sp.State, +line2: String) -> Sp.State:
+def live_split_admitted.consumed_parsed(consumed: Bool, +cm2: String, split: Sp.State, parsed: Maybe<&2, Irc.Message>) -> Sp.State:
   match consumed:
     case True{}: split
-    case False{}: Sp.rename_query.line_cm(cm2, split, line2)
+    case False{}: Sp.rename_query.parsed_cm(cm2, split, parsed)
 
-def live_split_admitted.some(+cl_reg: Cl.Client, +cm2: String, split: Sp.State, +line2: String) -> Sp.State:
+def live_split_admitted.some_parsed(+cl_reg: Cl.Client, +cm2: String, split: Sp.State, +line2: String, parsed: Maybe<&2, Irc.Message>) -> Sp.State:
   +consumed = live_consumed(cl_reg, line2)
-  live_split_admitted.consumed(consumed, cm2, split, line2)
+  live_split_admitted.consumed_parsed(consumed, cm2, split, parsed)
 
-def live_split_admitted(registered: Maybe<&2, Cl.Client>, +cm2: String, split: Sp.State, +line2: String) -> Sp.State:
+def live_split_admitted.parsed(registered: Maybe<&2, Cl.Client>, +cm2: String, split: Sp.State, +line2: String, parsed: Maybe<&2, Irc.Message>) -> Sp.State:
   match registered:
     case None{}: split
-    case Some{+cl_reg}: live_split_admitted.some(cl_reg, cm2, split, line2)
+    case Some{+cl_reg}: live_split_admitted.some_parsed(cl_reg, cm2, split, line2, parsed)
 
 # Sole preparation/admission owner (I2 Final): one Isupport/redact prep plus
 # one registration admission per wire line, shared by the Client feed and
@@ -4228,45 +4289,49 @@ def live_drafts_note.parsed(+live: LiveAcc, +cm: String, m: Maybe<&2, Irc.Messag
     case None{}: live
     case Some{+msg}: live_drafts_note.nick(Irc.ieq(Irc.msg_command(msg), "NICK"), live, cm, msg)
 
-def live_drafts_note.some(+live: LiveAcc, +cm: String, +line2: String, consumed: Bool) -> LiveAcc:
+def live_drafts_note.some_parsed(+live: LiveAcc, +cm: String, parsed: Maybe<&2, Irc.Message>, consumed: Bool) -> LiveAcc:
   match consumed:
     case True{}: live
-    case False{}: live_drafts_note.parsed(live, cm, Irc.parse(line2))
+    case False{}: live_drafts_note.parsed(live, cm, parsed)
 
-def live_drafts_note.consumed(+live: LiveAcc, +cl_reg: Cl.Client, +cm: String, +line2: String) -> LiveAcc:
-  live_drafts_note.some(live, cm, line2, live_consumed(cl_reg, line2))
+def live_drafts_note.consumed_parsed(+live: LiveAcc, +cl_reg: Cl.Client, +cm: String, +line2: String, parsed: Maybe<&2, Irc.Message>) -> LiveAcc:
+  live_drafts_note.some_parsed(live, cm, parsed, live_consumed(cl_reg, line2))
 
-def live_drafts_note(+live: LiveAcc, registered: Maybe<&2, Cl.Client>, +cm: String, +line2: String) -> LiveAcc:
+def live_drafts_note.with_parsed(+live: LiveAcc, registered: Maybe<&2, Cl.Client>, +cm: String, +line2: String, parsed: Maybe<&2, Irc.Message>) -> LiveAcc:
   match registered:
     case None{}: live
-    case Some{+cl_reg}: live_drafts_note.consumed(live, cl_reg, cm, line2)
+    case Some{+cl_reg}: live_drafts_note.consumed_parsed(live, cl_reg, cm, line2, parsed)
 
 type LiveAdmitted is Data:
-  LiveAdmitted{iso2: Isupport.State, line2: String, reg: Maybe<&2, Cl.Client>}
+  LiveAdmitted{iso2: Isupport.State, line2: String, reg: Maybe<&2, Cl.Client>, parsed: Maybe<&2, Irc.Message>}
 
+# One parse per admitted line (D59): registration and the ready branch used
+# to parse the same redacted line2 independently. Irc.parse is deterministic,
+# so threading one shared parse is behavior-identical and halves that cost.
 def live_prepare.reg(prepped: Isupport.State & String, +cl: Cl.Client, welcomed: Bool) -> LiveAdmitted:
   match prepped:
     case (+iso2, +line2):
-      LiveAdmitted{iso2, line2, registration_client_iso(welcomed, cl, line2, iso2)}
+      +parsed = Irc.parse(line2)
+      LiveAdmitted{iso2, line2, registration_client_iso.parsed(parsed, welcomed, cl, line2, iso2), parsed}
 
 def live_prepare(+iso: Isupport.State, +cl: Cl.Client, welcomed: Bool, +line: String) -> LiveAdmitted:
   live_prepare.reg(live_step.prep(iso, cl, line), cl, welcomed)
 
-def live_split_step.ready_branch(+reg: Maybe<&2, Cl.Client>, +isc: Cl.Iso, +line2: String, acc: LiveAcc, split: Sp.State, stamp: Maybe<&2, String>, dynamic: Bool, welcomed: Bool, +port: U32) -> LiveAcc & Sp.State:
+def live_split_step.ready_branch_parsed(+reg: Maybe<&2, Cl.Client>, +isc: Cl.Iso, +line2: String, acc: LiveAcc, split: Sp.State, stamp: Maybe<&2, String>, +parsed: Maybe<&2, Irc.Message>, dynamic: Bool, welcomed: Bool, +port: U32) -> LiveAcc & Sp.State:
   match dynamic:
     case True{}:
       +live2 = live_step.registered_with(reg, acc, line2, stamp, isc, welcomed, port)
-      +split2 = live_split_admitted(reg, Cl.iso_cm(isc), split, line2)
-      (live_drafts_note(live2, reg, Cl.iso_cm(isc), line2), split2)
+      +split2 = live_split_admitted.parsed(reg, Cl.iso_cm(isc), split, line2, parsed)
+      (live_drafts_note.with_parsed(live2, reg, Cl.iso_cm(isc), line2, parsed), split2)
     case False{}:
       +live2 = live_step.registered(reg, acc, line2, stamp, welcomed, port)
-      +split2 = live_split_admitted(reg, Cl.iso_cm(isc), split, line2)
-      (live_drafts_note(live2, reg, Cl.iso_cm(isc), line2), split2)
+      +split2 = live_split_admitted.parsed(reg, Cl.iso_cm(isc), split, line2, parsed)
+      (live_drafts_note.with_parsed(live2, reg, Cl.iso_cm(isc), line2, parsed), split2)
 
 def live_split_step.ready(ready: LiveAdmitted, +cl: Cl.Client, reversed: List<&2, String>, +now_ms: U32, typing: Ty.State, +plan: JoinPlan.State, split: Sp.State, stamp: Maybe<&2, String>, +hl: Hs.HistLive, +lreg: CapNotify.Reg, +renames: List<&2, Drafts.NickRename>, +port: U32) -> LiveAcc & Sp.State:
   match ready:
-    case LiveAdmitted{+iso2, +line2, +reg}:
-      live_split_step.ready_branch(reg, Isupport.as_iso(iso2), line2, LiveAcc{FoldAcc{cl, reversed, now_ms}, typing, plan, iso2, hl, lreg, renames}, split, stamp, live_is_dynamic(line2), JoinPlan.welcomed(plan), port)
+    case LiveAdmitted{+iso2, +line2, +reg, +parsed}:
+      live_split_step.ready_branch_parsed(reg, Isupport.as_iso(iso2), line2, LiveAcc{FoldAcc{cl, reversed, now_ms}, typing, plan, iso2, hl, lreg, renames}, split, stamp, parsed, live_is_dynamic.parsed(parsed), JoinPlan.welcomed(plan), port)
 
 # Combined live interceptor (H5+I2): every framed wire line first steps the
 # real H5 history owner. Claimed (batch-tagged archive) lines reach the batch

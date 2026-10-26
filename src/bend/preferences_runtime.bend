@@ -604,5 +604,7 @@ def channel_explicit(xs: List<&2, String>) -> Bool:
     case "--sasl-pass" <> _ <> t: channel_explicit(t)
     case "--nickserv-prefix" <> _ <> t: channel_explicit(t)
     case "--nickserv-success" <> _ <> t: channel_explicit(t)
+    case "--server" <> _ <> t: channel_explicit(t)
+    case "--auth" <> _ <> t: channel_explicit(t)
     case _ <> t: channel_explicit(t)
     case Nil{}: False{}

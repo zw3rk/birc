@@ -41,7 +41,7 @@ def halt(triple: Sess.Session & Sess.NetCmd & Bool) -> Bool:
 
 def history(st: Sess.Session) -> String:
   match st:
-    case Sess.Session{_, _, _, _, _, _, _, Sess.Hist{lines, _}, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _}: String.join(lines, "|")
+    case Sess.Session{_, _, _, _, _, _, _, Sess.Hist{lines, _, _}, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _}: String.join(lines, "|")
 
 def line_texts(lines: List<&2, Cl.Line>) -> String:
   match lines:

@@ -798,9 +798,21 @@ def tls6name_conn(cr: Result<&1, &1, U32 & String, Tr.Conn>) -> IO(Unit):
         sent : Tr.Conn & Result<&1, &1, U32 & String, Unit> <- Tr.send_for(conn, "hello", 2000)
         tls6name_sent(sent)
 
+# DNS may resolve a different address. Verification always uses the requested
+# hostname, not the address chosen for TCP. There is no plaintext retry.
+def dial_connected(r: Result<&1, &1, U32 & String, Socket>, +host: String, secure: Bool) -> IO(Result<&1, &1, U32 & String, Tr.Conn>):
+  match r:
+    case Fail{e}: IO.pure(Result<&1, &1, U32 & String, Tr.Conn>, Fail{e})
+    case Done{sock}: Tr.upgrade(sock, host, secure)
+
+def dial(+ip: String, +port: U32, +host: String, secure: Bool) -> IO(Result<&1, &1, U32 & String, Tr.Conn>):
+  do IO<Result<&1, &1, U32 & String, Tr.Conn>>:
+    r : Result<&1, &1, U32 & String, Socket> <- Dns.TCP.connect_for(ip, port, 1000)
+    dial_connected(r, host, secure)
+
 def mode_tls6name(+port: U32) -> IO(Unit):
   do IO<Unit>:
-    cr : Result<&1, &1, U32 & String, Tr.Conn> <- Tr.connect_for("::1", port, "birc.test", True{})
+    cr : Result<&1, &1, U32 & String, Tr.Conn> <- dial("::1", port, "birc.test", True{})
     tls6name_conn(cr)
 
 # ---- tls6namewrong (DNS mismatch must fail, no fallback/downgrade) -------
@@ -815,7 +827,7 @@ def tls6namewrong_conn(cr: Result<&1, &1, U32 & String, Tr.Conn>) -> IO(Unit):
 
 def mode_tls6namewrong(+port: U32) -> IO(Unit):
   do IO<Unit>:
-    cr : Result<&1, &1, U32 & String, Tr.Conn> <- Tr.connect_for("::1", port, "wrong.test", True{})
+    cr : Result<&1, &1, U32 & String, Tr.Conn> <- dial("::1", port, "wrong.test", True{})
     tls6namewrong_conn(cr)
 
 # ---- dispatch ------------------------------------------------------------

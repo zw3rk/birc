@@ -22,18 +22,6 @@ def upgrade(sock: Socket, +host: String, secure: Bool) -> IO(Result<&1, &1, U32 
         r : Result<&1, &1, U32 & String, Tls.Handle> <- Tls.open_for(sock, host, 5000)
         return tls_result(r)
 
-def connected(r: Result<&1, &1, U32 & String, Socket>, +host: String, secure: Bool) -> IO(Result<&1, &1, U32 & String, Conn>):
-  match r:
-    case Fail{e}: IO.pure(Result<&1, &1, U32 & String, Conn>, Fail{e})
-    case Done{sock}: upgrade(sock, host, secure)
-
-# DNS may resolve a different address. Verification always uses the requested
-# hostname, not the address chosen for TCP. There is no plaintext retry.
-def connect_for(+ip: String, +port: U32, +host: String, secure: Bool) -> IO(Result<&1, &1, U32 & String, Conn>):
-  do IO<Result<&1, &1, U32 & String, Conn>>:
-    r : Result<&1, &1, U32 & String, Socket> <- Dns.TCP.connect_for(ip, port, 1000)
-    connected(r, host, secure)
-
 def send_plain(pair: Socket & Result<&1, &1, U32 & String, Unit>) -> Conn & Result<&1, &1, U32 & String, Unit>:
   match pair:
     case (sock, r): (Plain{sock}, r)

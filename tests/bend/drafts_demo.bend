@@ -251,6 +251,8 @@ def main() -> IO(Unit):
     Unit <- E.must("submit invalid target echoes target reason", reason_ok(D.submit_lines(cl, 1n, "", "hi", False{}), "message target exceeds IRC line limit"))
     Unit <- E.must("submit control target is read-only", reason_ok(D.submit_lines(cl, 1n, "*server*", "hi", False{}), "read-only buffer"))
     Unit <- E.must("submit log target is read-only", reason_ok(D.submit_lines(cl, 1n, "*log*", "hi", False{}), "read-only buffer"))
+    Unit <- E.must("submit over-bound warns draft limit", reason_ok(D.submit_lines(cl, 1n, "#room", big4097, False{}), "message exceeds 4096-byte draft limit"))
+    Unit <- E.must("over bound detected", D.over_text(big4097) && Bool.not(D.over_text("hi")))
     Unit <- E.must("after submit clears draft", Bool.not(D.has(D.after_submit(D.set(D.empty(), s0(), "#room", "hi"), s0(), "#room"), s0(), "#room")))
     Unit <- E.must_eq("modal stash preserves typed text", D.get(D.stash_modal(D.empty(), s0(), "#room", "a\nb"), s0(), "#room"), "a\nb")
     Unit <- E.must("focus admits normal stash", D.focus_admits(D.empty(), s0(), "#a", "hi"))

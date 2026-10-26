@@ -74,7 +74,7 @@ def ad_outs_ok(+cmd: Sess.NetCmd) -> Bool:
 
 def ad_hist_joined.hist(+hist: Sess.Hist) -> String:
   match hist:
-    case Sess.Hist{lines, _}: String.join(lines, "|")
+    case Sess.Hist{lines, _, _}: String.join(lines, "|")
 
 def ad_hist_joined.st(+st: Sess.Session) -> String:
   match st:
@@ -986,6 +986,8 @@ def main() -> IO(Unit):
   +lm_up = W.live_on_msg(g5_dialed, g5_up1msg, g5_stamps, 0, "00:00:04")
   +lm_fail = W.live_on_msg(g5_up_fresh, g5_eof, g5_stamps, 0, "00:00:05")
   +lm_fail_stale = W.live_on_msg(g5_up_fresh, g5_eof_stale, g5_stamps, 0, "00:00:05")
+  +lm_fail_stale_nf : Sid.RoutedMsg = Sid.RoutedMsg{s0(), Sess.FromNet{0, Sess.NetFail{"boom"}}}
+  +lm_fail_stale_nf_out = W.live_on_msg(g5_up_fresh, lm_fail_stale_nf, g5_stamps, 0, "00:00:05")
   +lm_init : Sid.RoutedMsg = Sid.RoutedMsg{s0(), Sess.FromNet{1, Sess.InitialFail{"connect failed"}}}
   +lm_init_out = W.live_on_msg(g5_dialed, lm_init, g5_stamps, 0, "00:00:03")
   +lm_init_stale : Sid.RoutedMsg = Sid.RoutedMsg{s0(), Sess.FromNet{0, Sess.InitialFail{"connect failed"}}}
@@ -1544,6 +1546,9 @@ def main() -> IO(Unit):
     Unit <- E.must_eq("lm dispatch fail net reconnecting", ws_net(W.live_ws(lm_fail), s0()), "connecting")
     Unit <- E.must_eq("lm dispatch stale fail stays online", ws_net(W.live_ws(lm_fail_stale), s0()), "online")
     Unit <- E.must_eq("lm dispatch stale fail cmd none", rcc_show(W.live_cmd(lm_fail_stale)), "[none]")
+    Unit <- E.must_eq("lm dispatch stale netfail stays online", ws_net(W.live_ws(lm_fail_stale_nf_out), s0()), "online")
+    Unit <- E.must_eq("lm dispatch stale netfail cmd none", rcc_show(W.live_cmd(lm_fail_stale_nf_out)), "[none]")
+    Unit <- E.must("lm dispatch stale netfail still notifies", String.contains(ws_texts(W.live_ws(lm_fail_stale_nf_out), s0(), 0n), "disconnected: boom"))
     Unit <- E.must_eq("lm dispatch initial fail offline", ws_net(W.live_ws(lm_init_out), s0()), "offline")
     Unit <- E.must("lm dispatch initial fail echoes reason", String.contains(ws_texts(W.live_ws(lm_init_out), s0(), 0n), "connect failed"))
     Unit <- E.must_eq("lm dispatch initial fail cmd none", rcc_show(W.live_cmd(lm_init_out)), "[none]")

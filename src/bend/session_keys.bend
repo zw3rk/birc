@@ -19,8 +19,14 @@ type HistStep is Data:
   StepNext{}
 
 type KeyPlan is Data:
-  KeyApply{halt: Bool, seed: U32, view: CView, pos: Nat, draft: String}
+  KeyApply{halt: Bool, seed: U32, view: CView, pos: Nat, draft: String, stash: String}
   KeyCycle{}
+
+# Recall step result: the new ring position, the shown draft, and the
+# carried stash. A Data constructor (not a &-tuple) so both String fields
+# keep their names through the match.
+type Recall is Data:
+  Recall{pos: Nat, shown: String, stash: String}
 
 def line_at(+xs: List<&2, String>, +i: Nat) -> String:
   Maybe.default(&2, String, List.get(&2, String, xs, i), "")
@@ -55,14 +61,42 @@ def hist_next(+lines: List<&2, String>, +pos: Nat) -> Nat & String:
   +n = List.length(&2, String, lines)
   hist_next.on(lines, pos, n, Nat.is_ge(pos, n))
 
-def hist_move(+lines: List<&2, String>, +pos: Nat, +draft: String, dir: HistStep) -> Nat & String:
+# Recall shelves the unsubmitted composer text on the first step back from
+# the bottom and restores it on the step past the newest entry. Browsing
+# deeper keeps the shelved text; typing reseeds it. Returns pos, shown
+# draft, and the carried stash.
+def hist_prev.shelve(at_bottom: Bool, +draft: String, +stash: String) -> String:
+  match at_bottom:
+    case True{}: draft
+    case False{}: stash
+
+def hist_prev.with_kept(pair: Nat & String, +kept: String) -> Recall:
+  match pair:
+    case (+p, +shown): Recall{p, shown, kept}
+
+def hist_prev.at(+lines: List<&2, String>, +pos: Nat, +draft: String, +stash: String) -> Recall:
+  hist_prev.with_kept(hist_prev(lines, pos), hist_prev.shelve(Nat.is_eq(pos, List.length(&2, String, lines)), draft, stash))
+
+def hist_next.shown(past_end: Bool, +shown: String, +stash: String) -> String:
+  match past_end:
+    case True{}: stash
+    case False{}: shown
+
+def hist_next.restored(pair: Nat & String, +n: Nat, +stash: String) -> Recall:
+  match pair:
+    case (+p, +shown): Recall{p, hist_next.shown(Nat.is_eq(p, n), shown, stash), stash}
+
+def hist_next.step(+lines: List<&2, String>, +pos: Nat, +stash: String) -> Recall:
+  hist_next.restored(hist_next(lines, pos), List.length(&2, String, lines), stash)
+
+def hist_move(+lines: List<&2, String>, +pos: Nat, +stash: String, +draft: String, dir: HistStep) -> Recall:
   match dir:
     case StepStay{}:
-      (pos, draft)
+      Recall{pos, draft, draft}
     case StepPrev{}:
-      hist_prev(lines, pos)
+      hist_prev.at(lines, pos, draft, stash)
     case StepNext{}:
-      hist_next(lines, pos)
+      hist_next.step(lines, pos, stash)
 
 def panel_open(view: CView, +draft: String) -> Bool:
   match view:
@@ -175,58 +209,58 @@ def panel_lines(view: CView, +draft: String, +hint: String, typers: List<&2, Str
 
 # Help and a hidden menu survive a frame that does not change the composer.
 # `prev` is the draft before this frame; `shown` is the draft after it.
-def finish_keys.shown(+pos: Nat, +shown: String, halt: Bool, +seed: U32, view: CView, +prev: String) -> KeyPlan:
-  KeyApply{halt, seed, panel_keep(view, shown, prev), pos, shown}
+def finish_keys.shown(+pos: Nat, +shown: String, halt: Bool, +seed: U32, view: CView, +prev: String, +stash: String) -> KeyPlan:
+  KeyApply{halt, seed, panel_keep(view, shown, prev), pos, shown, stash}
 
-def finish_keys.plain.at(pair: Nat & String, view: CView, +typed: String, +prev: String, dir: HistStep, enter: Bool) -> KeyPlan:
-  match pair:
-    case (+npos, +shown):
-      finish_keys.shown(npos, shown, halt_of(enter, typed), seed_of(dir), view, prev)
+def finish_keys.plain.at(recall: Recall, view: CView, +typed: String, +prev: String, dir: HistStep, enter: Bool) -> KeyPlan:
+  match recall:
+    case Recall{+npos, +shown, +stash}:
+      finish_keys.shown(npos, shown, halt_of(enter, typed), seed_of(dir), view, prev, stash)
 
-def finish_keys.plain(+lines: List<&2, String>, +pos: Nat, view: CView, +typed: String, +draft: String, +prev: String, +dir: HistStep, enter: Bool) -> KeyPlan:
-  finish_keys.plain.at(hist_move(lines, pos, draft, dir), view, typed, prev, dir, enter)
+def finish_keys.plain(+lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, +dir: HistStep, enter: Bool) -> KeyPlan:
+  finish_keys.plain.at(hist_move(lines, pos, stash, draft, dir), view, typed, prev, dir, enter)
 
-def finish_keys.pick(down: Bool, +pos: Nat, view: CView, +draft: String, +prev: String) -> KeyPlan:
+def finish_keys.pick(down: Bool, +pos: Nat, view: CView, +draft: String, +prev: String, +stash: String) -> KeyPlan:
   +n = pick_len(draft)
   +idx = Cu.pick_move(down, Cu.pick_clamp(pick_idx(view), n), n)
-  KeyApply{False{}, 1, panel_keep(CPick{idx}, draft, prev), pos, draft}
+  KeyApply{False{}, 1, panel_keep(CPick{idx}, draft, prev), pos, draft, stash}
 
-def finish_keys.navmenu(open: Bool, dir: HistStep, +lines: List<&2, String>, +pos: Nat, view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
+def finish_keys.navmenu(open: Bool, dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
   match open:
-    case True{}: finish_keys.pick(dir_down(dir), pos, view, draft, prev)
-    case False{}: finish_keys.plain(lines, pos, view, typed, draft, prev, dir, enter)
+    case True{}: finish_keys.pick(dir_down(dir), pos, view, draft, prev, stash)
+    case False{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
 
-def finish_keys.dir(dir: HistStep, +lines: List<&2, String>, +pos: Nat, +view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
+def finish_keys.dir(dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, +view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
   match dir:
-    case StepStay{}: finish_keys.plain(lines, pos, view, typed, draft, prev, dir, enter)
-    case _: finish_keys.navmenu(menu_movable(view, draft), dir, lines, pos, view, typed, draft, prev, enter)
+    case StepStay{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
+    case _: finish_keys.navmenu(menu_movable(view, draft), dir, lines, pos, stash, view, typed, draft, prev, enter)
 
-def finish_keys.accept(+pos: Nat, +view: CView, +typed: String, +prev: String) -> KeyPlan:
+def finish_keys.accept(+pos: Nat, +view: CView, +typed: String, +prev: String, +stash: String) -> KeyPlan:
   +next = Cu.compose_accept(typed, pick_idx(view))
-  KeyApply{False{}, ghost_seed(typed), panel_keep(view, next, prev), pos, next}
+  KeyApply{False{}, ghost_seed(typed), panel_keep(view, next, prev), pos, next, stash}
 
-def finish_keys.dismiss.at(pair: Nat & String, +seed: U32, view: CView) -> KeyPlan:
-  match pair:
-    case (+npos, +shown):
-      KeyApply{False{}, seed, panel_dismiss(view), npos, shown}
+def finish_keys.dismiss.at(recall: Recall, +seed: U32, view: CView) -> KeyPlan:
+  match recall:
+    case Recall{+npos, +shown, +stash}:
+      KeyApply{False{}, seed, panel_dismiss(view), npos, shown, stash}
 
-def finish_keys.dismiss(+lines: List<&2, String>, +pos: Nat, view: CView, +draft: String, +dir: HistStep) -> KeyPlan:
-  finish_keys.dismiss.at(hist_move(lines, pos, draft, dir), seed_of(dir), view)
+def finish_keys.dismiss(+lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +draft: String, +dir: HistStep) -> KeyPlan:
+  finish_keys.dismiss.at(hist_move(lines, pos, stash, draft, dir), seed_of(dir), view)
 
-def finish_keys.tab(accept: Bool, +pos: Nat, view: CView, +typed: String, +prev: String) -> KeyPlan:
+def finish_keys.tab(accept: Bool, +pos: Nat, view: CView, +typed: String, +prev: String, +stash: String) -> KeyPlan:
   match accept:
-    case True{}: finish_keys.accept(pos, view, typed, prev)
+    case True{}: finish_keys.accept(pos, view, typed, prev, stash)
     case False{}: KeyCycle{}
 
-def finish_keys.comp(+code: U32, +lines: List<&2, String>, +pos: Nat, +view: CView, +typed: String, +draft: String, +prev: String, dir: HistStep, enter: Bool) -> KeyPlan:
+def finish_keys.comp(+code: U32, +lines: List<&2, String>, +pos: Nat, +stash: String, +view: CView, +typed: String, +draft: String, +prev: String, dir: HistStep, enter: Bool) -> KeyPlan:
   match code:
     case 1:
       finish_keys.tab(
         Bool.and(Bool.not(tab_cycle(view)), Cu.tab_accept_ok(typed, pick_idx(view))),
-        pos, view, typed, prev)
+        pos, view, typed, prev, stash)
     case 2:
-      finish_keys.accept(pos, view, typed, prev)
+      finish_keys.accept(pos, view, typed, prev, stash)
     case 3:
-      finish_keys.dismiss(lines, pos, view, draft, dir)
+      finish_keys.dismiss(lines, pos, stash, view, draft, dir)
     case _:
-      finish_keys.dir(dir, lines, pos, view, typed, draft, prev, enter)
+      finish_keys.dir(dir, lines, pos, stash, view, typed, draft, prev, enter)

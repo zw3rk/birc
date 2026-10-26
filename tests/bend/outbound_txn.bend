@@ -44,4 +44,13 @@ def main() -> IO(Unit):
     Unit <- E.must_eq("pong-last2048-closed", U32.show(Out.pong_last(2048)), "0")
     Unit <- E.must_eq("pong-last0", U32.show(Out.pong_last(0)), "2148532223")
     Unit <- E.must_eq("pong-last2047", U32.show(Out.pong_last(2047)), "4294967295")
+    # Pending queue bound: kept is capped, dropped is the excess, both pair
+    # line-for-line with the txn list at the actor seam.
+    Unit <- E.must_eq("pending-cap", Nat.show(Out.PENDING_CAP()), "512")
+    Unit <- E.must_eq("bound-kept-small", Nat.show(Out.bound_kept(3n)), "3")
+    Unit <- E.must_eq("bound-kept-empty", Nat.show(Out.bound_kept(0n)), "0")
+    Unit <- E.must_eq("bound-kept-cap", Nat.show(Out.bound_kept(600n)), "512")
+    Unit <- E.must_eq("bound-dropped-none", Nat.show(Out.bound_dropped(3n)), "0")
+    Unit <- E.must_eq("bound-dropped-empty", Nat.show(Out.bound_dropped(0n)), "0")
+    Unit <- E.must_eq("bound-dropped-cap", Nat.show(Out.bound_dropped(600n)), "88")
     IO.print("outbound_txn=ok")

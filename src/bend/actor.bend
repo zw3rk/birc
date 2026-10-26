@@ -494,24 +494,72 @@ def writer_done(+evt: Chan(Sess.UiMsg), +gen: U32) -> IO(Unit):
     Unit <- post(evt, gen, Sess.Eof{})
     post(evt, gen, Sess.WriterDone{})
 
-def finish_sent(pair: Tr.Conn & Sent, +evt: Chan(Sess.UiMsg), +gen: U32) -> IO(Unit):
+# Fail-closed shutdown remainder: a failed/partial write stops the flush and
+# the rest is discarded without replay and without a notice — the UI is
+# tearing down, so no NetFail observer remains (shutdown_wait only honors
+# the current generation's WriterDone). Success still flushes every line,
+# including QUIT, so close never drops the healthy FIFO. The loop below is
+# ordered backward-only (no forward refs): the chunk helpers return through
+# one resume pair, and only writer_finish_go recurses — on itself, with
+# decreasing fuel first, like writer_drain_rounds. Pair patterns stay
+# marker-free (nested, never flat-3): the checker cannot infer + inside
+# &-patterns, so affine pieces move plain into + parameters downstream.
+def writer_finish_sent(pair: Tr.Conn & Bool, +later: List<&2, String>, +later_txn: List<&2, U32>, +evt: Chan(Sess.UiMsg), +gen: U32, k: (Tr.Conn & (List<&2, String> & List<&2, U32>)) -> IO(Unit)) -> IO(Unit):
   match pair:
-    case (sock, _):
-      do IO<Unit>:
-        Unit <- writer_drop(sock)
-        writer_done(evt, gen)
+    case (sock, ok):
+      match ok:
+        case False{}:
+          do IO<Unit>:
+            Unit <- writer_drop(sock)
+            writer_done(evt, gen)
+        case True{}:
+          k((sock, (later, later_txn)))
 
-# Closing cmd (including UI fuel exhaustion) flushes the healthy FIFO outside
-# the loop budget. A failed/partial write stops this flush without replay.
+def writer_finish_send(split: List<&2, U32> & List<&2, U32>, sock: Tr.Conn, +now: List<&2, String>, +later: List<&2, String>, +evt: Chan(Sess.UiMsg), +gen: U32, k: (Tr.Conn & (List<&2, String> & List<&2, U32>)) -> IO(Unit)) -> IO(Unit):
+  match split:
+    case (now_txn, later_txn):
+      do IO<Unit>:
+        pair : Tr.Conn & Sent <- send_batch(sock, now, now_txn)
+        writer_finish_sent(sent_ok(pair), later, later_txn, evt, gen, k)
+
+def writer_finish_batch(+plan: Out.Batch, +all_txn: List<&2, U32>, sock: Tr.Conn, +evt: Chan(Sess.UiMsg), +gen: U32, k: (Tr.Conn & (List<&2, String> & List<&2, U32>)) -> IO(Unit)) -> IO(Unit):
+  match plan:
+    case Out.Batch{+now, +later, _}:
+      writer_finish_send(Out.split_at_u32(all_txn, List.length(&2, String, now)), sock, now, later, evt, gen, k)
+
+# Closing cmd (including UI fuel exhaustion) flushes the healthy FIFO in
+# SEND_CAP chunks outside the loop budget. Fuel (the pending length) bounds
+# the loop; each chunk strictly shrinks the remainder.
+def writer_finish_go(+fuel: Nat, trio: Tr.Conn & (List<&2, String> & List<&2, U32>), +evt: Chan(Sess.UiMsg), +gen: U32) -> IO(Unit):
+  match fuel:
+    case 0n:
+      match trio:
+        case (sock, rest):
+          match rest:
+            case (_, _):
+              do IO<Unit>:
+                Unit <- writer_drop(sock)
+                writer_done(evt, gen)
+    case 1n+p:
+      match trio:
+        case (sock, rest):
+          match rest:
+            case (later, later_txn):
+              match later:
+                case Nil{}:
+                  do IO<Unit>:
+                    Unit <- writer_drop(sock)
+                    writer_done(evt, gen)
+                case Con{_, _}:
+                  writer_finish_batch(Out.batch(later, Out.budget_frames(0)), later_txn, sock, evt, gen, t2 => writer_finish_go(p, t2, evt, gen))
+
 def writer_finish(st: Writer, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
   match st:
     case Writer{sock, +gen, +pending, +pending_txn, _, _, _}:
       match sock:
         case None{}: writer_done(evt, gen)
         case Some{s}:
-          do IO<Unit>:
-            pair : Tr.Conn & Sent <- send_batch(s, pending, pending_txn)
-            finish_sent(pair, evt, gen)
+          writer_finish_go(List.length(&2, String, pending), (s, (pending, pending_txn)), evt, gen)
 
 def pump_send(+cmd: Chan(Sess.NetCmd), gen: U32) -> IO(Unit):
   do IO<Unit>:
@@ -563,6 +611,14 @@ def writer_queued(sock: Tr.Conn, +gen: U32, +plan: Out.Batch, +all_txn: List<&2,
       split = writer_split(plan, all_txn)
       writer_split_go(split, sock, gen, now, later, budget, scheduled, total, next_txn, evt, cmd, k)
 
+# Overflow beyond PENDING_CAP discards the newest excess without retry and
+# reports the drop count; the kept prefix stays paired line-for-line.
+def writer_queue_notice(+dropped: Nat, +gen: U32, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
+  match dropped:
+    case 0n: IO.pure(Unit, Unit{})
+    case 1n+p:
+      IO.spawn(Unit, writer_fail(evt, gen, "outbound queue overflow; " ++ Nat.show(dropped) ++ " lines were discarded without retry"))
+
 def writer_queue(st: Writer, +outs: List<&2, String>, +txn: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), k: Writer -> IO(Unit)) -> IO(Unit):
   match st:
     case Writer{sock, +gen, +pending, +pending_txn, +next_txn, budget, +scheduled}:
@@ -571,14 +627,20 @@ def writer_queue(st: Writer, +outs: List<&2, String>, +txn: U32, +evt: Chan(Sess
         case Some{s}:
           +all = List.append(&2, String, pending, outs)
           +all_txn = List.append(&2, U32, pending_txn, Out.repeat_txn(txn, List.length(&2, String, outs)))
-          +plan = Out.batch(all, budget)
+          +total = List.length(&2, String, all)
+          +kept = Out.bound_kept(total)
+          +tpending = List.take(&2, String, all, kept)
+          +tpending_txn = List.take(&2, U32, all_txn, kept)
+          +plan = Out.batch(tpending, budget)
           # The Cont/Pong mark txn (txn) may be a PONG-space request ID; the
           # low batch counter always advances from next_txn so PONG marks
           # never corrupt Cont batch IDs. For Cont, txn equals next_txn.
           +advanced = Out.next_batch_txn(next_txn)
           +has_new = Bool.not(List.is_empty(&2, String, outs))
           +next = Bool.pick(U32, has_new, advanced, next_txn)
-          writer_queued(s, gen, plan, all_txn, scheduled, List.length(&2, String, all), next, evt, cmd, k)
+          do IO<Unit>:
+            Unit <- writer_queue_notice(Out.bound_dropped(total), gen, evt)
+            writer_queued(s, gen, plan, tpending_txn, scheduled, List.length(&2, String, tpending), next, evt, cmd, k)
 
 def writer_pump(same: Bool, st: Writer, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), k: Writer -> IO(Unit)) -> IO(Unit):
   match same:
@@ -1205,6 +1267,8 @@ def dial_superseded(+dial_gen: U32, +writer_gen: U32, connected: Bool) -> Bool:
 
 # Autoreconnect fail path: flush healthy pending then abandon without
 # WriterDone (reconnect_watch owns the later Dial). Drop stays discard-only.
+# A failed flush posts NetFail and discards the remainder without retry,
+# like writer_sent — the fail-closed remainder policy.
 def writer_hangup_done(
   pair: Tr.Conn & Sent,
   +gen: U32,
@@ -1249,10 +1313,11 @@ def writer_hangup(
 # send_batch contract as writer_finish) without posting WriterDone; admit
 # begins with an empty queue for the new generation. A failed flush posts
 # NetFail like writer_sent (discarded lines are not retried), then still
-# admits the new Dial on a clean queue.
+# admits the new Dial on a clean queue. The notice carries the new
+# generation: the UI already bumped to dial_gen, so an old-gen notice would
+# be dropped as stale and the user would never see the discard.
 def writer_dial_flushed(
   pair: Tr.Conn & Sent,
-  +old_gen: U32,
   +total: Nat,
   +host: String,
   +port: U32,
@@ -1273,7 +1338,7 @@ def writer_dial_flushed(
         case False{}:
           do IO<Unit>:
             Unit <- writer_drop(sock)
-            Unit <- IO.spawn(Unit, writer_fail(evt, old_gen, "send timed out or failed; " ++ Nat.show(Nat.add(1n, Nat.sub(total, count))) ++ " queued/uncertain lines were discarded without retry"))
+            Unit <- IO.spawn(Unit, writer_fail(evt, dial_gen, "send timed out or failed; " ++ Nat.show(Nat.add(1n, Nat.sub(total, count))) ++ " queued/uncertain lines were discarded without retry"))
             writer_admit_begin(host, port, force_tls, nick, dial_gen, evt, boot, cmd, scope, budget, next_txn, Nil{}, False{}, False{}, k)
         case True{}:
           do IO<Unit>:
@@ -1284,7 +1349,6 @@ def writer_dial_flush(
   sock: Maybe<&1, Tr.Conn>,
   +pending: List<&2, String>,
   +pending_txn: List<&2, U32>,
-  +old_gen: U32,
   +host: String,
   +port: U32,
   +force_tls: Bool,
@@ -1304,7 +1368,7 @@ def writer_dial_flush(
     case Some{s}:
       do IO<Unit>:
         pair : Tr.Conn & Sent <- send_batch(s, pending, pending_txn)
-        writer_dial_flushed(pair, old_gen, List.length(&2, String, pending), host, port, force_tls, nick, dial_gen, evt, boot, cmd, scope, budget, next_txn, k)
+        writer_dial_flushed(pair, List.length(&2, String, pending), host, port, force_tls, nick, dial_gen, evt, boot, cmd, scope, budget, next_txn, k)
 
 def writer_dial_some(
   redundant: Bool,
@@ -1324,9 +1388,9 @@ def writer_dial_some(
     case True{}: k((w, scope))
     case False{}:
       match w:
-        case Writer{sock, +gen, +pending, +pending_txn, +next_txn, budget, _}:
+        case Writer{sock, _, +pending, +pending_txn, +next_txn, budget, _}:
           +next_scope = auth_scope_dial(scope, host, port)
-          writer_dial_flush(sock, pending, pending_txn, gen, host, port, force_tls, nick, dial_gen, evt, boot, cmd, next_scope, budget, next_txn, k)
+          writer_dial_flush(sock, pending, pending_txn, host, port, force_tls, nick, dial_gen, evt, boot, cmd, next_scope, budget, next_txn, k)
 
 def writer_command(c: Sess.NetCmd, st: Writer, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +boot: Chan(Boot), +scope: AuthScope, force_tls: Bool, k: (Writer & AuthScope) -> IO(Unit)) -> IO(Unit):
   match c:
