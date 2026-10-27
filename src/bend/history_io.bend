@@ -189,33 +189,18 @@ def history_file.load(+snapshot: Bool, +path: String, +endpoint: String, +cap: U
     got : U32 & U32 & List<&2, String> & List<&2, List<&2, String>> <- read_kept(path, endpoint, cap)
     return history_file.apply(got, snapshot, cl, endpoint, cap, now)
 
-def history_file.plain(+cl: Cl.Client) -> Bool:
-  match cl:
-    case Cl.Client{_, _, +bufs, _, _, _, _, _, _}:
-      Nat.is_le(Cl.buf_count(bufs), 1n)
-
-def history_load_client.route(plain: Bool, +path: String, +endpoint: String, +cap: U32, +cl: Cl.Client, +now: String) -> IO(Cl.Client):
-  match plain:
-    case True{}: history_file.load(False{}, path, endpoint, cap, cl, now)
-    case False{}: history_file.load(False{}, path, endpoint, cap, cl, now)
-
 def history_load_client.pick(skip: Bool, +path: String, +endpoint: String, +cap: U32, +cl: Cl.Client, +now: String) -> IO(Cl.Client):
   match skip:
     case True{}: IO.pure(Cl.Client, cl)
-    case False{}: history_load_client.route(history_file.plain(cl), path, endpoint, cap, cl, now)
+    case False{}: history_file.load(False{}, path, endpoint, cap, cl, now)
 
 def history_load_client(+path: String, +endpoint: String, +cap: U32, +cl: Cl.Client) -> IO(Cl.Client):
   match cl:
     case Cl.Client{_, _, _, _, +now, _, _, _, _}:
       history_load_client.pick(String.is_empty(path) || Bool.not(Cl.settings_history(Cl.get_settings(cl))), path, endpoint, cap, cl, now)
 
-def history_snapshot_client.route(plain: Bool, +path: String, +endpoint: String, +cap: U32, +cl: Cl.Client) -> IO(Cl.Client):
-  match plain:
-    case True{}: history_file.load(True{}, path, endpoint, cap, cl, "")
-    case False{}: history_file.load(True{}, path, endpoint, cap, cl, "")
-
 def history_snapshot_client(+path: String, +endpoint: String, +cap: U32, +cl: Cl.Client) -> IO(Cl.Client):
-  history_snapshot_client.route(history_file.plain(cl), path, endpoint, cap, cl)
+  history_file.load(True{}, path, endpoint, cap, cl, "")
 
 def history_init_client.pick(empty: Bool, +path: String, +endpoint: String, +cap: U32, +nick: String, +host: String, +now: String) -> IO(Cl.Client):
   match empty:
@@ -266,15 +251,19 @@ def read_pace.begin(+bytes: List<&2, U32>, +drop: Nat, f: File, state: H.ReadSta
     Unit <- IO.sleep(0)
     read_pace.unpack(H.read_walk(drop, bytes, state, endpoint, cap), rest => st => next(f, st, Nat.sub(remaining, read_pace.spent(rest, drop))))
 
-def read_loop.empty.mode(empty: Bool, snapshot: Bool, f: File, +bytes: List<&2, U32>, state: H.ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> H.ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
-  match empty:
-    case True{}: read_finish.mode(snapshot, f, state, now)
-    case False{}: read_pace.begin(bytes, List.length(&2, U32, bytes), f, state, endpoint, cap, remaining, next)
+# D214: one length walk per chunk. Emptiness reuses the same drop size through
+# Nat.is_eq (constant on 0n); the leftover walk inside read_pace.spent stays
+# because the remaining decrement needs the consumed count and read_walk
+# (pure module) returns only the leftover list.
+def read_loop.empty.mode(len: Nat, snapshot: Bool, f: File, +bytes: List<&2, U32>, state: H.ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> H.ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
+  match len:
+    case 0n: read_finish.mode(snapshot, f, state, now)
+    case 1n+_: read_pace.begin(bytes, len, f, state, endpoint, cap, remaining, next)
 
 def read_loop.got.mode(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, snapshot: Bool, state: H.ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> H.ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
   match pair:
     case (f, Fail{error}): read_failure.mode(snapshot, f, state, now, error, "read failed; only completed records were restored")
-    case (f, Done{+bytes}): read_loop.empty.mode(Nat.is_eq(List.length(&2, U32, bytes), 0n), snapshot, f, bytes, state, endpoint, cap, now, remaining, next)
+    case (f, Done{+bytes}): read_loop.empty.mode(List.length(&2, U32, bytes), snapshot, f, bytes, state, endpoint, cap, now, remaining, next)
 
 def read_loop.got(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>, state: H.ReadState, endpoint: String, cap: U32, now: String, remaining: Nat, next: File -> H.ReadState -> Nat -> IO(Cl.Client)) -> IO(Cl.Client):
   read_loop.got.mode(pair, False{}, state, endpoint, cap, now, remaining, next)
@@ -290,6 +279,9 @@ def read_loop.read.mode(done: Bool, +snapshot: Bool, f: File, state: H.ReadState
 # The file's initial size bounds the loop. Appends during loading cannot keep it
 # alive forever. Short reads still consume the full snapshot; state holds at most 8192 bytes and
 # MAX_BUFFERS * min(cap, SCROLL_CAP) lines, regardless of file size.
+# D167/D212: fuel stays byte-seeded (1n+size, converted once in read_size.sized).
+# Chunk-unit fuel is unsound here: a short native read can consume fewer than
+# 64 KiB per step, so only the byte count covers the maximum step count.
 def read_loop.mode(fuel: Nat, +snapshot: Bool, f: File, state: H.ReadState, +endpoint: String, +cap: U32, +now: String, +remaining: Nat) -> IO(Cl.Client):
   match fuel:
     case 0n: read_finish.mode(snapshot, f, state, now)
@@ -303,10 +295,14 @@ def read_prepare.mode(zero: Bool, cl: Cl.Client, +cap: U32) -> Cl.Client:
     case True{}: cl
     case False{}: Cl.client_hist_open(cl, H.hist_keep(cap))
 
+# One U32->Nat conversion shared by fuel and remaining (was computed twice).
+def read_size.sized(+size: Nat, snapshot: Bool, f: File, cl: Cl.Client, endpoint: String, +cap: U32, now: String) -> IO(Cl.Client):
+  read_loop.mode(1n+size, snapshot, f, H.ReadState{read_prepare.mode(U32.is_eq(cap, 0), cl, cap), Nil{}, 0n, False{}}, endpoint, cap, now, size)
+
 def read_size.mode(pair: File & Result<&1, &1, U32 & String, U32>, snapshot: Bool, cl: Cl.Client, endpoint: String, +cap: U32, now: String) -> IO(Cl.Client):
   match pair:
     case (f, Fail{error}): read_failure.mode(snapshot, f, H.ReadState{cl, Nil{}, 0n, False{}}, now, error, "size unavailable")
-    case (f, Done{+size}): read_loop.mode(1n+U32.to_nat(size), snapshot, f, H.ReadState{read_prepare.mode(U32.is_eq(cap, 0), cl, cap), Nil{}, 0n, False{}}, endpoint, cap, now, U32.to_nat(size))
+    case (f, Done{+size}): read_size.sized(U32.to_nat(size), snapshot, f, cl, endpoint, cap, now)
 
 # ENOENT is the normal first-run case on this POSIX runtime. Other open
 # failures must be visible; an inaccessible history file is not an empty one.

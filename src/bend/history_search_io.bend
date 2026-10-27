@@ -188,11 +188,16 @@ def search_size.over(moved: Bool, f: File, +size: Nat, +query: Hs.DiskQuery, +en
         return Hs.DiskFailed{Hs.scan_changed_text()}
     case False{}: search_loop(1n+size, f, query, endpoint, cursor, Hs.scan_initial(), size)
 
+# One U32->Nat conversion shared by the cursor check and the scan fuel
+# (was computed twice in the Done arm).
+def search_size.sized(+size: Nat, f: File, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
+  search_size.over(Nat.is_gt(cursor, size), f, size, query, endpoint, cursor)
+
 def search_size(pair: File & Result<&1, &1, U32 & String, U32>, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
   match pair:
     case (f, Fail{error}): search_failure(f, "size unavailable", error)
     case (f, Done{+size}):
-      search_size.over(Nat.is_gt(cursor, U32.to_nat(size)), f, U32.to_nat(size), query, endpoint, cursor)
+      search_size.sized(U32.to_nat(size), f, query, endpoint, cursor)
 
 def search_open.refused(refused: Bool, +code: U32, +msg: String) -> IO(Hs.DiskResult):
   match refused:
@@ -269,11 +274,14 @@ def search_run(+endpoint: String, +query: Hs.DiskQuery, +cursor: Nat, +history_o
 # Native twin of the worker for BIRC_SEARCH_HELPER=native (linked builds
 # without a helper process). Called only from the loop's emit arm, never
 # from suite-reachable code: the C law cannot link on the JS backend.
+# Production native path runs the retained-descriptor chunked scan loop
+# (open_private + search_loop), not the whole-file scan_native materializer.
+# scan_native stays for the FFI law; production never materializes the file.
 def search_run_native.post.go(post: Bool, +path: String, +endpoint: String, +query: Hs.DiskQuery, +cursor: Nat, +ticket: Nat, +gen: Nat, +wgen: U32, +orig: String, evt: Chan(Sess.UiMsg)) -> IO(Unit):
   match post:
     case True{}:
       do IO<Unit>:
-        result : Hs.DiskResult <- scan_native(path, endpoint, query, cursor)
+        result : Hs.DiskResult <- search_file_checked(path, endpoint, query, cursor, True{})
         post_search_done(result, ticket, gen, wgen, endpoint, orig, evt)
     case False{}: IO.pure(Unit, Unit{})
 

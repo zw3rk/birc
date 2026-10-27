@@ -25,6 +25,7 @@ import ./history.bend as Hist
 import ./frame.bend as Fr
 import ./irc_commands.bend as Commands
 import ./utc_time.bend as Utc
+import ./wire_style.bend as Ws
 import ./cap_notify.bend as CapNotify
 
 def PAGE_SIZE() -> Nat:
@@ -123,6 +124,31 @@ def match_text.empty(empty: Bool, +text: String, +q: String) -> Bool:
 def match_text(+text: String, +q: String) -> Bool:
   match_text.empty(String.is_empty(q), text, q)
 
+# Folded fast path: the query fold is constant per scan, so compute it once
+# at the scan/chunk entry and reuse it per record. Hay still renders+folds
+# per record (it varies); only the constant query refold is hoisted. A raw
+# substring pre-check would break fuzzy_contains subsequence matching, so
+# the policy stays the shared fuzzy matcher with a pre-folded needle.
+def folded_query_text(+query: DiskQuery) -> String:
+  match query:
+    case DiskQuery{+text, _}: Irc.rfc1459(text)
+
+def query_text_raw(+query: DiskQuery) -> String:
+  match query:
+    case DiskQuery{+text, _}: text
+
+def query_target_raw(+query: DiskQuery) -> String:
+  match query:
+    case DiskQuery{_, +qtarget}: qtarget
+
+def match_text.folded_empty(empty: Bool, +text: String, +folded_q: String) -> Bool:
+  match empty:
+    case True{}: False{}
+    case False{}: Feed.fuzzy_contains(Irc.rfc1459(Ws.rendered_text(Ws.render(text))), folded_q)
+
+def match_text.folded(+text: String, +q_raw: String, +folded_q: String) -> Bool:
+  match_text.folded_empty(String.is_empty(q_raw), text, folded_q)
+
 def line_text(+line: Cl.Line) -> String:
   match line:
     case Cl.Line{_, _, +text, _, _}: text
@@ -151,10 +177,28 @@ def match_record.entry(+query: DiskQuery, entry: Maybe<&2, Hist.HistEntry>, +at:
 def match_record(+query: DiskQuery, +endpoint: String, +raw: String, +at: Nat) -> Maybe<&2, DiskMatch>:
   match_record.entry(query, Hist.parse_line_for(endpoint, raw), at)
 
+def match_record.line_folded(+q_raw: String, +qtarget: String, +folded_q: String, +target: String, +line: Cl.Line, +at: Nat) -> Maybe<&2, DiskMatch>:
+  match_record.keep(match_target(qtarget, target) && match_text.folded(line_text(line), q_raw, folded_q), target, line, at)
+
+def match_record.entry_folded(+q_raw: String, +qtarget: String, +folded_q: String, entry: Maybe<&2, Hist.HistEntry>, +at: Nat) -> Maybe<&2, DiskMatch>:
+  match entry:
+    case None{}: None{}
+    case Some{Hist.Entry{+target, +line}}: match_record.line_folded(q_raw, qtarget, folded_q, target, line, at)
+    case Some{Hist.ServerEntry{+line}}: match_record.line_folded(q_raw, qtarget, folded_q, "*server*", line, at)
+
+def match_record.folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +raw: String, +at: Nat) -> Maybe<&2, DiskMatch>:
+  match_record.entry_folded(q_raw, qtarget, folded_q, Hist.parse_line_for(endpoint, raw), at)
+
 # ---- paging -----------------------------------------------------------
 # The scan keeps the newest PAGE_SIZE matches older than the cursor.
 # Cursor 0 with no matches means the window is exhausted.
 
+# Page assembly is cons-then-reverse with a counted accumulator: the kept
+# spine stays newest-first via O(1) cons while growing, overflow drops the
+# oldest tail once full, and the single reverse at finish restores
+# oldest-first page order. No per-hit length or append walk. The legacy
+# two-argument retain stays for law/test compatibility; the scan uses the
+# counted variant below.
 def retain_evicted(kept: List<&2, DiskMatch>, +hit: DiskMatch) -> List<&2, DiskMatch> & Bool:
   match kept:
     case Nil{}: (hit <> Nil{}, True{})
@@ -167,6 +211,26 @@ def retain.full(kept: List<&2, DiskMatch>, +hit: DiskMatch, full: Bool) -> List<
 
 def retain(+kept: List<&2, DiskMatch>, +hit: DiskMatch) -> List<&2, DiskMatch> & Bool:
   retain.full(kept, hit, Nat.is_ge(List.length(&2, DiskMatch, kept), PAGE_SIZE()))
+
+# Counted page accumulator as a record (avoids tuple-arity inference): the
+# kept spine stays newest-first via O(1) cons while growing, overflow drops
+# the oldest tail once full.
+type ScanKept is Data:
+  ScanKept{rev: List<&2, DiskMatch>, n: Nat, evicted: Nat}
+
+def retain_counted_full.evict(+kept_rev: List<&2, DiskMatch>, +hit: DiskMatch, +evicted: Nat) -> ScanKept:
+  ScanKept{hit <> List.take(&2, DiskMatch, kept_rev, Nat.sub(PAGE_SIZE(), 1n)), PAGE_SIZE(), 1n+evicted}
+
+def retain_counted_full.grow(+kept_rev: List<&2, DiskMatch>, +hit: DiskMatch, +kept_n: Nat, +evicted: Nat) -> ScanKept:
+  ScanKept{hit <> kept_rev, 1n+kept_n, evicted}
+
+def retain_counted_full(full: Bool, +kept_rev: List<&2, DiskMatch>, +hit: DiskMatch, +kept_n: Nat, +evicted: Nat) -> ScanKept:
+  match full:
+    case False{}: retain_counted_full.grow(kept_rev, hit, kept_n, evicted)
+    case True{}: retain_counted_full.evict(kept_rev, hit, evicted)
+
+def retain_counted(+kept_rev: List<&2, DiskMatch>, +hit: DiskMatch, +kept_n: Nat, +evicted: Nat) -> ScanKept:
+  retain_counted_full(Nat.is_ge(kept_n, PAGE_SIZE()), kept_rev, hit, kept_n, evicted)
 
 def next_cursor.go(xs: List<&2, DiskMatch>, +best: Nat) -> Nat:
   match xs:
@@ -247,64 +311,99 @@ def import_page(+cl: Cl.Client, +orig: String, page: DiskPage) -> Cl.Client:
 # The unterminated tail is dropped like history load: it may be torn.
 
 type ScanState is Data:
-  ScanState{kept: List<&2, DiskMatch>, evicted: Nat, rev: List<&2, U32>, count: Nat, dropping: Bool, pos: Nat, rec_start: Nat}
+  ScanState{kept_rev: List<&2, DiskMatch>, kept_n: Nat, evicted: Nat, rev: List<&2, U32>, count: Nat, dropping: Bool, pos: Nat, rec_start: Nat}
 
 def scan_initial() -> ScanState:
-  ScanState{Nil{}, 0n, Nil{}, 0n, False{}, 0n, 0n}
+  ScanState{Nil{}, 0n, 0n, Nil{}, 0n, False{}, 0n, 0n}
 
-def scan_record.retained(pair: List<&2, DiskMatch> & Bool, +evicted: Nat) -> List<&2, DiskMatch> & Nat:
-  match pair:
-    case (+kept2, +dropped): (kept2, Bool.pick(Nat, dropped, 1n+evicted, evicted))
-
-def scan_record.hit(got: Maybe<&2, DiskMatch>, kept: List<&2, DiskMatch>, +evicted: Nat) -> List<&2, DiskMatch> & Nat:
+def scan_record.hit(got: Maybe<&2, DiskMatch>, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat) -> ScanKept:
   match got:
-    case None{}: (kept, evicted)
-    case Some{+hit}: scan_record.retained(retain(kept, hit), evicted)
+    case None{}: ScanKept{kept_rev, kept_n, evicted}
+    case Some{+hit}: retain_counted(kept_rev, hit, kept_n, evicted)
 
-def scan_record.decoded(+query: DiskQuery, +endpoint: String, kept: List<&2, DiskMatch>, +evicted: Nat, text: Maybe<&2, String>, +start: Nat) -> List<&2, DiskMatch> & Nat:
+def scan_record.decoded(+query: DiskQuery, +endpoint: String, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, text: Maybe<&2, String>, +start: Nat) -> ScanKept:
   match text:
-    case None{}: (kept, evicted)
-    case Some{+raw}: scan_record.hit(match_record(query, endpoint, raw, start), kept, evicted)
+    case None{}: ScanKept{kept_rev, kept_n, evicted}
+    case Some{+raw}: scan_record.hit(match_record(query, endpoint, raw, start), kept_rev, kept_n, evicted)
 
-def scan_record.old(older: Bool, +query: DiskQuery, +endpoint: String, kept: List<&2, DiskMatch>, +evicted: Nat, +rev: List<&2, U32>, +start: Nat) -> List<&2, DiskMatch> & Nat:
+def scan_record.old(older: Bool, +query: DiskQuery, +endpoint: String, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, +rev: List<&2, U32>, +start: Nat) -> ScanKept:
   match older:
-    case False{}: (kept, evicted)
-    case True{}: scan_record.decoded(query, endpoint, kept, evicted, Fr.utf8_decode(List.reverse(&2, U32, rev)), start)
+    case False{}: ScanKept{kept_rev, kept_n, evicted}
+    case True{}: scan_record.decoded(query, endpoint, kept_rev, kept_n, evicted, Fr.utf8_decode(List.reverse(&2, U32, rev)), start)
 
-def scan_record(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept: List<&2, DiskMatch>, +evicted: Nat, rev: List<&2, U32>, +start: Nat) -> List<&2, DiskMatch> & Nat:
-  scan_record.old(Nat.is_lt(start, cursor), query, endpoint, kept, evicted, rev, start)
+def scan_record(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +start: Nat) -> ScanKept:
+  scan_record.old(Nat.is_lt(start, cursor), query, endpoint, kept_rev, kept_n, evicted, rev, start)
 
-def scan_newline.done(pair: List<&2, DiskMatch> & Nat, +pos: Nat) -> ScanState:
-  match pair:
-    case (+kept2, +evicted2): ScanState{kept2, evicted2, Nil{}, 0n, False{}, 1n+pos, 1n+pos}
+def scan_newline.done(acc: ScanKept, +pos: Nat) -> ScanState:
+  match acc:
+    case ScanKept{+kept2, +kept_n2, +evicted2}: ScanState{kept2, kept_n2, evicted2, Nil{}, 0n, False{}, 1n+pos, 1n+pos}
 
-def scan_newline(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept: List<&2, DiskMatch>, +evicted: Nat, rev: List<&2, U32>, +start: Nat, +pos: Nat) -> ScanState:
-  scan_newline.done(scan_record(query, endpoint, cursor, kept, evicted, rev, start), pos)
+def scan_newline(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +start: Nat, +pos: Nat) -> ScanState:
+  scan_newline.done(scan_record(query, endpoint, cursor, kept_rev, kept_n, evicted, rev, start), pos)
 
-def scan_store(drop: Bool, kept: List<&2, DiskMatch>, +evicted: Nat, +rev: List<&2, U32>, +count: Nat, +byte: U32, +pos: Nat, +rec_start: Nat) -> ScanState:
+def scan_store(drop: Bool, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, +rev: List<&2, U32>, +count: Nat, +byte: U32, +pos: Nat, +rec_start: Nat) -> ScanState:
   match drop:
-    case True{}: ScanState{kept, evicted, Nil{}, 0n, True{}, 1n+pos, rec_start}
-    case False{}: ScanState{kept, evicted, byte <> rev, 1n+count, False{}, 1n+pos, rec_start}
+    case True{}: ScanState{kept_rev, kept_n, evicted, Nil{}, 0n, True{}, 1n+pos, rec_start}
+    case False{}: ScanState{kept_rev, kept_n, evicted, byte <> rev, 1n+count, False{}, 1n+pos, rec_start}
 
-def scan_step.newline(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept: List<&2, DiskMatch>, +evicted: Nat, rev: List<&2, U32>, +count: Nat, +dropping: Bool, +pos: Nat, +rec_start: Nat, +byte: U32, nl: Bool) -> ScanState:
+def scan_step.newline(+query: DiskQuery, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +count: Nat, +dropping: Bool, +pos: Nat, +rec_start: Nat, +byte: U32, nl: Bool) -> ScanState:
   match nl:
-    case True{}: scan_newline(query, endpoint, cursor, kept, evicted, rev, rec_start, pos)
-    case False{}: scan_store(dropping || Nat.is_ge(count, RECORD_MAX()), kept, evicted, rev, count, byte, pos, rec_start)
+    case True{}: scan_newline(query, endpoint, cursor, kept_rev, kept_n, evicted, rev, rec_start, pos)
+    case False{}: scan_store(dropping || Nat.is_ge(count, RECORD_MAX()), kept_rev, kept_n, evicted, rev, count, byte, pos, rec_start)
 
 def scan_step(+query: DiskQuery, +endpoint: String, +cursor: Nat, state: ScanState, +byte: U32) -> ScanState:
   match state:
-    case ScanState{+kept, +evicted, +rev, +count, +dropping, +pos, +rec_start}:
-      scan_step.newline(query, endpoint, cursor, kept, evicted, rev, count, dropping, pos, rec_start, byte, U32.is_eq(byte, 10))
+    case ScanState{+kept_rev, +kept_n, +evicted, +rev, +count, +dropping, +pos, +rec_start}:
+      scan_step.newline(query, endpoint, cursor, kept_rev, kept_n, evicted, rev, count, dropping, pos, rec_start, byte, U32.is_eq(byte, 10))
 
-def scan_chunk(bytes: List<&2, U32>, state: ScanState, +query: DiskQuery, +endpoint: String, +cursor: Nat) -> ScanState:
+def scan_record.hit_folded(got: Maybe<&2, DiskMatch>, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat) -> ScanKept:
+  match got:
+    case None{}: ScanKept{kept_rev, kept_n, evicted}
+    case Some{+hit}: retain_counted(kept_rev, hit, kept_n, evicted)
+
+def scan_record.decoded_folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, text: Maybe<&2, String>, +start: Nat) -> ScanKept:
+  match text:
+    case None{}: ScanKept{kept_rev, kept_n, evicted}
+    case Some{+raw}: scan_record.hit_folded(match_record.folded(q_raw, qtarget, folded_q, endpoint, raw, start), kept_rev, kept_n, evicted)
+
+def scan_record.old_folded(older: Bool, +q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, +rev: List<&2, U32>, +start: Nat) -> ScanKept:
+  match older:
+    case False{}: ScanKept{kept_rev, kept_n, evicted}
+    case True{}: scan_record.decoded_folded(q_raw, qtarget, folded_q, endpoint, kept_rev, kept_n, evicted, Fr.utf8_decode(List.reverse(&2, U32, rev)), start)
+
+def scan_record.folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +start: Nat) -> ScanKept:
+  scan_record.old_folded(Nat.is_lt(start, cursor), q_raw, qtarget, folded_q, endpoint, kept_rev, kept_n, evicted, rev, start)
+
+def scan_newline.folded_done(acc: ScanKept, +pos: Nat) -> ScanState:
+  match acc:
+    case ScanKept{+kept2, +kept_n2, +evicted2}: ScanState{kept2, kept_n2, evicted2, Nil{}, 0n, False{}, 1n+pos, 1n+pos}
+
+def scan_newline.folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +start: Nat, +pos: Nat) -> ScanState:
+  scan_newline.folded_done(scan_record.folded(q_raw, qtarget, folded_q, endpoint, cursor, kept_rev, kept_n, evicted, rev, start), pos)
+
+def scan_step.newline_folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +cursor: Nat, kept_rev: List<&2, DiskMatch>, +kept_n: Nat, +evicted: Nat, rev: List<&2, U32>, +count: Nat, +dropping: Bool, +pos: Nat, +rec_start: Nat, +byte: U32, nl: Bool) -> ScanState:
+  match nl:
+    case True{}: scan_newline.folded(q_raw, qtarget, folded_q, endpoint, cursor, kept_rev, kept_n, evicted, rev, rec_start, pos)
+    case False{}: scan_store(dropping || Nat.is_ge(count, RECORD_MAX()), kept_rev, kept_n, evicted, rev, count, byte, pos, rec_start)
+
+def scan_step.folded(+q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +cursor: Nat, state: ScanState, +byte: U32) -> ScanState:
+  match state:
+    case ScanState{+kept_rev, +kept_n, +evicted, +rev, +count, +dropping, +pos, +rec_start}:
+      scan_step.newline_folded(q_raw, qtarget, folded_q, endpoint, cursor, kept_rev, kept_n, evicted, rev, count, dropping, pos, rec_start, byte, U32.is_eq(byte, 10))
+
+def scan_chunk.folded(bytes: List<&2, U32>, state: ScanState, +q_raw: String, +qtarget: String, +folded_q: String, +endpoint: String, +cursor: Nat) -> ScanState:
   match bytes:
     case Nil{}: state
-    case Con{+byte, t}: scan_chunk(t, scan_step(query, endpoint, cursor, state, byte), query, endpoint, cursor)
+    case Con{+byte, t}: scan_chunk.folded(t, scan_step.folded(q_raw, qtarget, folded_q, endpoint, cursor, state, byte), q_raw, qtarget, folded_q, endpoint, cursor)
+
+def scan_chunk(bytes: List<&2, U32>, state: ScanState, +query: DiskQuery, +endpoint: String, +cursor: Nat) -> ScanState:
+  scan_chunk.folded(bytes, state, query_text_raw(query), query_target_raw(query), folded_query_text(query), endpoint, cursor)
 
 def search_finish_page(state: ScanState) -> DiskPage:
   match state:
-    case ScanState{+kept, +evicted, _, _, _, _, _}:
-      DiskPage{kept, next_cursor(kept), Nat.add(List.length(&2, DiskMatch, kept), evicted), Nat.is_eq(evicted, 0n)}
+    case ScanState{+kept_rev, +kept_n, +evicted, _, _, _, _, _}:
+      +kept = List.reverse(&2, DiskMatch, kept_rev)
+      DiskPage{kept, next_cursor(kept), Nat.add(kept_n, evicted), Nat.is_eq(evicted, 0n)}
 
 # Pure scan of retained-descriptor bytes. The helper and native scans hand
 # Bend the exact checked-fd content as one String; this folds it through
@@ -322,9 +421,9 @@ def scan_content.go(fuel: Nat, state: ScanState, +content: String, +query: DiskQ
         String.drop(content, SCAN_WINDOW()), query, endpoint, cursor)
 
 def scan_content(+content: String, +query: DiskQuery, +endpoint: String, +cursor: Nat) -> DiskPage:
-  # Fuel covers char/byte String semantics either way (UTF-8 runs at most
-  # four bytes per scalar); spare fuel folds no-op windows over "".
-  scan_content.go(Nat.add(1n, Nat.mul(4n, String.length(content))), scan_initial(), content, query, endpoint, cursor)
+  # Fuel counts 64 KiB windows (one per scan_content.go step), not bytes:
+  # a byte-count fuel would fold ~4n no-op windows over "" after drain.
+  scan_content.go(1n+Nat.div(String.length(content), SCAN_WINDOW()), scan_initial(), content, query, endpoint, cursor)
 
 # Fresh-search cursor: the scan keeps matches older than the cursor, so a
 # first page passes an offset past any scannable content (helper and native
@@ -812,16 +911,24 @@ def batch_collect.store(notice: Bool, +nick: String, +raw: String) -> String:
     case True{}: notice_mark() ++ Irc.sanitize_keep_style(Feed.fmt_msg(nick, raw))
     case False{}: Irc.sanitize_keep_style(batch_body.action(Feed.is_action(raw), nick, raw))
 
+# Collect cons-assembles newest-first (O(1) per message); the single reverse
+# at ChatDone restores oldest-first page order. Overflow still drops new
+# rows past BATCH_CAP; the length walk is skipped once overflow is set.
 def batch_collect.full(full: Bool, +ref: String, +target: String, +channel: Bool, messages: List<&2, BatchMsg>, +overflow: Bool, +mid: String, +stamp: String, +body: String, +author: String) -> ChatBatch:
   match full:
     case True{}: ChatCollect{ref, target, channel, messages, True{}}
     case False{}:
-      ChatCollect{ref, target, channel, List.append(&2, BatchMsg, messages, BatchMsg{mid, stamp, body, author} <> Nil{}), overflow}
+      ChatCollect{ref, target, channel, BatchMsg{mid, stamp, body, author} <> messages, overflow}
 
 def batch_collect.decide(ok: Bool, +full: Bool, +ref: String, +target: String, +channel: Bool, messages: List<&2, BatchMsg>, +overflow: Bool, +mid: String, +stamp: String, +body: String, +author: String) -> ChatBatch:
   match ok:
     case True{}: batch_collect.full(full, ref, target, channel, messages, overflow, mid, stamp, body, author)
     case False{}: ChatCollect{ref, target, channel, messages, overflow}
+
+def batch_collect.is_full(overflow: Bool, messages: List<&2, BatchMsg>) -> Bool:
+  match overflow:
+    case True{}: True{}
+    case False{}: Nat.is_ge(List.length(&2, BatchMsg, messages), BATCH_CAP())
 
 def batch_collect.msg(+cm: String, +ref: String, +target: String, +channel: Bool, +messages: List<&2, BatchMsg>, +overflow: Bool, +self: String, +line: String, +msg: Irc.Message) -> ChatBatch:
   +mid = tag_value(line, "msgid")
@@ -833,7 +940,7 @@ def batch_collect.msg(+cm: String, +ref: String, +target: String, +channel: Bool
       && valid_msgid(mid)
       && Bool.not(String.is_empty(ref))
       && String.eq(tag_value(line, "batch"), ref),
-    Nat.is_ge(List.length(&2, BatchMsg, messages), BATCH_CAP()),
+    batch_collect.is_full(overflow, messages),
     ref, target, channel, messages, overflow, mid,
     Irc.sanitize_in(Irc.msg_time(msg)),
     batch_collect.store(Irc.ieq(Irc.msg_command(msg), "NOTICE"), nick, raw),
@@ -872,7 +979,7 @@ def batch_claims(batch: ChatBatch, +line: String) -> Bool:
 
 def batch_close.done(done: Bool, +ref: String, +target: String, +channel: Bool, messages: List<&2, BatchMsg>, +overflow: Bool) -> ChatBatch:
   match done:
-    case True{}: ChatDone{ref, target, messages, overflow}
+    case True{}: ChatDone{ref, target, List.reverse(&2, BatchMsg, messages), overflow}
     case False{}: ChatCollect{ref, target, channel, messages, overflow}
 
 # Trust: only a server-shaped full source prefix closes a batch. A forged
@@ -898,9 +1005,10 @@ def batch_close(batch: ChatBatch, +line: String, +server: String) -> ChatBatch:
       batch_close.expect(ref, target, channel, messages, overflow, line, server)
     case _: batch
 
+# Collect stores newest-first via cons; present oldest-first like Done.
 def batch_messages(batch: ChatBatch) -> List<&2, BatchMsg>:
   match batch:
-    case ChatCollect{_, _, _, +messages, _}: messages
+    case ChatCollect{_, _, _, +messages, _}: List.reverse(&2, BatchMsg, messages)
     case ChatDone{_, _, +messages, _}: messages
     case ChatIdle{}: Nil{}
 
@@ -929,11 +1037,6 @@ def batch_row.action(target: String, msgid: String, stamp: String, text: String,
 def batch_row.msg(target: String, msgid: String, stamp: String, text: String, author: String) -> ServerMatch:
   ServerMatch{target, Cl.Line{Cl.Msg{}, stamp, text, author, 0n}, msgid}
 
-def batch_row.as_notice(action: Bool, +target: String, +msgid: String, +stamp: String, +text: String, +author: String) -> ServerMatch:
-  match action:
-    case True{}: batch_row.notice(target, msgid, stamp, text, author)
-    case False{}: batch_row.notice(target, msgid, stamp, text, author)
-
 def batch_row.on_action(action: Bool, +target: String, +msgid: String, +stamp: String, +text: String, +author: String) -> ServerMatch:
   match action:
     case True{}: batch_row.action(target, msgid, stamp, text, author)
@@ -941,7 +1044,7 @@ def batch_row.on_action(action: Bool, +target: String, +msgid: String, +stamp: S
 
 def batch_row.pick(notice: Bool, action: Bool, +target: String, +msgid: String, +stamp: String, +text: String, +author: String) -> ServerMatch:
   match notice:
-    case True{}: batch_row.as_notice(action, target, msgid, stamp, text, author)
+    case True{}: batch_row.notice(target, msgid, stamp, text, author)
     case False{}: batch_row.on_action(action, target, msgid, stamp, text, author)
 
 def batch_matches.go(msgs: List<&2, BatchMsg>, +target: String) -> List<&2, ServerMatch>:
@@ -1237,17 +1340,21 @@ def filter_unseen.keep(known: Bool, +h: BatchMsg, rest: List<&2, BatchMsg>) -> L
     case True{}: rest
     case False{}: h <> rest
 
-def filter_unseen_cap.go(msgs: List<&2, BatchMsg>, +orig: List<&2, String>, +page: List<&2, String>, +cap: Nat) -> List<&2, BatchMsg>:
+# Within-page dedup accumulates via cons (O(1) per message); the page holds
+# at most one batch (<= BATCH_CAP messages), so no per-element take-trim is
+# needed. The ledger membership itself stays a linear scan over the bounded
+# seen + page sets (opaque msgids have no ordering for a sorted merge).
+def filter_unseen_cap.go(msgs: List<&2, BatchMsg>, +orig: List<&2, String>, +page: List<&2, String>) -> List<&2, BatchMsg>:
   match msgs:
     case Nil{}: Nil{}
     case Con{+h, t}:
       filter_unseen.keep(List.contains(~String, ~String.eq, orig, batch_msgid(h))
         || List.contains(~String, ~String.eq, page, batch_msgid(h)), h,
-        filter_unseen_cap.go(t, orig, List.take(&2, String, batch_msgid(h) <> page, cap), cap))
+        filter_unseen_cap.go(t, orig, batch_msgid(h) <> page))
 
 def filter_unseen_cap(+c: HistoryCursor, msgs: List<&2, BatchMsg>, +cap: Nat) -> List<&2, BatchMsg>:
   match c:
-    case HistoryCursor{_, _, _, +seen, _}: filter_unseen_cap.go(msgs, seen, Nil{}, cap)
+    case HistoryCursor{_, _, _, +seen, _}: List.take(&2, BatchMsg, filter_unseen_cap.go(msgs, seen, Nil{}), cap)
 
 def filter_unseen(+c: HistoryCursor, msgs: List<&2, BatchMsg>) -> List<&2, BatchMsg>:
   filter_unseen_cap(c, msgs, BATCH_CAP())
@@ -1526,9 +1633,36 @@ def hist_collect_step.done(+cm: String, done: Bool, +closed: ChatBatch, +batch: 
     case True{}: (closed, True{})
     case False{}: hist_collect_step.claimed(cm, batch_claims(batch, line), batch, self, line, server)
 
+# Cheap pre-gate shared by the idle and active-collect paths: lines without
+# tags and without BATCH can never open, close, or suppress. The
+# tag-presence scan (starts_with "@") and the BATCH token scan are O(prefix)
+# while Irc.parse + tag_value walk the whole line.
+def line_maybe_batch(+line: String) -> Bool:
+  String.starts_with(line, "@") || String.contains(line, "BATCH")
+
+# Active-collect lines pay a close parse plus claim/suppressed work. A close
+# is always an uppercase BATCH command from the server; lines without that
+# token can never close, so skip the close parse. Other-batch tag traffic
+# still suppresses via the tag gate; tagless non-BATCH lines skip that parse
+# too. Claimed lines still take the single collect parse.
+def hist_collect_step.unclaimed(+cm: String, claimed: Bool, suppress_maybe: Bool, +batch: ChatBatch, +self: String, +line: String, +server: String) -> ChatBatch & Bool:
+  match claimed:
+    case True{}: (batch_line_cm(cm, batch, self, line), True{})
+    case False{}:
+      match suppress_maybe:
+        case True{}: hist_collect_step.suppressed(batch_suppressed(line, server), batch)
+        case False{}: (batch, False{})
+
+def hist_collect_step.open(maybe: Bool, +cm: String, +batch: ChatBatch, +self: String, +line: String, +server: String) -> ChatBatch & Bool:
+  match maybe:
+    case True{}:
+      +closed = batch_close(batch, line, server)
+      hist_collect_step.done(cm, batch_done(closed), closed, batch, self, line, server)
+    case False{}:
+      hist_collect_step.unclaimed(cm, batch_claims(batch, line), line_maybe_batch(line), batch, self, line, server)
+
 def hist_collect_step(+cm: String, +batch: ChatBatch, +self: String, +server: String, +line: String) -> ChatBatch & Bool:
-  +closed = batch_close(batch, line, server)
-  hist_collect_step.done(cm, batch_done(closed), closed, batch, self, line, server)
+  hist_collect_step.open(String.contains(line, "BATCH"), cm, batch, self, line, server)
 
 def hist_idle_step.quiet(pair: ChatBatch & Bool) -> ChatBatch & Bool & Maybe<&2, Nat>:
   match pair:
@@ -1539,8 +1673,15 @@ def hist_idle_step.opened(opened: Maybe<&2, ChatBatch>, +batch: ChatBatch, +line
     case None{}: hist_idle_step.quiet(hist_collect_step.suppressed(batch_suppressed(line, server), batch))
     case Some{+fresh}: (fresh, True{}, Some{ticket})
 
+# Cheap pre-gate: idle lines without tags and without BATCH can never open
+# or suppress (line_maybe_batch and opened are defined above, ahead of use).
+def hist_idle_step.gated(maybe: Bool, +isc: Cl.Iso, +batch: ChatBatch, +server: String, +line: String, +ticket: Nat) -> ChatBatch & Bool & Maybe<&2, Nat>:
+  match maybe:
+    case True{}: hist_idle_step.opened(batch_open_iso(isc, line, server), batch, line, ticket, server)
+    case False{}: (batch, False{}, None{})
+
 def hist_idle_step(+isc: Cl.Iso, +batch: ChatBatch, +server: String, +line: String, +ticket: Nat) -> ChatBatch & Bool & Maybe<&2, Nat>:
-  hist_idle_step.opened(batch_open_iso(isc, line, server), batch, line, ticket, server)
+  hist_idle_step.gated(line_maybe_batch(line), isc, batch, server, line, ticket)
 
 def hist_batch_step.collected(pair: ChatBatch & Bool) -> ChatBatch & Bool & Maybe<&2, Nat>:
   match pair:

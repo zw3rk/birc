@@ -10,9 +10,15 @@ def load.enabled(on: Bool, +path: String, +endpoint: String, +cap: U32, nick: St
     case False{}: IO.pure(Cl.Client, Cl.set_now(Cl.init_with_cap(nick, host, cap), now))
     case True{}: HistIO.history_snapshot_client(path, endpoint, cap, Cl.set_now(Cl.init_with_cap(nick, host, cap), now))
 
+# Clamp in the U32 domain before any Nat conversion: the raw settings cap
+# can hold up to a 10-digit value, and materializing it as a unary Nat
+# would hang startup. The clamped value never exceeds SCROLL_CAP (1024).
+def clamp_cap(+cap: U32) -> U32:
+  Bool.pick(U32, U32.is_ge(cap, 1024), 1024, cap)
+
 def load(+path: String, +endpoint: String, +cap: U32, +nick: String, +host: String, now: String) -> IO(Cl.Client):
   load.enabled(Bool.not(String.is_empty(path) || U32.is_zero(cap)), path, endpoint,
-    U32.from_nat(Cl.clamp_nat(U32.to_nat(cap), Cl.SCROLL_CAP())), nick, host, now)
+    clamp_cap(cap), nick, host, now)
 
 # The snapshot reader closes its owned descriptor before it returns. Only the
 # completed bounded snapshot crosses this channel; ticket/gen/endpoint belong

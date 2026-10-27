@@ -173,8 +173,15 @@ def parse_line_for.tokens(tokens: List<&2, String>, +endpoint: String) -> Maybe<
         && valid_kind(kind), target, kind, ts, author, text)
     case _: None{}
 
+# Foreign lines skip the full tab-split: only a "BIRC2\t"-led record can
+# pass the version gate inside parse_line_for.tokens.
+def parse_line_for.gated(gated: Bool, +endpoint: String, +raw: String) -> Maybe<&2, HistEntry>:
+  match gated:
+    case False{}: None{}
+    case True{}: parse_line_for.tokens(String.split(raw, Chr{9}), endpoint)
+
 def parse_line_for(+endpoint: String, +raw: String) -> Maybe<&2, HistEntry>:
-  parse_line_for.tokens(String.split(raw, Chr{9}), endpoint)
+  parse_line_for.gated(String.starts_with(raw, "BIRC2\t"), endpoint, raw)
 
 def parse_entries.on(m: Maybe<&2, HistEntry>, acc: List<&2, HistEntry>) -> List<&2, HistEntry>:
   match m:
@@ -400,17 +407,20 @@ def evict_target(full: Bool, +cl: Cl.Client) -> Cl.Client:
     case False{}: cl
     case True{}: evict_target.got(oldest_target(Cl.client_bufs(cl), 0n, None{}), cl)
 
-def history_target.found(found: Maybe<&2, Nat>, +cl: Cl.Client, +target: String) -> Cl.Client & Maybe<&2, Nat>:
-  match found:
-    case Some{_}: Cl.buf_get(cl, target, Cl.target_channel(target), True{})
-    case None{}:
-      +bufs = Cl.client_bufs(cl)
-      Cl.buf_get(evict_target(Nat.is_ge(Cl.buf_count(bufs), Cl.MAX_BUFFERS()) || Nat.is_ge(Cl.normal_buffer_count(bufs), Cl.NORMAL_BUFFERS()), cl), target, Cl.target_channel(target), True{})
+def history_target.miss(+cl: Cl.Client, +canonical: String, +chan: Bool) -> Cl.Client & Maybe<&2, Nat>:
+  +bufs = Cl.client_bufs(cl)
+  +evicted = evict_target(Nat.is_ge(Cl.buf_count(bufs), Cl.MAX_BUFFERS()) || Nat.is_ge(Cl.normal_buffer_count(bufs), Cl.NORMAL_BUFFERS()), cl)
+  Cl.buf_get.fin(evicted, canonical, chan, True{}, Cl.buf_find(evicted, canonical))
 
-def history_target.allowed(allowed: Bool, +cl: Cl.Client, +target: String) -> Cl.Client & Maybe<&2, Nat>:
+def history_target.found(found: Maybe<&2, Nat>, +cl: Cl.Client, +canonical: String, +chan: Bool) -> Cl.Client & Maybe<&2, Nat>:
+  match found:
+    case Some{+i}: Cl.buf_get.fin(cl, canonical, chan, True{}, Some{i})
+    case None{}: history_target.miss(cl, canonical, chan)
+
+def history_target.allowed(allowed: Bool, +cl: Cl.Client, +canonical: String, +chan: Bool, found: Maybe<&2, Nat>) -> Cl.Client & Maybe<&2, Nat>:
   match allowed:
     case False{}: (cl, None{})
-    case True{}: history_target.found(Cl.buf_find(cl, target), cl, target)
+    case True{}: history_target.found(found, cl, canonical, chan)
 
 # Stored + channel identities are not message audiences. Only the historical
 # @ audience alias is unambiguous: @ cannot begin an actual channel name.
@@ -425,26 +435,28 @@ def history_key(+target: String) -> String:
 
 def history_target(+cl: Cl.Client, +target: String) -> Cl.Client & Maybe<&2, Nat>:
   +canonical = history_key(target)
-  history_target.allowed(Cl.target_wire(canonical) && Bool.not(String.is_empty(canonical)), cl, canonical)
+  +chan = Cl.target_channel(canonical)
+  history_target.allowed(Cl.target_wire(canonical) && Bool.not(String.is_empty(canonical)), cl, canonical, chan, Cl.buf_find(cl, canonical))
 
-def history_target_iso.found(found: Maybe<&2, Nat>, +cl: Cl.Client, +target: String, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
+def history_target_iso.miss(+cl: Cl.Client, +canonical: String, +chan: Bool, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
+  +bufs = Cl.client_bufs(cl)
+  +evicted = evict_target(Nat.is_ge(Cl.buf_count(bufs), Cl.MAX_BUFFERS()) || Nat.is_ge(Cl.normal_buffer_count(bufs), Cl.NORMAL_BUFFERS()), cl)
+  Cl.buf_get.fin(evicted, canonical, chan, True{}, Cl.buf_find_cm(evicted, Cl.iso_cm(isc), canonical))
+
+def history_target_iso.found(found: Maybe<&2, Nat>, +cl: Cl.Client, +canonical: String, +chan: Bool, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
   match found:
-    case Some{_}:
-      Cl.buf_get_with(cl, isc, target,
-        Cl.target_channel_with(Cl.iso_types(isc), Cl.iso_status(isc), Cl.iso_sigils(isc), target), True{})
-    case None{}:
-      +bufs = Cl.client_bufs(cl)
-      Cl.buf_get_with(evict_target(Nat.is_ge(Cl.buf_count(bufs), Cl.MAX_BUFFERS()) || Nat.is_ge(Cl.normal_buffer_count(bufs), Cl.NORMAL_BUFFERS()), cl),
-        isc, target, Cl.target_channel_with(Cl.iso_types(isc), Cl.iso_status(isc), Cl.iso_sigils(isc), target), True{})
+    case Some{+i}: Cl.buf_get.fin(cl, canonical, chan, True{}, Some{i})
+    case None{}: history_target_iso.miss(cl, canonical, chan, isc)
 
-def history_target_iso.allowed(allowed: Bool, +cl: Cl.Client, +target: String, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
+def history_target_iso.allowed(allowed: Bool, +cl: Cl.Client, +canonical: String, +chan: Bool, found: Maybe<&2, Nat>, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
   match allowed:
     case False{}: (cl, None{})
-    case True{}: history_target_iso.found(Cl.buf_find_cm(cl, Cl.iso_cm(isc), target), cl, target, isc)
+    case True{}: history_target_iso.found(found, cl, canonical, chan, isc)
 
 def history_target_iso(+cl: Cl.Client, +target: String, +isc: Cl.Iso) -> Cl.Client & Maybe<&2, Nat>:
   +canonical = history_key(target)
-  history_target_iso.allowed(Cl.target_wire(canonical) && Bool.not(String.is_empty(canonical)), cl, canonical, isc)
+  +chan = Cl.target_channel_with(Cl.iso_types(isc), Cl.iso_status(isc), Cl.iso_sigils(isc), canonical)
+  history_target_iso.allowed(Cl.target_wire(canonical) && Bool.not(String.is_empty(canonical)), cl, canonical, chan, Cl.buf_find_cm(cl, Cl.iso_cm(isc), canonical), isc)
 
 def apply_entry.bi(+cl: Cl.Client, +bi: Nat, ln: Cl.Line) -> Cl.Client:
   match ln:
@@ -479,8 +491,10 @@ def apply_hist_entry_iso(entry: HistEntry, cl: Cl.Client, +isc: Cl.Iso) -> Cl.Cl
     case Entry{+target, line}: apply_entry.got(history_target_iso(cl, target, isc), line)
 
 # File restore never keeps more than the scroll window. A zero cap adds nothing.
+# Clamp in the U32 domain first: converting the raw cap to Nat before
+# clamping would materialize up to ~4G unary cells per record.
 def hist_keep(+cap: U32) -> Nat:
-  Cl.clamp_nat(U32.to_nat(cap), Cl.SCROLL_CAP())
+  U32.to_nat(Bool.pick(U32, U32.is_ge(cap, 1024), 1024, cap))
 
 def apply_fast.dated(+cl: Cl.Client, +bi: Nat, kind: Cl.LineKind, +ts: String, +text: String, +author: String, +cap: U32) -> Cl.Client:
   Cl.client_restore_capped(cl, bi, kind, ts, text, author, hist_keep(cap))

@@ -80,16 +80,36 @@ def archive_lines(lines: List<&2, Cl.Line>) -> List<&2, Cl.Line>:
         case Cl.Line{+kind, _, _, _, _}:
           archive_lines.keep(Cl.is_reconnect(kind) || Cl.is_link_result(kind), line, archive_lines(rest))
 
+# Presence probe without allocating a filtered copy: admit only needs to
+# know whether any importable row exists. The single filtered copy is built
+# once downstream in collect.buffer; the admit pass keeps no copy. The
+# recursion rides a lazy Unit thunk so the match stays on parameters.
+def archive_has.go(skip: Bool, more: Unit -> Bool) -> Bool:
+  match skip:
+    case True{}: more(Unit{})
+    case False{}: True{}
+
+def archive_has(lines: List<&2, Cl.Line>) -> Bool:
+  match lines:
+    case Nil{}: False{}
+    case Con{Cl.Line{+kind, _, _, _, _}, rest}:
+      archive_has.go(Cl.is_reconnect(kind) || Cl.is_link_result(kind), _ => archive_has(rest))
+
 def seen(names: List<&2, String>, +name: String) -> Bool:
   match names:
     case Nil{}: False{}
     case Con{head, rest}: Irc.ieq(head, name) || seen(rest, name)
 
+# Clamp the cap in the U32 domain before any Nat conversion, and size the
+# room from the stored buffer count instead of re-walking the spine.
+def capped_cap(+cap: U32) -> U32:
+  Bool.pick(U32, U32.is_ge(cap, 1024), 1024, cap)
+
 def room(got: Maybe<&2, Cl.Buffer>, +cap: U32) -> Nat:
   match got:
     case None{}: 0n
-    case Some{Cl.Buffer{_, _, _, lines, _, _, _, _}}:
-      Cl.clamp_nat(U32.to_nat(cap), Nat.sub(Cl.SCROLL_CAP(), List.length(&2, Cl.Line, lines)))
+    case Some{Cl.Buffer{_, _, _, _, _, _, _, +count}}:
+      Cl.clamp_nat(U32.to_nat(capped_cap(cap)), Nat.sub(Cl.SCROLL_CAP(), count))
 
 def target.create(ok: Bool, +cl: Cl.Client, +name: String) -> Cl.Client & Maybe<&2, Nat>:
   match ok:
@@ -108,11 +128,38 @@ def target(control: Bool, +cl: Cl.Client, +name: String) -> Cl.Client & Maybe<&2
     case True{}: (cl, Some{0n})
     case False{}: target.found(Cl.buf_find(cl, name), cl, name)
 
+# Single indexed tail pass: one recursion returns (length, suffix), so the
+# trim needs no separate length walk plus drop walk. The suffix decision is
+# a match (lazy arms), not a Bool.pick over two recursive values.
+def trim_tail.pick(over: Bool, +h: Cl.Line, +suffix: List<&2, Cl.Line>) -> List<&2, Cl.Line>:
+  match over:
+    case True{}: suffix
+    case False{}: h <> suffix
+
+def trim_tail.len(+len: Nat, +h: Cl.Line, +suffix: List<&2, Cl.Line>, +keep: Nat) -> Nat & List<&2, Cl.Line>:
+  (len, trim_tail.pick(Nat.is_gt(len, keep), h, suffix))
+
+def trim_tail.up(pair: Nat & List<&2, Cl.Line>, +h: Cl.Line, +keep: Nat) -> Nat & List<&2, Cl.Line>:
+  match pair:
+    case (+len_t, +suffix_t): trim_tail.len(1n+len_t, h, suffix_t, keep)
+
+def trim_tail.go(lines: List<&2, Cl.Line>, +keep: Nat) -> Nat & List<&2, Cl.Line>:
+  match lines:
+    case Nil{}: (0n, Nil{})
+    case Con{+h, t}: trim_tail.up(trim_tail.go(t, keep), h, keep)
+
+def trim_tail.out(pair: Nat & List<&2, Cl.Line>) -> List<&2, Cl.Line>:
+  match pair:
+    case (_, +suffix): suffix
+
+def trim_tail(lines: List<&2, Cl.Line>, +keep: Nat) -> List<&2, Cl.Line>:
+  trim_tail.out(trim_tail.go(lines, keep))
+
 def collect.target(pair: Cl.Client & Maybe<&2, Nat>, entries: List<&2, H.HistEntry>, +names: List<&2, String>, +name: String, +lines: List<&2, Cl.Line>, +control: Bool, cap: U32) -> Import:
   match pair:
     case (cl, None{}): Import{cl, entries, names}
     case (+cl, Some{+index}):
-      +kept = Cl.take_last(lines, room(Cl.nth_buf(Cl.client_bufs(cl), index), cap))
+      +kept = trim_tail(lines, room(Cl.nth_buf(Cl.client_bufs(cl), index), cap))
       Import{cl, List.append(&2, H.HistEntry, H.new_entries.lines(kept, name, control), entries),
         Bool.pick(List<&2, String>, control, names, name <> names)}
 
@@ -150,10 +197,46 @@ def admit.present(got: Maybe<&2, Nat>) -> Bool:
     case None{}: False{}
     case Some{_}: True{}
 
+# Thread the presence-check index into the import: the gate find and the
+# target find walk the same client spine with no mutation between them, so
+# a present index is reused instead of re-walked.
+def collect.target_reuse(+cl: Cl.Client, +index: Nat, entries: List<&2, H.HistEntry>, +names: List<&2, String>, +name: String, +lines: List<&2, Cl.Line>, +control: Bool, cap: U32) -> Import:
+  +kept = trim_tail(lines, room(Cl.nth_buf(Cl.client_bufs(cl), index), cap))
+  Import{cl, List.append(&2, H.HistEntry, H.new_entries.lines(kept, name, control), entries),
+    Bool.pick(List<&2, String>, control, names, name <> names)}
+
+def collect.nonempty_reuse(empty: Bool, acc: Import, +name: String, lines: List<&2, Cl.Line>, +control: Bool, cap: U32, +index: Nat) -> Import:
+  match empty:
+    case True{}: acc
+    case False{}:
+      match acc:
+        case Import{cl, entries, names}: collect.target_reuse(cl, index, entries, names, name, lines, control, cap)
+
+def collect.allowed_reuse(ok: Bool, acc: Import, +name: String, +lines: List<&2, Cl.Line>, +control: Bool, cap: U32, +index: Nat) -> Import:
+  match ok:
+    case False{}: acc
+    case True{}: collect.nonempty_reuse(List.is_empty(&2, Cl.Line, lines), acc, name, lines, control, cap, index)
+
+def collect.buffer_reuse(+acc: Import, b: Cl.Buffer, +control: Bool, cap: U32, +index: Nat) -> Import:
+  match acc:
+    case Import{_, _, names}:
+      match b:
+        case Cl.Buffer{+name, _, _, lines, _, _, _, _}:
+          collect.allowed_reuse((control || (Cl.target_wire(name) && Bool.not(String.is_empty(name))))
+            && (control || Bool.not(seen(names, name))), acc, name, archive_lines(lines), control, cap, index)
+
+def collect.chosen_reuse(+found: Maybe<&2, Nat>, +acc: Import, +b: Cl.Buffer, +picked: List<&2, String>, +cap: U32) -> Import:
+  match found:
+    case Some{+index}: collect.buffer_reuse(acc, b, False{}, cap, index)
+    case None{}:
+      match b:
+        case Cl.Buffer{+name, _, _, _, _, _, _, _}:
+          collect.when(seen(picked, name), acc, b, cap)
+
 def collect.chosen(+acc: Import, +b: Cl.Buffer, +picked: List<&2, String>, +cap: U32) -> Import:
   match b:
     case Cl.Buffer{+name, _, _, _, _, _, _, _}:
-      collect.when(seen(picked, name) || admit.present(Cl.buf_find(import_client(acc), name)), acc, b, cap)
+      collect.chosen_reuse(Cl.buf_find(import_client(acc), name), acc, b, picked, cap)
 
 def collect.ordered(bufs: List<&2, Cl.Buffer>, acc: Import, +picked: List<&2, String>, +cap: U32) -> Import:
   match bufs:
@@ -166,6 +249,39 @@ def recent_id(b: Cl.Buffer) -> Nat:
 
 def recent(a: Cl.Buffer, b: Cl.Buffer) -> Bool:
   Nat.is_ge(recent_id(a), recent_id(b))
+
+# Decorate once before sorting: the comparator above recomputed recent_id
+# (a full archive-filter + last_id walk) per comparison, quadratic over the
+# import set. Key each buffer once, sort by the key, strip the keys.
+type RecentKey is Data:
+  RecentKey{id: Nat, buf: Cl.Buffer}
+
+def recent_key(+b: Cl.Buffer) -> RecentKey:
+  RecentKey{recent_id(b), b}
+
+def recent_key_buf(+k: RecentKey) -> Cl.Buffer:
+  match k:
+    case RecentKey{_, +buf}: buf
+
+def recent_keyed_id(+k: RecentKey) -> Nat:
+  match k:
+    case RecentKey{+id, _}: id
+
+def recent_key_le(a: RecentKey, b: RecentKey) -> Bool:
+  Nat.is_ge(recent_keyed_id(a), recent_keyed_id(b))
+
+def recent_keys(bufs: List<&2, Cl.Buffer>) -> List<&2, RecentKey>:
+  match bufs:
+    case Nil{}: Nil{}
+    case Con{+b, t}: recent_key(b) <> recent_keys(t)
+
+def recent_unkeyed(keys: List<&2, RecentKey>) -> List<&2, Cl.Buffer>:
+  match keys:
+    case Nil{}: Nil{}
+    case Con{+k, t}: recent_key_buf(k) <> recent_unkeyed(t)
+
+def sort_recent(bufs: List<&2, Cl.Buffer>) -> List<&2, Cl.Buffer>:
+  recent_unkeyed(List.sort(~RecentKey, ~recent_key_le, recent_keys(bufs)))
 
 def restore.at(got: Maybe<&2, Nat>, cl: Cl.Client, line: Cl.Line) -> Cl.Client:
   match got:
@@ -183,7 +299,7 @@ def install.collected(got: Import) -> Cl.Client:
       List.foldl(~&2, ~H.HistEntry, ~Cl.Client, ~(cl => entry => restore(entry, cl)), List.sort(~H.HistEntry, ~H.entry_id_le, entries), cl)
 
 def admit.usable(+name: String, +lines: List<&2, Cl.Line>, +acc: List<&2, String>, +cl: Cl.Client) -> Bool:
-  Bool.not(List.is_empty(&2, Cl.Line, archive_lines(lines)))
+  archive_has(lines)
     && Cl.target_wire(name)
     && Bool.not(String.is_empty(name))
     && Bool.not(seen(acc, name))
@@ -244,7 +360,7 @@ def room_for(+cl: Cl.Client) -> Nat:
     case Cl.Client{_, _, +bufs, _, _, _, _, _, _}: room_for.bufs(bufs)
 
 def install.picked(+rest: List<&2, Cl.Buffer>, +current: Cl.Client) -> List<&2, String>:
-  admit.go(List.sort(~Cl.Buffer, ~recent, rest), room_for(current), current, Nil{})
+  admit.go(sort_recent(rest), room_for(current), current, Nil{})
 
 def install.ordered(+server: Cl.Buffer, +rest: List<&2, Cl.Buffer>, +current: Cl.Client, +cap: U32) -> Cl.Client:
   +base = collect.buffer(Import{current, Nil{}, Nil{}}, server, True{}, cap)
@@ -291,13 +407,29 @@ def install_startup.mark(on: Bool, cl: Cl.Client, index: Nat, now: String) -> Cl
           +marker: Cl.Line = Cl.Line{Cl.Reconnect{}, "", Cl.now_hms(now), "", next}
           Cl.Client{nick, host, Cl.buf_modify(bufs, index, b => Cl.buf_append_line(b, marker)), active, clock, settings, auth, next, welcomed}
 
+# One pass returns the last id and the length together: the divider gate
+# needs both over the same spine, and the old strict && args walked it
+# twice (last_id to the tail plus a full length walk).
+def last_id_len.go(lines: List<&2, Cl.Line>, +n: Nat, +last: Nat) -> Nat & Nat:
+  match lines:
+    case Nil{}: (last, n)
+    case Con{Cl.Line{_, _, _, _, +id}, rest}: last_id_len.go(rest, 1n+n, id)
+
+def last_id_len(lines: List<&2, Cl.Line>) -> Nat & Nat:
+  last_id_len.go(lines, 0n, 0n)
+
+def divider_ok(+name: String, info: Nat & Nat, +cutoff: Nat) -> Bool:
+  match info:
+    case (+last, +len):
+      Bool.not(Cl.target_is_synthetic(name)) && Nat.is_gt(last, cutoff)
+        && Nat.is_lt(len, Cl.SCROLL_CAP())
+
 def install_startup.buffers(bufs: List<&2, Cl.Buffer>, +index: Nat, +cutoff: Nat, cl: Cl.Client, +now: String) -> Cl.Client:
   match bufs:
     case Nil{}: cl
     case Con{Cl.Buffer{+name, _, _, +lines, _, _, _, _}, rest}:
       install_startup.buffers(rest, 1n+index, cutoff,
-        install_startup.mark(Bool.not(Cl.target_is_synthetic(name)) && Nat.is_gt(H.last_id(lines), cutoff)
-          && Nat.is_lt(List.length(&2, Cl.Line, lines), Cl.SCROLL_CAP()), cl, index, now), now)
+        install_startup.mark(divider_ok(name, last_id_len(lines), cutoff), cl, index, now), now)
 
 def install_startup.marked(+cl: Cl.Client, cutoff: Nat, now: String) -> Cl.Client:
   install_startup.buffers(Cl.client_bufs(cl), 0n, cutoff, cl, now)
