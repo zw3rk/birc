@@ -469,6 +469,44 @@ def spans_dim(+xs: List<&2, SpanOp>) -> List<&2, SpanOp>:
     case Nil{}: Nil{}
     case Con{+h, t}: span_dim(h) <> spans_dim(t)
 
+# D242: pending rows paid parse + spans_dim rebuild + cluster_spans text walk.
+# Dim while clustering instead: the accumulator stores dimmed spans and groups
+# by dimmed style, which is exactly what cluster_spans(spans_dim(xs)) grouped.
+def cluster_push_dim.same(same: Bool, +sp: SpanOp, text: String, +prev: SpanOp, rest: List<&2, SpanOp>) -> List<&2, SpanOp>:
+  match same:
+    case True{}: span_text_as(prev, text ++ span_text(prev)) <> rest
+    case False{}: span_dim(span_text_as(sp, text)) <> (prev <> rest)
+
+def cluster_push_dim(+sp: SpanOp, text: String, rev: List<&2, SpanOp>) -> List<&2, SpanOp>:
+  match rev:
+    case Nil{}: span_dim(span_text_as(sp, text)) <> Nil{}
+    case Con{+prev, rest}: cluster_push_dim.same(span_style_eq(span_dim(sp), prev), sp, text, prev, rest)
+
+def cluster_spans_dim.piece(piece: Cols.Cut, xs: List<&2, SpanOp>, rev: List<&2, SpanOp>, k: String -> List<&2, SpanOp> -> List<&2, SpanOp> -> List<&2, SpanOp>) -> List<&2, SpanOp>:
+  match piece xs:
+    case Cols.Cut{+head, tail, _} Con{+sp, +rest}:
+      k(tail, spans_drop(sp <> rest, String.length(head)), cluster_push_dim(sp, String.reverse(head), rev))
+    case _ _: cluster_finish(List.reverse(&2, SpanOp, rev))
+
+def cluster_spans_dim.nil(done: Bool, rev: List<&2, SpanOp>) -> List<&2, SpanOp>:
+  match done:
+    case True{}: cluster_finish(List.reverse(&2, SpanOp, rev))
+    case False{}: cluster_finish(List.reverse(&2, SpanOp, rev))
+
+def cluster_spans_dim.go(fuel: Nat, +text: String, xs: List<&2, SpanOp>, rev: List<&2, SpanOp>, +bound: Nat) -> List<&2, SpanOp>:
+  match fuel:
+    case 0n: cluster_finish(List.reverse(&2, SpanOp, rev))
+    case 1n+p:
+      match text:
+        case SNil{}: cluster_spans_dim.nil(Nat.is_eq(p, 0n), rev)
+        case SCon{_, _}: cluster_spans_dim.piece(Cols.cluster_bounded(text, bound), xs, rev, remaining => rest => acc => cluster_spans_dim.go(p, remaining, rest, acc, bound))
+
+def cluster_spans_dim(+xs: List<&2, SpanOp>) -> List<&2, SpanOp>:
+  +text = spans_text(xs)
+  +n = String.length(text)
+  +fuel = Nat.add(2n, Nat.add(n, n))
+  cluster_spans_dim.go(fuel, text, spans_drop(xs, 0n), Nil{}, fuel)
+
 def line_spans_raw(k: Cl.LineKind, +text: String) -> List<&2, SpanOp>:
   match k:
     case Cl.Msg{}:
@@ -485,7 +523,13 @@ def line_spans_raw(k: Cl.LineKind, +text: String) -> List<&2, SpanOp>:
       render_spans(text)
 
 def line_spans_for(k: Cl.LineKind, text: String) -> List<&2, SpanOp>:
-  cluster_spans(line_spans_raw(k, text))
+  match k:
+    case Cl.Pending{+inner}: cluster_spans_dim(line_spans_raw(inner, text))
+    case Cl.Msg{}: cluster_spans(parse_nick_msg(text))
+    case Cl.Self{}: cluster_spans(parse_nick_msg(text))
+    case Cl.Highlight{}: cluster_spans(parse_nick_msg(text))
+    case Cl.Action{}: cluster_spans(parse_nick_act(text))
+    case _: cluster_spans(render_spans(text))
 
 def line_ops_go(
   +x: U32,
@@ -720,30 +764,36 @@ def force_span(xs: List<&2, SpanOp>) -> SpanCut:
       +piece = span_text(sp)
       force_span_piece(Cols.cluster_bounded(piece, Nat.add(1n, String.length(piece))), sp, rest)
 
-def wrap_chunks_tail(tail: List<&2, SpanOp>, head: List<&2, SpanOp>, consumed: Nat, k: List<&2, SpanOp> -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
+# D77: one spans_chars walk seeds both the fuel and the remaining-char count,
+# which threads down instead of re-walking the head per chunk. The tail walk
+# per chunk stays: it feeds both the consumed count and the next remainder.
+def wrap_chunks_tail(tail: List<&2, SpanOp>, head: List<&2, SpanOp>, consumed: Nat, +tail_chars: Nat, k: List<&2, SpanOp> -> Nat -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
   match tail:
     case Nil{}: WrapChunk{head, consumed} <> Nil{}
-    case Con{sp, rest}: WrapChunk{head, consumed} <> k(sp <> rest)
+    case Con{sp, rest}: WrapChunk{head, consumed} <> k(sp <> rest, tail_chars)
 
-def wrap_spans_more(cut: SpanCut, +before: Nat, k: List<&2, SpanOp> -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
+def wrap_spans_more(cut: SpanCut, +before: Nat, k: List<&2, SpanOp> -> Nat -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
   match cut:
-    case SpanCut{head, +tail}: wrap_chunks_tail(tail, head, Nat.sub(before, spans_chars(tail)), k)
+    case SpanCut{head, +tail}:
+      +tc = spans_chars(tail)
+      wrap_chunks_tail(tail, head, Nat.sub(before, tc), tc, k)
 
-def wrap_spans_cut(cut: SpanCut, +before: Nat, k: List<&2, SpanOp> -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
+def wrap_spans_cut(cut: SpanCut, +before: Nat, k: List<&2, SpanOp> -> Nat -> List<&2, WrapChunk>) -> List<&2, WrapChunk>:
   match cut:
     case SpanCut{head, +tail}:
       match head:
         case Nil{}: wrap_spans_more(force_span(tail), before, k)
         case Con{sp, rest}: wrap_spans_more(SpanCut{sp <> rest, tail}, before, k)
 
-def wrap_spans_go(fuel: Nat, +xs: List<&2, SpanOp>, +cap: U32, +cont_cap: U32) -> List<&2, WrapChunk>:
+def wrap_spans_go(fuel: Nat, +xs: List<&2, SpanOp>, +cap: U32, +cont_cap: U32, +before: Nat) -> List<&2, WrapChunk>:
   match fuel:
     case 0n: Nil{}
     case 1n+p:
-      wrap_spans_cut(word_cut(take_spans(xs, cap), xs, U32.sub(cap, bounded_width(cont_cap, cap))), spans_chars(xs), rest => wrap_spans_go(p, rest, cont_cap, cont_cap))
+      wrap_spans_cut(word_cut(take_spans(xs, cap), xs, U32.sub(cap, bounded_width(cont_cap, cap))), before, rest => tc => wrap_spans_go(p, rest, cont_cap, cont_cap, tc))
 
 def wrap_spans(+xs: List<&2, SpanOp>, +first_cap: U32, +cont_cap: U32) -> List<&2, WrapChunk>:
-  wrap_spans_go(Nat.add(1n, spans_length(xs)), xs, wrap_cap(first_cap), wrap_cap(cont_cap))
+  +n = spans_chars(xs)
+  wrap_spans_go(Nat.add(1n, n), xs, wrap_cap(first_cap), wrap_cap(cont_cap), n)
 
 def msg_prefix_w.width(ok: Bool, +nick: String) -> U32:
   match ok:
@@ -808,6 +858,46 @@ def wrapped_rows.chunks(
 type WrapMetrics is Data:
   WrapMetrics{shown: String, stamp_w: U32, first_off: U32, first_w: U32, cont_off: U32, cont_w: U32}
 
+# D200: Msg rows walked the `<nick>` prefix twice per paint (metrics, then
+# spans) plus a nick hash. Parse the prefix once here and share the result
+# between the wrap indent and the span builder.
+def is_msg_kind(k: Cl.LineKind) -> Bool:
+  match k:
+    case Cl.Msg{}: True{}
+    case Cl.Self{}: True{}
+    case Cl.Highlight{}: True{}
+    case _: False{}
+
+type NickSplit is Data:
+  NickSplit{nick: String, rest: String, ok: Bool}
+
+def wrap_nick_split.parsed(pair: String & String) -> NickSplit:
+  match pair:
+    case (+nick, +rest):
+      NickSplit{nick, rest, String.starts_with(rest, " ") && Bool.not(String.is_empty(nick))}
+
+def wrap_nick_split.head(is_lt: Bool, +t: String) -> NickSplit:
+  match is_lt:
+    case True{}: wrap_nick_split.parsed(take_until_gt(t))
+    case False{}: NickSplit{"", "", False{}}
+
+def wrap_nick_split(s: String) -> NickSplit:
+  match s:
+    case SNil{}: NickSplit{"", "", False{}}
+    case SCon{+h, +t}: wrap_nick_split.head(Char.is_eq(h, '<'), t)
+
+def wrap_metrics_split(+nick: String, +ok: Bool, +ts: String, +text: String, +w: U32, show_ts: Bool) -> WrapMetrics:
+  +shown = Bool.pick(String, show_ts, ts, "")
+  +first_off = Bool.pick(U32, String.is_empty(shown), 0, line_shift(w))
+  +first_w = U32.sub(w, first_off)
+  +indent = wrap_indent(msg_prefix_w.width(ok, nick), first_w)
+  +cont_off = U32.add(first_off, indent)
+  +cont_w = U32.sub(first_w, indent)
+  WrapMetrics{shown, ts_w(w), first_off, first_w, cont_off, cont_w}
+
+def line_spans_split(+nick: String, +rest: String, +ok: Bool, text: String) -> List<&2, SpanOp>:
+  cluster_spans(parse_nick_msg.ok(ok, rest, nick, text))
+
 def wrap_metrics(+k: Cl.LineKind, +ts: String, +text: String, +w: U32, show_ts: Bool) -> WrapMetrics:
   +shown = Bool.pick(String, show_ts, ts, "")
   +first_off = Bool.pick(U32, String.is_empty(shown), 0, line_shift(w))
@@ -822,8 +912,26 @@ def wrapped_rows.metrics(metrics: WrapMetrics, +k: Cl.LineKind, text: String) ->
     case WrapMetrics{shown, stamp_w, first_off, +first_w, cont_off, +cont_w}:
       wrapped_rows.chunks(wrap_spans(line_spans_for(k, text), first_w, cont_w), shown, stamp_w, first_off, first_w, cont_off, cont_w, style_of(k))
 
+def wrapped_rows.fast_rows(metrics: WrapMetrics, +text: String, +nick: String, +rest: String, +ok: Bool, +k: Cl.LineKind) -> List<&2, BodyRow>:
+  match metrics:
+    case WrapMetrics{shown, stamp_w, first_off, +first_w, cont_off, +cont_w}:
+      wrapped_rows.chunks(wrap_spans(line_spans_split(nick, rest, ok, text), first_w, cont_w), shown, stamp_w, first_off, first_w, cont_off, cont_w, style_of(k))
+
+def wrapped_rows.fast(split: NickSplit, +k: Cl.LineKind, +ts: String, +text: String, +w: U32, show_ts: Bool) -> List<&2, BodyRow>:
+  match split:
+    case NickSplit{+nick, +rest, +ok}:
+      wrapped_rows.fast_rows(wrap_metrics_split(nick, ok, ts, text, w, show_ts), text, nick, rest, ok, k)
+
+def wrapped_rows.gate(is_msg: Bool, +k: Cl.LineKind, +ts: String, +text: String, +w: U32, show_ts: Bool) -> List<&2, BodyRow>:
+  match is_msg:
+    case False{}: wrapped_rows.metrics(wrap_metrics(k, ts, text, w, show_ts), k, text)
+    case True{}:
+      match text:
+        case SNil{}: wrapped_rows.metrics(wrap_metrics(k, ts, text, w, show_ts), k, text)
+        case SCon{_, _}: wrapped_rows.fast(wrap_nick_split(text), k, ts, text, w, show_ts)
+
 def wrapped_rows(+k: Cl.LineKind, +ts: String, +text: String, +w: U32, show_ts: Bool) -> List<&2, BodyRow>:
-  wrapped_rows.metrics(wrap_metrics(k, ts, text, w, show_ts), k, text)
+  wrapped_rows.gate(is_msg_kind(k), k, ts, text, w, show_ts)
 
 type MediaPart is Data:
   MediaPart{spans: List<&2, SpanOp>, url: Maybe<&2, String>}
@@ -880,11 +988,29 @@ def wrapped_media.metrics(metrics: WrapMetrics, urls: List<&2, String>, +k: Cl.L
     case WrapMetrics{shown, stamp_w, first_off, first_w, cont_off, cont_w}:
       wrapped_media.parts(media_parts(line_spans_for(k, text), Nil{}, urls), media, M.Inline{id}, shown, stamp_w, first_off, first_w, cont_off, cont_w, style_of(k), w)
 
+def wrapped_media.fast_rows(metrics: WrapMetrics, urls: List<&2, String>, +text: String, +nick: String, +rest: String, +ok: Bool, +k: Cl.LineKind, +w: U32, +id: Nat, +media: M.State) -> List<&2, BodyRow>:
+  match metrics:
+    case WrapMetrics{shown, stamp_w, first_off, first_w, cont_off, cont_w}:
+      wrapped_media.parts(media_parts(line_spans_split(nick, rest, ok, text), Nil{}, urls), media, M.Inline{id}, shown, stamp_w, first_off, first_w, cont_off, cont_w, style_of(k), w)
+
+def wrapped_media.fast(split: NickSplit, urls: List<&2, String>, +k: Cl.LineKind, +ts: String, +text: String, +w: U32, +show_ts: Bool, +id: Nat, +media: M.State) -> List<&2, BodyRow>:
+  match split:
+    case NickSplit{+nick, +rest, +ok}:
+      wrapped_media.fast_rows(wrap_metrics_split(nick, ok, ts, text, w, show_ts), urls, text, nick, rest, ok, k, w, id, media)
+
+def wrapped_media.gate(is_msg: Bool, urls: List<&2, String>, +k: Cl.LineKind, +ts: String, +text: String, +w: U32, +show_ts: Bool, +id: Nat, +media: M.State) -> List<&2, BodyRow>:
+  match is_msg:
+    case False{}: wrapped_media.metrics(wrap_metrics(k, ts, text, w, show_ts), urls, k, text, w, id, media)
+    case True{}:
+      match text:
+        case SNil{}: wrapped_media.metrics(wrap_metrics(k, ts, text, w, show_ts), urls, k, text, w, id, media)
+        case SCon{_, _}: wrapped_media.fast(wrap_nick_split(text), urls, k, ts, text, w, show_ts, id, media)
+
 def wrapped_media.known(urls: List<&2, String>, +k: Cl.LineKind, +ts: String, +text: String, +w: U32, +show_ts: Bool, +id: Nat, +media: M.State) -> List<&2, BodyRow>:
   match urls:
     case Nil{}: wrapped_rows(k, ts, text, w, show_ts)
     case Con{+h, +tail}:
-      wrapped_media.metrics(wrap_metrics(k, ts, text, w, show_ts), h <> tail, k, text, w, id, media)
+      wrapped_media.gate(is_msg_kind(k), h <> tail, k, ts, text, w, show_ts, id, media)
 
 def wrapped_media(+k: Cl.LineKind, +ts: String, +text: String, +w: U32, +show_ts: Bool, +id: Nat, +media: M.State) -> List<&2, BodyRow>:
   wrapped_media.known(M.known_urls(media, M.Inline{id}), k, ts, text, w, show_ts, id, media)
@@ -1004,7 +1130,13 @@ def line_spans_raw_themed(k: Cl.LineKind, +text: String, +th: Theme.Id) -> List<
       render_spans(text)
 
 def line_spans_for_themed(k: Cl.LineKind, text: String, +th: Theme.Id) -> List<&2, SpanOp>:
-  cluster_spans(line_spans_raw_themed(k, text, th))
+  match k:
+    case Cl.Pending{+inner}: cluster_spans_dim(line_spans_raw_themed(inner, text, th))
+    case Cl.Msg{}: cluster_spans(parse_nick_msg_themed(text, th))
+    case Cl.Self{}: cluster_spans(parse_nick_msg_themed(text, th))
+    case Cl.Highlight{}: cluster_spans(parse_nick_msg_themed(text, th))
+    case Cl.Action{}: cluster_spans(parse_nick_act_themed(text, th))
+    case _: cluster_spans(render_spans(text))
 
 
 # One paint configuration for the media × cards × casemapping × theme × legacy
@@ -1128,10 +1260,18 @@ def paint_fg_theme(theme: Maybe<&2, Theme.Id>) -> U32:
 def paint_fg(+boxed: List<&2, PaintOpts>) -> U32:
   paint_fg_theme(opt_theme(boxed))
 
+# D199/D240: the Mono palette is one constant, so themed nicks skip the
+# full-nick hash walk there; Dark/Light keep the hashed slot.
+def paint_nick_themed(+id: Theme.Id, +nick: String) -> U32:
+  match id:
+    case Theme.Dark{}: nick_color_themed(Theme.Dark{}, nick)
+    case Theme.Light{}: nick_color_themed(Theme.Light{}, nick)
+    case Theme.Mono{}: Theme.MONO_FG()
+
 def paint_nick_theme(theme: Maybe<&2, Theme.Id>, +nick: String) -> U32:
   match theme:
     case None{}: nick_color(nick)
-    case Some{id}: nick_color_themed(id, nick)
+    case Some{id}: paint_nick_themed(id, nick)
 
 def paint_nick(+boxed: List<&2, PaintOpts>, +nick: String) -> U32:
   paint_nick_theme(opt_theme(boxed), nick)
@@ -1165,10 +1305,13 @@ def paint_off.on(empty: Bool, +w: U32) -> U32:
 def paint_off(+shown: String, +w: U32) -> U32:
   paint_off.on(String.is_empty(shown), w)
 
+# D241: paint_spans and paint_style each re-resolved opt_theme per row for
+# a paint-constant value. Resolve once per row and use the _theme variants.
 def paint_wrapped_metrics(metrics: WrapMetrics, +k: Cl.LineKind, text: String, +boxed: List<&2, PaintOpts>) -> List<&2, BodyRow>:
   match metrics:
     case WrapMetrics{shown, stamp_w, first_off, +first_w, cont_off, +cont_w}:
-      wrapped_rows.chunks(wrap_spans(paint_spans(boxed, k, text), first_w, cont_w), shown, stamp_w, first_off, first_w, cont_off, cont_w, paint_style(boxed, k))
+      +theme = opt_theme(boxed)
+      wrapped_rows.chunks(wrap_spans(paint_spans_theme(theme, k, text), first_w, cont_w), shown, stamp_w, first_off, first_w, cont_off, cont_w, paint_style_theme(theme, k))
 
 def paint_wrapped(+k: Cl.LineKind, +ts: String, +text: String, +w: U32, show_ts: Bool, +boxed: List<&2, PaintOpts>) -> List<&2, BodyRow>:
   paint_wrapped_metrics(wrap_metrics(k, ts, text, w, show_ts), k, text, boxed)
@@ -1200,11 +1343,22 @@ def paint_card_hit(hit: Bool, +texts: List<&2, String>, +w: U32, +boxed: List<&2
     case True{}: paint_card_entry(texts, w, boxed)
     case False{}: Nil{}
 
-def paint_card_go(xs: List<&2, CardEntry>, +id: Nat, +w: U32, +boxed: List<&2, PaintOpts>) -> List<&2, BodyRow>:
+# D222: per-card List.append re-walked the accumulated rows (quadratic in the
+# ready set). Cons each card's rows reversed onto an accumulator and reverse
+# once: linear, same order.
+def paint_card_prepend(+rows: List<&2, BodyRow>, +acc: List<&2, BodyRow>) -> List<&2, BodyRow>:
+  match rows:
+    case Nil{}: acc
+    case Con{+h, t}: paint_card_prepend(t, h <> acc)
+
+def paint_card_go_acc(xs: List<&2, CardEntry>, +id: Nat, +w: U32, +boxed: List<&2, PaintOpts>, +acc: List<&2, BodyRow>) -> List<&2, BodyRow>:
   match xs:
-    case Nil{}: Nil{}
+    case Nil{}: List.reverse(&2, BodyRow, acc)
     case Con{CardEntry{other, +texts}, t}:
-      List.append(&2, BodyRow, paint_card_hit(Nat.is_eq(other, id), texts, w, boxed), paint_card_go(t, id, w, boxed))
+      paint_card_go_acc(t, id, w, boxed, paint_card_prepend(paint_card_hit(Nat.is_eq(other, id), texts, w, boxed), acc))
+
+def paint_card_go(xs: List<&2, CardEntry>, +id: Nat, +w: U32, +boxed: List<&2, PaintOpts>) -> List<&2, BodyRow>:
+  paint_card_go_acc(xs, id, w, boxed, Nil{})
 
 def paint_cards_for.on(zero: Bool, +xs: List<&2, CardEntry>, +id: Nat, +w: U32, +boxed: List<&2, PaintOpts>) -> List<&2, BodyRow>:
   match zero:
@@ -1267,8 +1421,9 @@ def paint_unwrapped_on(+k: Cl.LineKind, +ts: String, +text: String, +w: U32, sho
     case False{}:
       +shown = paint_shown(show_ts, ts)
       +off = paint_off(shown, w)
-      +spans = paint_spans(boxed, k, text)
-      BodyRow{shown, ts_w(w), off, U32.sub(w, off), paint_style(boxed, k), spans, spans_chars(spans)}
+      +theme = opt_theme(boxed)
+      +spans = paint_spans_theme(theme, k, text)
+      BodyRow{shown, ts_w(w), off, U32.sub(w, off), paint_style_theme(theme, k), spans, spans_chars(spans)}
 
 def paint_unwrapped_line(+ln: Cl.Line, +w: U32, show_ts: Bool, +boxed: List<&2, PaintOpts>) -> BodyRow:
   match ln:
@@ -1595,6 +1750,15 @@ def viewport_end(+rows: List<&2, AnchoredRow>, +height: Nat, want: Cl.Scroll) ->
   match want:
     case Cl.ScrollAt{+after, +tail}:
       +count = List.length(&2, AnchoredRow, rows)
+      +raw = viewport_end.raw(Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), count, rows, Cl.ScrollAt{after, tail})
+      +clamped = Nat.sub(count, clamp_scroll(Nat.sub(count, raw), count, height))
+      viewport_end.top(Nat.is_le(raw, height) && Nat.is_ge(count, height), rows, height, count, clamped, after)
+
+# D205: moved_anchor paid List.length and then viewport_end re-walked the same
+# rows for its own length. Thread the one count through the step instead.
+def viewport_end_counted(+count: Nat, +rows: List<&2, AnchoredRow>, +height: Nat, want: Cl.Scroll) -> Nat:
+  match want:
+    case Cl.ScrollAt{+after, +tail}:
       +raw = viewport_end.raw(Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), count, rows, Cl.ScrollAt{after, tail})
       +clamped = Nat.sub(count, clamp_scroll(Nat.sub(count, raw), count, height))
       viewport_end.top(Nat.is_le(raw, height) && Nat.is_ge(count, height), rows, height, count, clamped, after)
@@ -2382,7 +2546,7 @@ def moved_anchor.pick(bottom: Bool, +rows: List<&2, AnchoredRow>, +end: Nat) -> 
 
 def moved_anchor(+rows: List<&2, AnchoredRow>, +height: Nat, +want: Cl.Scroll, +up: Nat, +dn: Nat) -> Cl.Scroll:
   +count = List.length(&2, AnchoredRow, rows)
-  +current = viewport_end(rows, height, want)
+  +current = viewport_end_counted(count, rows, height, want)
   +target = Cl.clamp_nat(Nat.sub(Nat.add(current, dn), up), count)
   +end = Nat.sub(count, clamp_scroll(Nat.sub(count, target), count, height))
   moved_anchor.pick(Nat.is_eq(end, count), rows, end)
@@ -2425,11 +2589,17 @@ def shift_pick(snap: Bool, +rows: List<&2, AnchoredRow>, +target: Nat) -> Cl.Scr
 # reached logical after=0, even if that line painted no rows.
 # `height` and `lines_n` remain for call-site shape. Top-snap does not
 # branch on a short window.
+# D139: shift_len_of recomputed List.length(rows) for the same count bound
+# above. Inline its ScrollAt dispatch here with the hoisted count; the
+# shift_len_of.at gate (bottom reuses count, parked pays anchor_end) is
+# unchanged. shift_len_of stays for its shape.
 def shift_anchor(+rows: List<&2, AnchoredRow>, +height: Nat, want: Cl.Scroll, +up: Nat, +dn: Nat, +lines_n: Nat, +reached_newest: Bool) -> Cl.Scroll:
-  +count = List.length(&2, AnchoredRow, rows)
-  +index = shift_len_of(rows, want)
-  +target = Cl.clamp_nat(Nat.sub(Nat.add(index, dn), up), count)
-  shift_pick(Bool.and(reached_newest, Nat.is_eq(target, count)), rows, target)
+  match want:
+    case Cl.ScrollAt{+after, +tail}:
+      +count = List.length(&2, AnchoredRow, rows)
+      +index = shift_len_of.at(Nat.is_eq(after, 0n) && Nat.is_eq(tail, 0n), rows, Cl.ScrollAt{after, tail}, count)
+      +target = Cl.clamp_nat(Nat.sub(Nat.add(index, dn), up), count)
+      shift_pick(Bool.and(reached_newest, Nat.is_eq(target, count)), rows, target)
 
 def shift_anchor_stuck(stuck: Bool, +after: Nat, +visited: Nat, moved: Cl.Scroll) -> Cl.Scroll:
   match stuck:
@@ -2514,6 +2684,29 @@ def rows_hold.go(fuel: Nat, rows: List<&2, AnchoredRow>, +want: Cl.Scroll) -> Bo
 # Live {0,0} uses the bottom painter, not this crop. Otherwise reuse only when
 # the new anchor sits at least `height` rows into the walk, so the viewport
 # ending on that anchor is already wrapped. A one-notch walk fails that test.
+# D80: storing a scroll hold walked rows three times (length fuel, find,
+# anchor_end). One structural pass answers both: the exact-anchor hit and the
+# best-match end index. The end only matters on a hit; on a miss the walk
+# result is discarded, and rows_hold stays for its shape.
+def scroll_cover.scan.go(rows: List<&2, AnchoredRow>, +wa: Nat, +wt: Nat, +want: Cl.Scroll, +i: Nat, +best: AnchorBest, +found: Bool) -> Bool & Nat:
+  match rows:
+    case Nil{}: (found, anchor_best.end(best, i))
+    case Con{AnchoredRow{_, Cl.ScrollAt{+ra, +rt}, _}, +t}:
+      scroll_cover.scan.go(t, wa, wt, want, 1n+i, anchor_best.maybe(Nat.is_eq(ra, wa) && Nat.is_le(rt, wt), best, 1n+i, rt), found || Cl.scroll_eq(Cl.ScrollAt{ra, rt}, want))
+
+def scroll_cover.scan(rows: List<&2, AnchoredRow>, +want: Cl.Scroll) -> Bool & Nat:
+  match want:
+    case Cl.ScrollAt{+wa, +wt}: scroll_cover.scan.go(rows, wa, wt, Cl.ScrollAt{wa, wt}, 0n, AnchorMiss{}, False{})
+
+def scroll_cover.ok(found: Bool, +end: Nat, +height: Nat) -> Bool:
+  match found:
+    case False{}: False{}
+    case True{}: Nat.is_ge(end, height)
+
+def scroll_cover.end_ok(scan: Bool & Nat, +height: Nat) -> Bool:
+  match scan:
+    case (+found, +end): scroll_cover.ok(found, end, height)
+
 def scroll_cover.hit(found: Bool, +rows: List<&2, AnchoredRow>, +height: Nat, +want: Cl.Scroll) -> Bool:
   match found:
     case False{}: False{}
@@ -2522,7 +2715,7 @@ def scroll_cover.hit(found: Bool, +rows: List<&2, AnchoredRow>, +height: Nat, +w
 def scroll_cover.live(live: Bool, +rows: List<&2, AnchoredRow>, +height: Nat, +want: Cl.Scroll) -> Bool:
   match live:
     case True{}: False{}
-    case False{}: scroll_cover.hit(rows_hold.go(List.length(&2, AnchoredRow, rows), rows, want), rows, height, want)
+    case False{}: scroll_cover.end_ok(scroll_cover.scan(rows, want), height)
 
 def scroll_cover(+rows: List<&2, AnchoredRow>, +height: Nat, +want: Cl.Scroll) -> Bool:
   match want:
@@ -2613,6 +2806,24 @@ def buf_same(+a: Cl.Buffer, +b: Cl.Buffer) -> Bool:
         case Cl.Buffer{+nb, _, _, _, _, +sb, _, +cb}:
           buf_same.name(String.eq(na, nb), ca, cb, sa, sb)
 
+# D196: theme equality serialized both ids via Theme.show + String.eq on
+# every hold check. The 3-variant tag match below decides identically with
+# no string build (show is injective: dark/light/mono are distinct).
+def theme_id_eq(+a: Theme.Id, +b: Theme.Id) -> Bool:
+  match a:
+    case Theme.Dark{}:
+      match b:
+        case Theme.Dark{}: True{}
+        case _: False{}
+    case Theme.Light{}:
+      match b:
+        case Theme.Light{}: True{}
+        case _: False{}
+    case Theme.Mono{}:
+      match b:
+        case Theme.Mono{}: True{}
+        case _: False{}
+
 def theme_eq(a: Maybe<&2, Theme.Id>, b: Maybe<&2, Theme.Id>) -> Bool:
   match a:
     case None{}:
@@ -2622,7 +2833,7 @@ def theme_eq(a: Maybe<&2, Theme.Id>, b: Maybe<&2, Theme.Id>) -> Bool:
     case Some{+ia}:
       match b:
         case None{}: False{}
-        case Some{+ib}: String.eq(Theme.show(ia), Theme.show(ib))
+        case Some{+ib}: theme_id_eq(ia, ib)
 
 def iso_same(+a: Cl.Iso, +b: Cl.Iso) -> Bool:
   match a:
@@ -3277,6 +3488,51 @@ def paint_tab_alerts_cm(cm: Maybe<&2, String>, bufs: List<&2, Cl.Buffer>, +unrea
 def paint_tab_alerts(+boxed: List<&2, PaintOpts>, bufs: List<&2, Cl.Buffer>, +unreads: List<&2, Cl.Alert>) -> List<&2, U32>:
   paint_tab_alerts_cm(opt_cm(boxed), bufs, unreads)
 
+# D137: paint_tab_names and paint_tab_alerts each walked all buffers calling
+# buf_unread_status per buffer (double unread walk per paint). One walk below
+# resolves the status once per buffer and returns both lists; the fixed and
+# cm casemap variants keep their exact per-buffer verdicts (first buffer:
+# starred label, 0 alert, exactly one status lookup like today).
+# The walker returns a pair, and match cannot scrutinize the recursive
+# call, so consing the head row lives in its own def over the pair param.
+def paint_tabs.cons(+lab: String, +al: U32, rest: List<&2, String> & List<&2, U32>) -> List<&2, String> & List<&2, U32>:
+  match rest:
+    case (+names, +alerts): (lab <> names, al <> alerts)
+
+def paint_tabs_fixed.go(bufs: List<&2, Cl.Buffer>, +unreads: List<&2, Cl.Alert>, first: Bool) -> List<&2, String> & List<&2, U32>:
+  match bufs:
+    case Nil{}: (Nil{}, Nil{})
+    case Con{Cl.Buffer{+name, _, _, _, _, _, _, _}, t}:
+      match first:
+        case True{}:
+          paint_tabs.cons(tab_lab(name, True{}, Cl.buf_unread_status(unreads, name)), 0,
+            paint_tabs_fixed.go(t, unreads, False{}))
+        case False{}:
+          +st = Cl.buf_unread_status(unreads, name)
+          paint_tabs.cons(tab_lab(name, False{}, st), st,
+            paint_tabs_fixed.go(t, unreads, False{}))
+
+def paint_tabs_cm.go(+c: String, bufs: List<&2, Cl.Buffer>, +unreads: List<&2, Cl.Alert>, first: Bool) -> List<&2, String> & List<&2, U32>:
+  match bufs:
+    case Nil{}: (Nil{}, Nil{})
+    case Con{Cl.Buffer{+name, _, _, _, _, _, _, _}, t}:
+      match first:
+        case True{}:
+          paint_tabs.cons(tab_lab(name, True{}, Cl.buf_unread_status_cm(c, unreads, name)), 0,
+            paint_tabs_cm.go(c, t, unreads, False{}))
+        case False{}:
+          +st = Cl.buf_unread_status_cm(c, unreads, name)
+          paint_tabs.cons(tab_lab(name, False{}, st), st,
+            paint_tabs_cm.go(c, t, unreads, False{}))
+
+def paint_tabs_cm(cm: Maybe<&2, String>, bufs: List<&2, Cl.Buffer>, +unreads: List<&2, Cl.Alert>) -> List<&2, String> & List<&2, U32>:
+  match cm:
+    case None{}: paint_tabs_fixed.go(bufs, unreads, True{})
+    case Some{+c}: paint_tabs_cm.go(c, bufs, unreads, True{})
+
+def paint_tabs(+boxed: List<&2, PaintOpts>, bufs: List<&2, Cl.Buffer>, +unreads: List<&2, Cl.Alert>) -> List<&2, String> & List<&2, U32>:
+  paint_tabs_cm(opt_cm(boxed), bufs, unreads)
+
 def image_ops(r: Rect, +path: String) -> List<&2, DrawOp>:
   match r:
     case Rect{x, y, w, h}: image_ops.on(x, y, w, h, path, String.is_empty(path))
@@ -3500,12 +3756,29 @@ def visible_bottom.more(done: Bool, +left: Nat, +h: Cl.Line, +name: String, +w: 
       +keep = Nat.min(left, List.length(&2, BodyRow, rows))
       visible_bottom.after(k(Nat.sub(left, keep)), visible_bottom.keep(Nat.is_eq(keep, 0n), h))
 
-def visible_bottom.go(lines: List<&2, Cl.Line>, +name: String, +w: U32, +show_ts: Bool, +mutes: List<&2, String>, +joins: Bool, +nicks: Bool, +server: String, +boxed: List<&2, PaintOpts>, +left: Nat) -> Nat & List<&2, M.Candidate>:
+# D140: after() appended tail ++ mine per line, re-walking the accumulated
+# tail while it grew (O(V^2)). Carry the candidates in an accumulator,
+# consing each line's mines in order; the walk order makes the accumulator
+# come out newest-first with no reverse. more/after stay for their shape.
+def visible_bottom.prepend(+mine: List<&2, M.Candidate>, +acc: List<&2, M.Candidate>) -> List<&2, M.Candidate>:
+  match mine:
+    case Nil{}: acc
+    case Con{+c, t}: c <> visible_bottom.prepend(t, acc)
+
+def visible_bottom.go_acc(lines: List<&2, Cl.Line>, +name: String, +w: U32, +show_ts: Bool, +mutes: List<&2, String>, +joins: Bool, +nicks: Bool, +server: String, +boxed: List<&2, PaintOpts>, +left: Nat, +acc: List<&2, M.Candidate>) -> Nat & List<&2, M.Candidate>:
   match lines:
-    case Nil{}: (left, Nil{})
+    case Nil{}: (left, acc)
     case Con{+h, t}:
-      visible_bottom.more(Nat.is_eq(left, 0n), left, h, name, w, show_ts, mutes, joins, nicks, server, boxed,
-        next => visible_bottom.go(t, name, w, show_ts, mutes, joins, nicks, server, boxed, next))
+      match left:
+        case 0n: (0n, acc)
+        case 1n+p:
+          +rows = paint_body_rows(paint_filter(boxed, h <> Nil{}, mutes, joins, nicks, name, server), name, w, show_ts, boxed)
+          +keep = Nat.min(left, List.length(&2, BodyRow, rows))
+          visible_bottom.go_acc(t, name, w, show_ts, mutes, joins, nicks, server, boxed, Nat.sub(left, keep),
+            visible_bottom.prepend(visible_bottom.keep(Nat.is_eq(keep, 0n), h), acc))
+
+def visible_bottom.go(lines: List<&2, Cl.Line>, +name: String, +w: U32, +show_ts: Bool, +mutes: List<&2, String>, +joins: Bool, +nicks: Bool, +server: String, +boxed: List<&2, PaintOpts>, +left: Nat) -> Nat & List<&2, M.Candidate>:
+  visible_bottom.go_acc(lines, name, w, show_ts, mutes, joins, nicks, server, boxed, left, Nil{})
 
 # `short` is the rare muted suffix that did not fill the pane. Only then
 # is the full-history candidate list built.
@@ -3689,22 +3962,25 @@ def paint_body_box_role(r: Rect, +title: String, +boxed: List<&2, PaintOpts>, +r
 def paint_body_box(r: Rect, +title: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   paint_body_box_role(r, title, boxed, PANE_COMPOSER())
 
-def paint_row_normal(+x: U32, +y: U32, +ts: String, +stamp_w: U32, +off: U32, +w: U32, +fg: U32, +spans: List<&2, SpanOp>, empty: Bool, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+# D243: per-row timestamps re-matched the theme (opt_theme + status_dim arms)
+# on every body row. Resolve the dim constant once per body paint and thread
+# it through the row loop instead.
+def paint_row_normal(+x: U32, +y: U32, +ts: String, +stamp_w: U32, +off: U32, +w: U32, +fg: U32, +spans: List<&2, SpanOp>, empty: Bool, +dim: U32) -> List<&2, DrawOp>:
   match empty:
     case True{}: OpLine{U32.add(x, off), y, w, fg, spans} <> Nil{}
     case False{}:
-      OpText{x, y, stamp_w, paint_dim(boxed), 0, ts}
+      OpText{x, y, stamp_w, dim, 0, ts}
         <> (OpLine{U32.add(x, off), y, w, fg, spans} <> Nil{})
 
-def paint_row_ops(+x: U32, +y: U32, row: BodyRow, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+def paint_row_ops(+x: U32, +y: U32, row: BodyRow, +dim: U32) -> List<&2, DrawOp>:
   match row:
     case BodyRow{+ts, stamp_w, off, w, fg, +spans, _}:
-      paint_row_normal(x, y, ts, stamp_w, off, w, fg, spans, String.is_empty(ts), boxed)
+      paint_row_normal(x, y, ts, stamp_w, off, w, fg, spans, String.is_empty(ts), dim)
     case BodyRecon{+text, +w}:
-      OpText{x, y, w, paint_dim(boxed), 0, recon_divider(text, w)} <> Nil{}
+      OpText{x, y, w, dim, 0, recon_divider(text, w)} <> Nil{}
     case BodyMedia{_, _, _, _}: Nil{}
 
-def paint_body_ops_go(fuel: Nat, xs: List<&2, BodyRow>, +x: U32, +y: U32, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+def paint_body_ops_go(fuel: Nat, xs: List<&2, BodyRow>, +x: U32, +y: U32, +dim: U32) -> List<&2, DrawOp>:
   match fuel:
     case 0n: Nil{}
     case 1n+p:
@@ -3712,15 +3988,15 @@ def paint_body_ops_go(fuel: Nat, xs: List<&2, BodyRow>, +x: U32, +y: U32, +boxed
         case Nil{}: Nil{}
         case Con{BodyMedia{token, w, +h, +row}, +tail}:
           +visible = U32.min(U32.sub(h, row), U32.from_nat(Nat.add(1n, List.length(&2, BodyRow, tail))))
-          OpMedia{x, y, w, h, row, visible, token} <> paint_body_ops_go(p, List.drop(&2, BodyRow, tail, Nat.sub(U32.to_nat(visible), 1n)), x, U32.add(y, visible), boxed)
+          OpMedia{x, y, w, h, row, visible, token} <> paint_body_ops_go(p, List.drop(&2, BodyRow, tail, Nat.sub(U32.to_nat(visible), 1n)), x, U32.add(y, visible), dim)
         case Con{head, tail}:
-          List.append(&2, DrawOp, paint_row_ops(x, y, head, boxed), paint_body_ops_go(p, tail, x, U32.add(y, 1), boxed))
+          List.append(&2, DrawOp, paint_row_ops(x, y, head, dim), paint_body_ops_go(p, tail, x, U32.add(y, 1), dim))
 
-def paint_body_ops(r: Rect, +xs: List<&2, BodyRow>, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+def paint_body_ops(r: Rect, +xs: List<&2, BodyRow>, +dim: U32) -> List<&2, DrawOp>:
   match r:
     case Rect{x, y, w, h}:
       +n = U32.from_nat(List.length(&2, BodyRow, xs))
-      paint_body_ops_go(List.length(&2, BodyRow, xs), xs, inner_x(x), body_y0(y, h, n), boxed)
+      paint_body_ops_go(List.length(&2, BodyRow, xs), xs, inner_x(x), body_y0(y, h, n), dim)
 
 # A typing notice gets its own row instead of sharing the last chat row
 # (D63): when typers is non-empty the history box yields its bottom row and
@@ -3732,17 +4008,17 @@ def typing_line(+xs: List<&2, String>) -> String:
     case Nil{}: ""
     case Con{+h, t}: typing_notice(h <> t)
 
-def paint_body_noticed.split(+r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
+def paint_body_noticed.split(+r: Rect, +bod: List<&2, BodyRow>, +notice: String, +dim: U32) -> List<&2, DrawOp>:
   match r:
     case Rect{x, y, w, h}:
       List.append(&2, DrawOp,
-        paint_body_ops(body_hist_rect(Rect{x, y, w, U32.sub(h, 1)}), bod, boxed),
-        op_text(Rect{x, U32.add(y, U32.sub(body_hist_h(h), 1)), w, h}, paint_dim(boxed), notice) <> Nil{})
+        paint_body_ops(body_hist_rect(Rect{x, y, w, U32.sub(h, 1)}), bod, dim),
+        op_text(Rect{x, U32.add(y, U32.sub(body_hist_h(h), 1)), w, h}, dim, notice) <> Nil{})
 
 def paint_body_noticed.go(plain: Bool, +r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   match plain:
-    case True{}: paint_body_ops(body_hist_rect(r), bod, boxed)
-    case False{}: paint_body_noticed.split(r, bod, notice, boxed)
+    case True{}: paint_body_ops(body_hist_rect(r), bod, paint_dim(boxed))
+    case False{}: paint_body_noticed.split(r, bod, notice, paint_dim(boxed))
 
 def paint_body_noticed(+r: Rect, +bod: List<&2, BodyRow>, +notice: String, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   match r:
@@ -3759,6 +4035,18 @@ def paint_nick_go(xs: List<&2, String>, ok: Bool, +x: U32, +y: U32, +w: U32, +fg
           OpText{x, y, w, paint_nick(boxed, Cl.nick_strip(h)), 0, h}
             <> paint_nick_go(t, U32.is_lt(U32.add(y, 1), max_y), x, U32.add(y, 1), w, fg, max_y, boxed)
 
+# D199: the roster loop resolved opt_theme per nick for a paint-constant
+# value. Resolve once per pane paint and thread the theme through the loop.
+def paint_nick_go_theme(xs: List<&2, String>, ok: Bool, +x: U32, +y: U32, +w: U32, +fg: U32, +max_y: U32, +theme: Maybe<&2, Theme.Id>) -> List<&2, DrawOp>:
+  match xs:
+    case Nil{}: Nil{}
+    case Con{+h, t}:
+      match ok:
+        case False{}: Nil{}
+        case True{}:
+          OpText{x, y, w, paint_nick_theme(theme, Cl.nick_strip(h)), 0, h}
+            <> paint_nick_go_theme(t, U32.is_lt(U32.add(y, 1), max_y), x, U32.add(y, 1), w, fg, max_y, theme)
+
 def paint_nick_wide(+x: U32, +y: U32, +w: U32, +h: U32, +title: String, +names: List<&2, String>, wide: Bool, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   match wide:
     case False{}: Nil{}
@@ -3770,7 +4058,7 @@ def paint_nick_wide(+x: U32, +y: U32, +w: U32, +h: U32, +title: String, +names: 
       +max_y = box_max_y(y, h)
       OpBox{x, y, w, h, PANE_NICKS()}
         <> OpText{ix, y, iw, fg, 0, title}
-        <> paint_nick_go(names, U32.is_lt(y1, max_y), ix, y1, iw, fg, max_y, boxed)
+        <> paint_nick_go_theme(names, U32.is_lt(y1, max_y), ix, y1, iw, fg, max_y, opt_theme(boxed))
 
 def paint_nicks(r: Rect, +title: String, +names: List<&2, String>, +boxed: List<&2, PaintOpts>) -> List<&2, DrawOp>:
   match r:
@@ -3899,6 +4187,13 @@ def paint_view_single.got(
       +ns = nicks_list_of(b)
       (ViewModel{paint_view_ops(boxed, lay0, nick, server, net, active, names, alerts, bell, bell_seq, bod, preview_path_legacy(opt_legacy(boxed), b), bt, nt, ns, typing_line(typers), ts), view_input(draft)}, bod, reused)
 
+# D137 consumer: the pair cannot be shared (+ needs Data), so it is
+# matched once here and both sides flow into got together.
+def paint_view_single.tabs(tabs: List<&2, String> & List<&2, U32>, +boxed: List<&2, PaintOpts>, lay0: Lay, +nick: String, +server: String, +net: String, +active: Nat, +bell: U32, +bell_seq: U32, +b: Cl.Buffer, +typers: List<&2, String>, +draft: String, +ts: Bool, pair: List<&2, BodyRow> & Bool) -> ViewModel & List<&2, BodyRow> & Bool:
+  match tabs:
+    case (+names, +alerts):
+      paint_view_single.got(boxed, lay0, nick, server, net, active, names, alerts, bell, bell_seq, b, typers, draft, ts, pair)
+
 def paint_view_single(+boxed: List<&2, PaintOpts>, +cl: Cl.Client, +rows: U32, +cols: U32, +draft: String, +net: String, +typers: List<&2, String>, +hold: List<&2, ScrollHold>) -> ViewModel & List<&2, BodyRow> & Bool:
   match cl:
     case Cl.Client{+nick, +server, +bufs, +active, _, +stg, _, _, _}:
@@ -3913,7 +4208,8 @@ def paint_view_single(+boxed: List<&2, PaintOpts>, +cl: Cl.Client, +rows: U32, +
       +mutes = Cl.settings_mutes(stg)
       +joins = Cl.settings_joins(stg)
       +show_nicks = Cl.settings_nicks(stg)
-      paint_view_single.got(boxed, lay0, nick, server, net, active, paint_tab_names(boxed, bufs, unreads), paint_tab_alerts(boxed, bufs, unreads), bool_bit(Cl.settings_bell(stg)), Cl.settings_bell_seq(stg), b, typers, draft, ts, paint_body_of(take_hold(hold, hold_miss(b, hh, ww, ts, joins, show_nicks, mutes, server, boxed)), b, hh, ww, ts, mutes, joins, show_nicks, server, boxed))
+      # D137: one tab walk resolves names+alerts together (see paint_tabs).
+      paint_view_single.tabs(paint_tabs(boxed, bufs, unreads), boxed, lay0, nick, server, net, active, bool_bit(Cl.settings_bell(stg)), Cl.settings_bell_seq(stg), b, typers, draft, ts, paint_body_of(take_hold(hold, hold_miss(b, hh, ww, ts, joins, show_nicks, mutes, server, boxed)), b, hh, ww, ts, mutes, joins, show_nicks, server, boxed))
 
 def paint_view_split_rects.rest(
   +boxed: List<&2, PaintOpts>,
@@ -4008,6 +4304,13 @@ def paint_view_split_rects(
       +w2 = rect_vis_w(r2)
       paint_view_split_rects.both(boxed, lay0, axis, nick, server, net, active, tabs, alerts, bell, bell_seq, r1, b1, focused, r2, b2, ntitle, nicks, status, typers, show_ts, paint_body_of(take_hold(hold, hold_miss(b1, h1, w1, show_ts, show_joins, show_nicks, mutes, server, boxed)), b1, h1, w1, show_ts, mutes, show_joins, show_nicks, server, boxed), paint_body_of(take_hold(hold, hold_miss(b2, h2, w2, show_ts, show_joins, show_nicks, mutes, server, boxed)), b2, h2, w2, show_ts, mutes, show_joins, show_nicks, server, boxed))
 
+# D137 consumer: the pair cannot be shared (+ needs Data), so it is
+# matched once here and both sides flow into rects together.
+def paint_view_split_rects.tabs(tabs: List<&2, String> & List<&2, U32>, +boxed: List<&2, PaintOpts>, pair: Rect & Rect, lay0: Lay, axis: Sp.Axis, +nick: String, +server: String, +net: String, +active: Nat, +bell: U32, +bell_seq: U32, +b1: Cl.Buffer, +b2: Cl.Buffer, +focused: U32, +mutes: List<&2, String>, +show_joins: Bool, +show_nicks: Bool, +ntitle: String, +nicks: List<&2, String>, +status: String, +typers: List<&2, String>, +show_ts: Bool, +hold: List<&2, ScrollHold>) -> List<&2, DrawOp> & List<&2, BodyRow> & Bool:
+  match tabs:
+    case (+names, +alerts):
+      paint_view_split_rects(boxed, pair, lay0, axis, nick, server, net, active, names, alerts, bell, bell_seq, b1, b2, focused, mutes, show_joins, show_nicks, ntitle, nicks, status, typers, show_ts, hold)
+
 def paint_view_split.got(+draft: String, trip: List<&2, DrawOp> & List<&2, BodyRow> & Bool) -> ViewModel & List<&2, BodyRow> & Bool:
   match trip:
     case (+ops, +bod, reused):
@@ -4049,7 +4352,8 @@ def paint_view_split(
       +nicks = Cl.settings_nicks(stg)
       nt status = nicks_title_of(focused_buf) status_of.buf(focused_buf)
       +ns = nicks_list_of(focused_buf)
-      paint_view_split.got(draft, paint_view_split_rects(boxed, split_rects(axis, body_rect), lay0, axis, nick, server, net, active, paint_tab_names(boxed, bufs, unreads), paint_tab_alerts(boxed, bufs, unreads), bool_bit(Cl.settings_bell(stg)), Cl.settings_bell_seq(stg), b1, b2, focused, mutes, joins, nicks, nt, ns, status, typers, Cl.settings_ts(stg), hold))
+      # D137: one tab walk resolves names+alerts together (see paint_tabs).
+      paint_view_split.got(draft, paint_view_split_rects.tabs(paint_tabs(boxed, bufs, unreads), boxed, split_rects(axis, body_rect), lay0, axis, nick, server, net, active, bool_bit(Cl.settings_bell(stg)), Cl.settings_bell_seq(stg), b1, b2, focused, mutes, joins, nicks, nt, ns, status, typers, Cl.settings_ts(stg), hold))
 
 def paint_view_state(+boxed: List<&2, PaintOpts>, +cl: Cl.Client, +rows: U32, +cols: U32, +draft: String, +net: String, +typers: List<&2, String>, split: Sp.State, +hold: List<&2, ScrollHold>) -> ViewModel & List<&2, BodyRow> & Bool:
   match split:

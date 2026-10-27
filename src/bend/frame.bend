@@ -247,15 +247,126 @@ def utf8_decode.go(fuel: Nat, st: Utf8Acc) -> Maybe<&2, String>:
 def utf8_decode(+xs: List<&2, U32>) -> Maybe<&2, String>:
   utf8_decode.go(Nat.add(1n, List.length(&2, U32, xs)), Utf8Acc{xs, SNil{}})
 
-def line_from_octets.on(m: Maybe<&2, String>, +xs: List<&2, U32>) -> String:
-  match m:
-    case Some{+s}:
-      s
-    case None{}:
-      octets_to_string(xs)
+# Single decode pass (D168): one walk builds the decoded string and the
+# Latin-1 fallback side by side with a validity bit, replacing the
+# length-seeded decode plus the full fallback re-walk on reject. Fuel is a
+# constant from the framer bound (no length walk); exhaustion falls back to
+# the same Latin-1 mapping, so output is total. Step conditions mirror
+# utf8_step.lead exactly, so valid input decodes identically and invalid
+# input maps every byte, matching octets_to_string. Recursion lives only in
+# lfo.go; the step helpers take continuations.
+def lfo.raw(+rev: List<&2, U32>, +acc: String) -> String:
+  match rev:
+    case Nil{}:
+      acc
+    case Con{+h, t}:
+      lfo.raw(t, SCon{Chr{h}, acc})
+
+def lfo.fin(valid: Bool, +dec: String, +raw: List<&2, U32>) -> String:
+  match valid:
+    case True{}:
+      String.reverse(dec)
+    case False{}:
+      lfo.raw(raw, "")
+
+def lfo.c1(ok: Bool, +b0: U32, +b1: U32, t2: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      k(t2, SCon{Chr{utf8_cp2(b0, b1)}, dec}, b1 <> b0 <> raw, valid)
+
+def lfo.c2b(ok: Bool, +b0: U32, +b1: U32, +b2: U32, t3: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      k(t3, SCon{Chr{utf8_cp3(b0, b1, b2)}, dec}, b2 <> b1 <> b0 <> raw, valid)
+
+def lfo.c2a(ok: Bool, +b0: U32, +b1: U32, t2: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      match t2:
+        case Nil{}:
+          lfo.fin(False{}, dec, b1 <> b0 <> raw)
+        case Con{+b2, t3}:
+          lfo.c2b(is_cont(b2), b0, b1, b2, t3, t, dec, raw, valid, k)
+
+def lfo.c3c(ok: Bool, +b0: U32, +b1: U32, +b2: U32, +b3: U32, t4: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      k(t4, SCon{Chr{utf8_cp4(b0, b1, b2, b3)}, dec}, b3 <> b2 <> b1 <> b0 <> raw, valid)
+
+def lfo.c3b(ok: Bool, +b0: U32, +b1: U32, +b2: U32, t3: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      match t3:
+        case Nil{}:
+          lfo.fin(False{}, dec, b2 <> b1 <> b0 <> raw)
+        case Con{+b3, t4}:
+          lfo.c3c(is_cont(b3), b0, b1, b2, b3, t4, t, dec, raw, valid, k)
+
+def lfo.c3a(ok: Bool, +b0: U32, +b1: U32, t2: List<&2, U32>, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ok:
+    case False{}:
+      k(t, dec, b0 <> raw, False{})
+    case True{}:
+      match t2:
+        case Nil{}:
+          lfo.fin(False{}, dec, b1 <> b0 <> raw)
+        case Con{+b2, t3}:
+          lfo.c3b(is_cont(b2), b0, b1, b2, t3, t, dec, raw, valid, k)
+
+def lfo.step(ascii: Bool, two: Bool, three: Bool, four: Bool, +b0: U32, +t: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, k: List<&2, U32> -> String -> List<&2, U32> -> Bool -> String) -> String:
+  match ascii:
+    case True{}:
+      k(t, SCon{Chr{b0}, dec}, b0 <> raw, valid)
+    case False{}:
+      match two:
+        case True{}:
+          match t:
+            case Nil{}:
+              lfo.fin(False{}, dec, b0 <> raw)
+            case Con{+b1, t2}:
+              lfo.c1(is_cont(b1), b0, b1, t2, t, dec, raw, valid, k)
+        case False{}:
+          match three:
+            case True{}:
+              match t:
+                case Nil{}:
+                  lfo.fin(False{}, dec, b0 <> raw)
+                case Con{+b1, t2}:
+                  lfo.c2a(utf8_3_b1(b0, b1), b0, b1, t2, t, dec, raw, valid, k)
+            case False{}:
+              match four:
+                case True{}:
+                  match t:
+                    case Nil{}:
+                      lfo.fin(False{}, dec, b0 <> raw)
+                    case Con{+b1, t2}:
+                      lfo.c3a(utf8_4_b1(b0, b1), b0, b1, t2, t, dec, raw, valid, k)
+                case False{}:
+                  k(t, dec, b0 <> raw, False{})
+
+def lfo.go(fuel: Nat, +xs: List<&2, U32>, +dec: String, +raw: List<&2, U32>, valid: Bool, +full: List<&2, U32>) -> String:
+  match fuel:
+    case 0n:
+      octets_to_string(full)
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          lfo.fin(valid, dec, raw)
+        case Con{+b0, t}:
+          lfo.step(U32.is_lt(b0, 128), U32.is_ge(b0, 194) && U32.is_le(b0, 223), U32.is_ge(b0, 224) && U32.is_le(b0, 239), U32.is_ge(b0, 240) && U32.is_le(b0, 244), b0, t, dec, raw, valid, xs2 => dec2 => raw2 => v2 => lfo.go(p, xs2, dec2, raw2, v2, full))
 
 def line_from_octets(+xs: List<&2, U32>) -> String:
-  line_from_octets.on(utf8_decode(xs), xs)
+  lfo.go(Nat.add(2n, LINE_OCTET_MAX()), xs, "", Nil{}, True{}, xs)
 
 def char_code(+c: Char) -> U32:
   Char.to_u32(c)
@@ -274,10 +385,24 @@ def utf8_encode_three(+cp: U32, tail: List<&2, U32>) -> List<&2, U32>:
 def utf8_encode_two(+cp: U32, tail: List<&2, U32>) -> List<&2, U32>:
   U32.or(192, U32.shrn(cp, 6n)) <> U32.or(128, U32.and(cp, 63)) <> tail
 
+# Match-first chain: wider encodings build only when narrower miss.
+def utf8_encode_cp.wide(+cp: U32, +tail: List<&2, U32>, wide: Bool) -> List<&2, U32>:
+  match wide:
+    case True{}: utf8_encode_three(cp, tail)
+    case False{}: utf8_encode_four(cp, tail)
+
+def utf8_encode_cp.two(+cp: U32, +tail: List<&2, U32>, two: Bool) -> List<&2, U32>:
+  match two:
+    case True{}: utf8_encode_two(cp, tail)
+    case False{}: utf8_encode_cp.wide(cp, tail, U32.is_lt(cp, 65536))
+
+def utf8_encode_cp.ascii(+cp: U32, +tail: List<&2, U32>, ascii: Bool) -> List<&2, U32>:
+  match ascii:
+    case True{}: cp <> tail
+    case False{}: utf8_encode_cp.two(cp, tail, U32.is_lt(cp, 2048))
+
 def utf8_encode_cp(+cp: U32, +tail: List<&2, U32>) -> List<&2, U32>:
-  Bool.pick(List<&2, U32>, U32.is_lt(cp, 128), cp <> tail,
-    Bool.pick(List<&2, U32>, U32.is_lt(cp, 2048), utf8_encode_two(cp, tail),
-      Bool.pick(List<&2, U32>, U32.is_lt(cp, 65536), utf8_encode_three(cp, tail), utf8_encode_four(cp, tail))))
+  utf8_encode_cp.ascii(cp, tail, U32.is_lt(cp, 128))
 
 def utf8_encode_scalar(+cp: U32, tail: List<&2, U32>) -> List<&2, U32>:
   utf8_encode_cp(Bool.pick(U32, U32.is_gt(cp, 1114111) || (U32.is_ge(cp, 55296) && U32.is_le(cp, 57343)), 65533, cp), tail)
@@ -400,6 +525,23 @@ def step_dropping(+lines: List<&2, String>, is_lf: Bool) -> FrSt:
     case False{}:
       step_to_drop(lines)
 
+# Limit-gated dispatch: the unary overlong comparison runs only when the
+# byte is neither LF nor CR. step_normal/* keep their signatures for the
+# proof pins; the live path enters through pre/pre_cr instead.
+def step_normal.pre_cr(+rem: List<&2, U32>, +lines: List<&2, String>, +n: Nat, +b: U32, is_cr: Bool) -> FrSt:
+  match is_cr:
+    case True{}:
+      step_hold(rem, lines, n)
+    case False{}:
+      step_normal.over(rem, lines, n, b, Nat.is_ge(n, LINE_OCTET_MAX()))
+
+def step_normal.pre(+rem: List<&2, U32>, +lines: List<&2, String>, +n: Nat, +b: U32, is_lf: Bool) -> FrSt:
+  match is_lf:
+    case True{}:
+      step_emit(rem, lines)
+    case False{}:
+      step_normal.pre_cr(rem, lines, n, b, U32.is_eq(b, CR()))
+
 def step_mode(
   mode: FrMode,
   +rem: List<&2, U32>,
@@ -409,7 +551,7 @@ def step_mode(
 ) -> FrSt:
   match mode:
     case Normal{}:
-      step_normal(rem, lines, n, b, U32.is_eq(b, LF()), U32.is_eq(b, CR()), Nat.is_ge(n, LINE_OCTET_MAX()))
+      step_normal.pre(rem, lines, n, b, U32.is_eq(b, LF()))
     case AfterCr{}:
       step_after(rem, lines, n, U32.is_eq(b, LF()))
     case Drop{}:
@@ -458,8 +600,23 @@ def reopen_cr(+rev: List<&2, U32>, +n: Nat) -> FrSt:
     case Con{+h, t}:
       reopen_hd(h, t, n, U32.is_eq(h, CR()))
 
+# Single reverse-and-count: reverse and length walk the same list, so one
+# pass answers both. finish.out's reverse stays: the forward boundary
+# remainder is pinned by the frame goldens (hold_cr/push cases).
+def reopen_rev_len(+xs: List<&2, U32>, +acc: List<&2, U32>, +n: Nat) -> List<&2, U32> & Nat:
+  match xs:
+    case Nil{}:
+      (acc, n)
+    case Con{+h, t}:
+      reopen_rev_len(t, h <> acc, 1n+n)
+
+def reopen_keep.got(got: List<&2, U32> & Nat) -> FrSt:
+  match got:
+    case (rev, n):
+      reopen_cr(rev, n)
+
 def reopen_keep(+rem: List<&2, U32>) -> FrSt:
-  reopen_cr(List.reverse(&2, U32, rem), payload_n(rem))
+  reopen_keep.got(reopen_rev_len(rem, Nil{}, 0n))
 
 def reopen(drop: Bool, +rem: List<&2, U32>) -> FrSt:
   match drop:

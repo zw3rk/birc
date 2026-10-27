@@ -172,6 +172,28 @@ def status_of.on(+ok: U32, +err: U32, +warn: U32, +dim: U32, +online: Bool, +off
             case True{}: warn
             case False{}: dim
 
+# D197: the old shape strictly bound all four palette U32s and all three net
+# predicates, then status_of.on matched online first and discarded the rest.
+# Match online first here and bind palettes/predicates per arm instead; the
+# common online header paint now pays one prefix scan and one palette match.
+# status_of.on stays for its shape (no callers removed).
+def status_of.conn(conn: Bool, +id: Id) -> U32:
+  match conn:
+    case True{}: status_warn(id)
+    case False{}: status_dim(id)
+
+def status_of.offline(offline: Bool, +id: Id, +net: String) -> U32:
+  match offline:
+    case True{}: status_err(id)
+    case False{}: status_of.conn(String.eq(net, "connecting"), id)
+
+def status_of.off(+id: Id, +net: String) -> U32:
+  status_of.offline(String.eq(net, "offline"), id, net)
+
+def status_of.net(online: Bool, +id: Id, +net: String) -> U32:
+  match online:
+    case True{}: status_ok(id)
+    case False{}: status_of.off(id, net)
+
 def status_of(+id: Id, +net: String) -> U32:
-  status_of.on(status_ok(id), status_err(id), status_warn(id), status_dim(id),
-    String.starts_with(net, "online"), String.eq(net, "offline"), String.eq(net, "connecting"))
+  status_of.net(String.starts_with(net, "online"), id, net)

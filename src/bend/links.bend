@@ -80,12 +80,21 @@ def alias_step(found: Bool, yes: Maybe<&2, Alias>, no: Unit -> Maybe<&2, Alias>)
     case True{}: yes
     case False{}: no(Unit{})
 
+# D195: the strict `yes` argument built length+drop on every miss. Both
+# arms thunked (the paired.go.step shape): the hit branches on its own
+# parameter and the drop runs only in the taken arm. alias_step cannot
+# cover this: its `yes` parameter itself is the strict value.
+def alias.pick(hit: Bool, yes: Unit -> Maybe<&2, Alias>, no: Unit -> Maybe<&2, Alias>) -> Maybe<&2, Alias>:
+  match hit:
+    case True{}: yes(Unit{})
+    case False{}: no(Unit{})
+
 def alias.go(xs: List<&2, Emoji.Entry>, +s: String) -> Maybe<&2, Alias>:
   match xs:
     case Nil{}: None{}
     case Con{Emoji.Entry{+name, text}, t}:
-      alias_step(String.starts_with(s, name),
-        Some{Alias{text, String.drop(s, String.length(name))}},
+      alias.pick(String.starts_with(s, name),
+        _ => Some{Alias{text, String.drop(s, String.length(name))}},
         _ => alias.go(t, s))
 
 def delimiter.double(double: Bool, s: String) -> String:

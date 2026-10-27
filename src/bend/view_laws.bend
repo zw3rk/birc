@@ -503,13 +503,21 @@ def ys_last(xs: List<&2, U32>) -> U32:
 # ending on the composer (last inner body row), history rows are mutually
 # distinct, and the full list is strictly increasing whenever the box
 # separates history from the composer (tiny boxes share the row).
+# D107: the strict Bool.pick value walked ys_inc(ys) even when hist_sep is
+# False (plus :511 already walks ys_inc(ys_init(ys))). Branch first so the
+# second full-list walk runs only on the separated path.
+def body_ys_case.sep(sep: Bool, ys: List<&2, U32>) -> Bool:
+  match sep:
+    case True{}: ys_inc(ys)
+    case False{}: True{}
+
 def body_ys_case(+rows: U32, +nlines: Nat) -> Bool:
   +ys = body_ys(rows, nlines)
   Nat.is_eq(List.length(&2, U32, ys), Nat.add(V.vis_n(nlines, V.vis_h(rows)), 1n))
     && U32.is_eq(ys_last(ys), V.last_body_row(rows))
     && ys_sorted(ys)
     && ys_inc(ys_init(ys))
-    && Bool.pick(Bool, hist_sep(rows), ys_inc(ys), True{})
+    && body_ys_case.sep(hist_sep(rows), ys)
 
 def lay_body_ok(l: V.Lay, +want_y: U32, +want_h: U32, +want_sy: U32) -> Bool:
   match l:

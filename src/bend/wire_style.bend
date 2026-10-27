@@ -238,11 +238,23 @@ def later_has_space(+runs: List<&2, Links.Run>) -> Bool:
     case Nil{}: False{}
     case Con{Links.Run{_, +text, _}, +t}: run_has_space(text) || later_has_space(t)
 
+# D84: the later-runs text scan ran even when next_ok already allowed the
+# link. Match next_ok first; the later scan lives only in the undecided arm.
+def render_runs.bad_later(head: Bool, +t: List<&2, Links.Run>) -> Bool:
+  match head:
+    case True{}: True{}
+    case False{}: Bool.not(later_has_space(t))
+
+def render_runs.bad(+i: Nat, prev_alnum: Bool, next_ok: Bool, +t: List<&2, Links.Run>) -> Bool:
+  match next_ok:
+    case True{}: Nat.is_eq(i, 0n) && prev_alnum
+    case False{}: render_runs.bad_later(Nat.is_eq(i, 0n) && prev_alnum, t)
+
 def render_runs.go(+runs: List<&2, Links.Run>, +wattrs: U32, +wfg: U32, +whas: Bool, +prev_alnum: Bool, +next_ok: Bool, +i: Nat) -> List<&2, SRun>:
   match runs:
     case Nil{}: Nil{}
     case Con{+run, +t}:
-      +bad = (Nat.is_eq(i, 0n) && prev_alnum) || (Bool.not(next_ok) && Bool.not(later_has_space(t)))
+      +bad = render_runs.bad(i, prev_alnum, next_ok, t)
       stylize(run, wattrs, wfg, whas, bad) <> render_runs.go(t, wattrs, wfg, whas, prev_alnum, next_ok, Nat.add(i, 1n))
 
 # The emoji table is built once per render (one painted line, one searched

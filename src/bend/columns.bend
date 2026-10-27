@@ -145,15 +145,13 @@ def cut_width(piece: Cut) -> U32:
 
 # `bound` is a copyable cluster-walk limit (2*len+2). The match binder `p`
 # stays the decreasing first argument and is not also handed to cluster_bounded.
+# D136: both Bool.pick arms returned 0, so the bound checks were dead.
 def text_width_go(fuel: Nat, s: String, +bound: Nat) -> U32:
   match fuel:
-    case 0n:
-      match s:
-        case SNil{}: Bool.pick(U32, Nat.is_eq(bound, 0n), 0, 0)
-        case SCon{_, _}: Bool.pick(U32, Nat.is_eq(bound, 0n), 0, 0)
+    case 0n: 0
     case 1n+p:
       match s:
-        case SNil{}: Bool.pick(U32, Nat.is_eq(Nat.add(p, bound), 0n), 0, 0)
+        case SNil{}: 0
         case SCon{_, _}:
           +cut = cluster_bounded(s, bound)
           U32.add(cut_width(cut), text_width_go(p, cut_tail(cut), bound))
@@ -171,10 +169,10 @@ type TakePhase is Data:
   TakeFit{tail: String, text: String, uw: U32}
   TakeNoFit{}
 
+# D136: both arms built the identical Cut, so the done flag was dead.
+# The signature stays so the three call sites read unchanged.
 def take_end(done: Bool, head: String, s: String, +used: U32) -> Cut:
-  match done:
-    case True{}: Cut{String.reverse(head), s, used}
-    case False{}: Cut{String.reverse(head), s, used}
+  Cut{String.reverse(head), s, used}
 
 def take_go(fuel: Nat, s: String, +cap: U32, +used: U32, head: String, phase: TakePhase, +bound: Nat) -> Cut:
   match fuel:

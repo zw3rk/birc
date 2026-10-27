@@ -47,8 +47,21 @@ def token.pick(url: Bool, +s: String, user: String, pass: String) -> String & St
     case True{}: token.url(Links.take(String.take(s, TEXT_CAP())))
     case False{}: token.secret(s, secret_skip(s, user, pass))
 
+# The lowered prefix can only start with 'h'/'H', so plain tokens skip
+# the take/lower/starts_with rebuilds with one head match per token.
+def token.head_url(+h: Char, +s: String) -> Bool:
+  match h:
+    case Chr{104}: Links.is_url_prefix(String.to_lower(String.take(s, 8n)))
+    case Chr{72}: Links.is_url_prefix(String.to_lower(String.take(s, 8n)))
+    case _: False{}
+
+def token.maybe_url(+s: String) -> Bool:
+  match s:
+    case SNil{}: False{}
+    case SCon{+h, +t}: token.head_url(h, SCon{h, t})
+
 def token(+s: String, user: String, pass: String) -> String & String:
-  token.pick(Links.is_url_prefix(String.to_lower(String.take(s, 8n))), s, user, pass)
+  token.pick(token.maybe_url(s), s, user, pass)
 
 def text.step(pair: String & String, next: String -> String) -> String:
   match pair:
