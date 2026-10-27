@@ -125,7 +125,14 @@ def post_on_failure(diag: Maybe<&2, String>, notice: Maybe<&2, Chan(Sess.UiMsg)>
 
 # Single-worker body: deliver every handed job in FIFO order on one
 # detached worker, reusing the bounded run and stage-label-only diagnostics.
-def run_jobs.go(fuel: Nat, +helper: String, +jobs: List<&2, Notify.Req>, +notice: Maybe<&2, Chan(Sess.UiMsg)>) -> IO(Unit):
+# D210: fuel was a full `List.length` walk over a queue that is bounded by
+# QUEUE_CAP by construction (`enqueue` rejects past the cap; staged reqs are
+# admitted only alongside queue room, at most one per queued slot). Seeding
+# fuel at the cap provably suffices and performs no walk.
+# D211: the helper basename was re-split per job (N+1 splits per handoff).
+# The base is resolved once per handoff and threaded through; the full helper
+# path is still threaded separately for the spawn.
+def run_jobs.go(fuel: Nat, +helper: String, +base: String, +jobs: List<&2, Notify.Req>, +notice: Maybe<&2, Chan(Sess.UiMsg)>) -> IO(Unit):
   match fuel:
     case 0n: IO.pure(Unit, Unit{})
     case 1n+p:
@@ -133,12 +140,12 @@ def run_jobs.go(fuel: Nat, +helper: String, +jobs: List<&2, Notify.Req>, +notice
         case Nil{}: IO.pure(Unit, Unit{})
         case Con{+r, t}:
           do IO<Unit>:
-            diag : Maybe<&2, String> <- send.run(helper, args_for(helper, r))
+            diag : Maybe<&2, String> <- send.run(helper, args_for.base(base, r))
             Unit <- post_on_failure(diag, notice)
-            run_jobs.go(p, helper, t, notice)
+            run_jobs.go(p, helper, base, t, notice)
 
 def run_jobs(+helper: String, +jobs: List<&2, Notify.Req>, +notice: Maybe<&2, Chan(Sess.UiMsg)>) -> IO(Unit):
-  run_jobs.go(List.length(&2, Notify.Req, jobs), helper, jobs, notice)
+  run_jobs.go(Notify.QUEUE_CAP(), helper, base_of(helper), jobs, notice)
 
 def post_done(notice: Maybe<&2, Chan(Sess.UiMsg)>, +ticket: Nat, +endpoint: String) -> IO(Unit):
   match notice:

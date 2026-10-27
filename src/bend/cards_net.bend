@@ -127,7 +127,9 @@ def cards_stage_session.go(pair: C.State & Maybe<&2, C.Request>, +st: Sess.Sessi
 # Schedule bounded visible work over the exact painted rows, then spawn at most
 # one worker. Scheduling alone changes nothing painted, so unlike the media
 # stage there is no repaint signal here; completions report it.
+# D221: session_observe_visible_cards maintains in every arm, so the stage
+# shares that maintained state instead of re-scanning aliveness (idempotent).
 def cards_stage_session(+st: Sess.Session, +evt: Chan(Sess.UiMsg)) -> IO(Sess.Session & Maybe<&2, C.Request>):
   +observed = Sess.session_observe_visible_cards(st)
   cards_stage_session.go(C.take_job_allowed(Sess.session_cards_job_allowed(observed),
-    C.maintain(Sess.session_cards(observed), Sess.session_cl(observed))), observed, evt)
+    Sess.session_cards(observed)), observed, evt)

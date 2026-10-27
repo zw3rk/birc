@@ -110,12 +110,30 @@ def exact_eq(a: String, b: String) -> Bool:
 def has(+xs: List<&2, String>, value: String) -> Bool:
   List.contains(~String, ~exact_eq, xs, value)
 
+# D65: the taken arm validates; the other walk never builds. Bend args are
+# eager, so the old Bool.pick paid both channel_ok and text_ok per row.
+# Thunk shape mirrors links.bend alias_step: helpers never name list_ok,
+# so the only recursion is list_ok's own direct self-call.
+def list_ok.row(channel: Bool, +h: String) -> Bool:
+  match channel:
+    case False{}: text_ok(h, 512)
+    case True{}: channel_ok(h)
+
+def list_ok.step(ok: Bool, k: Unit -> Bool) -> Bool:
+  match ok:
+    case False{}: False{}
+    case True{}: k(Unit{})
+
+def list_ok.next(dup: Bool, k: Unit -> Bool) -> Bool:
+  match dup:
+    case True{}: False{}
+    case False{}: k(Unit{})
+
 def list_ok(xs: List<&2, String>, +channel: Bool) -> Bool:
   match xs:
     case Nil{}: True{}
     case Con{+h, +t}:
-      Bool.pick(Bool, channel, channel_ok(h), text_ok(h, 512))
-        && Bool.not(has(t, h)) && list_ok(t, channel)
+      list_ok.step(list_ok.row(channel, h), _ => list_ok.next(has(t, h), _ => list_ok(t, channel)))
 
 def valid(prefs: Preferences) -> Bool:
   match prefs:
@@ -177,7 +195,8 @@ def parse_record.mute(ok: Bool, prefs: Preferences, value: String) -> Maybe<&2, 
     case True{}:
       match prefs:
         case Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, +th, n}:
-          Some{Preferences{j, t, m, h, cap, a, b, i, List.append(&2, String, mutes, value <> Nil{}), channels, known, th, n}}
+          # D66: cons assembly; parse_lines.rev restores file order once.
+          Some{Preferences{j, t, m, h, cap, a, b, i, value <> mutes, channels, known, th, n}}
 
 def parse_record.channel(ok: Bool, prefs: Preferences, value: String) -> Maybe<&2, Preferences>:
   match ok:
@@ -185,7 +204,8 @@ def parse_record.channel(ok: Bool, prefs: Preferences, value: String) -> Maybe<&
     case True{}:
       match prefs:
         case Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, +th, n}:
-          Some{Preferences{j, t, m, h, cap, a, b, i, mutes, List.append(&2, String, channels, value <> Nil{}), known, th, n}}
+          # D66: cons assembly; parse_lines.rev restores file order once.
+          Some{Preferences{j, t, m, h, cap, a, b, i, mutes, value <> channels, known, th, n}}
 
 def parse_record.scope(ok: Bool, prefs: Preferences) -> Maybe<&2, Preferences>:
   match ok:
@@ -203,16 +223,54 @@ def parse_record.theme(got: Maybe<&2, Theme.Id>, prefs: Preferences) -> Maybe<&2
         case Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, _, n}:
           Some{Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}}
 
+# D171: one validation per record with fail-fast gates; an invalid record
+# skips the length and dup walks the old strict && always paid. Every match
+# scrutinizes a parameter; callees are defined before callers.
+def parse_record.mute.len(ok: Bool, prefs: Preferences, +value: String) -> Maybe<&2, Preferences>:
+  match ok:
+    case False{}: None{}
+    case True{}:
+      match prefs:
+        case Preferences{j, t, m, h, cap, a, b, i, +mutes, channels, known, +th, n}:
+          parse_record.mute(Bool.not(has(mutes, value)), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+
+def parse_record.mute.text(ok: Bool, prefs: Preferences, value: String) -> Maybe<&2, Preferences>:
+  match ok:
+    case False{}: None{}
+    case True{}:
+      match prefs:
+        case Preferences{j, t, m, h, cap, a, b, i, +mutes, channels, known, +th, n}:
+          parse_record.mute.len(Nat.is_lt(List.length(&2, String, mutes), 64n), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+
+def parse_record.channel.len(ok: Bool, prefs: Preferences, +value: String) -> Maybe<&2, Preferences>:
+  match ok:
+    case False{}: None{}
+    case True{}:
+      match prefs:
+        case Preferences{j, t, m, h, cap, a, b, i, mutes, +channels, +known, +th, n}:
+          parse_record.channel(Bool.not(has(channels, value)), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+
+def parse_record.channel.ok(ok: Bool, prefs: Preferences, +value: String) -> Maybe<&2, Preferences>:
+  match ok:
+    case False{}: None{}
+    case True{}:
+      match prefs:
+        case Preferences{j, t, m, h, cap, a, b, i, mutes, +channels, +known, +th, n}:
+          parse_record.channel.len(Nat.is_lt(List.length(&2, String, channels), 14n), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+
+def parse_record.channel.known(known: Bool, prefs: Preferences, +value: String) -> Maybe<&2, Preferences>:
+  match known:
+    case False{}: None{}
+    case True{}: parse_record.channel.ok(channel_ok(value), prefs, value)
+
 def parse_record.fields(fields: List<&2, String>, +prefs: Preferences) -> Maybe<&2, Preferences>:
   match fields:
     case "mute" <> +value <> Nil{}:
-      match prefs:
-        case Preferences{j, t, m, h, cap, a, b, i, +mutes, channels, known, +th, n}:
-          parse_record.mute(text_ok(value, 512) && Nat.is_lt(List.length(&2, String, mutes), 64n) && Bool.not(has(mutes, value)), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+      parse_record.mute.text(text_ok(value, 512), prefs, value)
     case "channel" <> +value <> Nil{}:
       match prefs:
-        case Preferences{j, t, m, h, cap, a, b, i, mutes, +channels, +known, +th, n}:
-          parse_record.channel(known && channel_ok(value) && Nat.is_lt(List.length(&2, String, channels), 14n) && Bool.not(has(channels, value)), Preferences{j, t, m, h, cap, a, b, i, mutes, channels, known, th, n}, value)
+        case Preferences{_, _, _, _, _, _, _, _, _, _, +known, _, _}:
+          parse_record.channel.known(known, prefs, value)
     case "theme" <> +value <> Nil{}:
       parse_record.theme(Theme.parse(value), prefs)
     case "scope" <> "0" <> Nil{}:
@@ -228,12 +286,21 @@ def parse_records(lines: List<&2, String>, prefs: Preferences) -> Maybe<&2, Pref
         parse_records(tail, next)
     case Nil{}: None{}
 
+# D66: records accumulate cons (O(1) each); one reverse restores file
+# order. Dup and cap checks are order-insensitive, so verdicts match the
+# old per-record append exactly.
+def parse_lines.rev.prefs(prefs: Preferences) -> Preferences:
+  match prefs:
+    case Preferences{j, t, m, h, cap, a, b, i, +mutes, +channels, +known, +th, n}:
+      Preferences{j, t, m, h, cap, a, b, i, List.reverse(&2, String, mutes), List.reverse(&2, String, channels), known, th, n}
+
 def parse_lines(lines: List<&2, String>) -> Maybe<&2, Preferences>:
   match lines:
     case "BIRC_PREFS1" <> header <> rest:
       do Maybe<&2, Preferences>:
         prefs : Preferences <- parse_settings.fields(String.split(header, Chr{9}))
-        parse_records(rest, prefs)
+        next : Preferences <- parse_records(rest, prefs)
+        return parse_lines.rev.prefs(next)
     case _: None{}
 
 def parse.valid(ok: Bool, text: String) -> Maybe<&2, Preferences>:

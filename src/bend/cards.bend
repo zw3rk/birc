@@ -59,13 +59,23 @@ def targets_keep(hit: Bool, url: String, tail: List<&2, String>) -> List<&2, Str
 # the shared per-run verdict). A bare duplicate of an image-intent URL keeps
 # its own card run; flattened string exclusion would drop it. Code and styled
 # runs stay opaque via Ws; style-infixed and SOH-glued links degrade first.
+# D218: the strict Bool.pick value built previous ++ text on every styled
+# run and discarded it. Match the attrs test first; the append runs only in
+# the taken arm (same D52 shape as media.bend:86-91).
+# The structural walk always continues; only the previous-text threading
+# is conditional, so the helper returns the next previous (no recursion
+# inside, hence no forward reference) and the append runs only when plain.
+def targets_go.prev(plain: Bool, +previous: String, +text: String) -> String:
+  match plain:
+    case True{}: previous ++ text
+    case False{}: ""
+
 def targets_go(xs: List<&2, Ws.SRun>, +previous: String) -> List<&2, String>:
   match xs:
     case Nil{}: Nil{}
     case Con{Ws.SRun{+attrs, _, _, +text, url}, +tail}:
       match url:
-        case None{}:
-          targets_go(tail, Bool.pick(String, U32.is_eq(attrs, 0), previous ++ text, ""))
+        case None{}: targets_go(tail, targets_go.prev(U32.is_eq(attrs, 0), previous, text))
         case Some{+exact}:
           targets_keep(eligible_url(exact) && Bool.not(M.media_run_hit(previous, exact, tail)),
             exact, targets_go(tail, ""))
@@ -220,6 +230,14 @@ def manual_saturated(state: State, +url: String) -> Bool:
       Nat.is_ge(List.length(&2, Request, pending), CAP())
         && Bool.not(active_has(active, CardManual{}, url, gen) || request_has(pending, CardManual{}, url, gen))
 
+# D223: the strict Bool.pick value built ready_without even for manual
+# targets (discarded), and the eligible conjunction walked active/pending/
+# ready even at cap. Match manual/cap first and skip the builds.
+def enqueue.readied(man: Bool, +ready: List<&2, CardReady>, +target: Target, +url: String) -> List<&2, CardReady>:
+  match man:
+    case True{}: ready
+    case False{}: ready_without(ready, target, url)
+
 def enqueue.on(hit: Bool, +state: State, +target: Target, +url: String) -> State:
   match hit:
     case False{}: state
@@ -227,7 +245,26 @@ def enqueue.on(hit: Bool, +state: State, +target: Target, +url: String) -> State
       match state:
         case State{on, +gen, +ticket, active, pending, +ready}:
           State{on, gen, (ticket + 1n : Nat), active, List.append(&2, Request, pending, [Request{target, url, gen, ticket}]),
-            Bool.pick(List<&2, CardReady>, manual(target), ready_without(ready, target, url), ready)}
+            enqueue.readied(manual(target), ready, target, url)}
+
+def enqueue.gated(man: Bool, +state: State, +target: Target, +url: String) -> State:
+  match man:
+    case True{}:
+      match state:
+        case State{on, +gen, +ticket, +active, +pending, +ready}:
+          enqueue.on(Bool.not(active_has(active, target, url, gen) || request_has(pending, target, url, gen)),
+            State{on, gen, ticket, active, pending, ready}, target, url)
+    case False{}:
+      match state:
+        case State{on, +gen, +ticket, +active, +pending, +ready}:
+          enqueue.on(Bool.not(active_has(active, target, url, gen) || request_has(pending, target, url, gen))
+            && Bool.not(ready_has(ready, target, url)),
+            State{on, gen, ticket, active, pending, ready}, target, url)
+
+def enqueue.roomed(room: Bool, +state: State, +target: Target, +url: String) -> State:
+  match room:
+    case False{}: state
+    case True{}: enqueue.gated(manual(target), state, target, url)
 
 def enqueue.eligible(eligible: Bool, +state: State, +target: Target, +url: String) -> State:
   match eligible:
@@ -235,9 +272,7 @@ def enqueue.eligible(eligible: Bool, +state: State, +target: Target, +url: Strin
     case True{}:
       match state:
         case State{on, +gen, +ticket, +active, +pending, +ready}:
-          enqueue.on(Nat.is_lt(List.length(&2, Request, pending), CAP())
-            && Bool.not(active_has(active, target, url, gen) || request_has(pending, target, url, gen))
-            && (manual(target) || Bool.not(ready_has(ready, target, url))),
+          enqueue.roomed(Nat.is_lt(List.length(&2, Request, pending), CAP()),
             State{on, gen, ticket, active, pending, ready}, target, url)
 
 # Manual sources mirror Media: any nonempty path or URL, helper-validated.
@@ -285,8 +320,41 @@ def dedup(xs: List<&2, Candidate>, +seen: List<&2, Candidate>) -> List<&2, Candi
 
 # Text completions are cheap and carry no native token, so visible admission
 # needs newest-first dedup only, not the media visible/hidden partition.
+# D220: sorting everything then quadratic-deduping for 8 survivors walked
+# seen (all uniques) per element. Walk the sorted list once, keeping at most
+# CAP uniques: identical output (take(CAP) of the full dedup), linear in the
+# walked prefix plus the one sort.
+# D220: bounded top-K selection with dedup during insertion. The dup verdict
+# travels as data into two single-use picker helpers (match on their own
+# params); go itself only matches params and recurses directly, so no
+# continuation captures anything.
+def newest.pickKept(+dup: Bool, +kept: List<&2, Candidate>, +target: Target, +url: String) -> List<&2, Candidate>:
+  match dup:
+    case True{}: kept
+    case False{}: Candidate{target, url} <> kept
+
+def newest.pickLeft(+dup: Bool, +q: Nat) -> Nat:
+  match dup:
+    case True{}: Nat.add(1n, q)
+    case False{}: q
+
+def newest.go(+fuel: Nat, +xs: List<&2, Candidate>, +kept: List<&2, Candidate>, +left: Nat) -> List<&2, Candidate>:
+  match fuel:
+    case 0n: List.reverse(&2, Candidate, kept)
+    case 1n+p:
+      match xs:
+        case Nil{}: List.reverse(&2, Candidate, kept)
+        case Con{Candidate{+target, +url}, +tail}:
+          match left:
+            case 0n: List.reverse(&2, Candidate, kept)
+            case 1n+q:
+              +dup = candidate_has(kept, target, url)
+              newest.go(p, tail, newest.pickKept(dup, kept, target, url), newest.pickLeft(dup, q))
+
 def newest(+xs: List<&2, Candidate>) -> List<&2, Candidate>:
-  List.take(&2, Candidate, dedup(List.sort(~Candidate, ~candidate_newest, xs), Nil{}), CAP())
+  # Sort newest-first first (as before): the bounded walk below keeps the
+  # first CAP uniques in that order, identical to take(CAP, dedup(sort)).
+  newest.go(Nat.add(1n, List.length(&2, Candidate, xs)), List.sort(~Candidate, ~candidate_newest, xs), Nil{}, CAP())
 
 def enqueue_candidates(+xs: List<&2, Candidate>, state: State) -> State:
   enqueue_candidates.go(newest(xs), state)
@@ -545,11 +613,17 @@ def line_at(lines: List<&2, Cl.Line>, index: Nat) -> Maybe<&2, Cl.Line>:
         case 0n: Some{line}
         case 1n+p: line_at(tail, p)
 
-def visible_rows(rows: List<&2, V.AnchoredRow>) -> List<&2, Candidate>:
+# D219: the head-first append re-walked the accumulated tail per row
+# (O(V^2)). Cons-assemble reversed chunks, then reverse once: per-row work
+# is O(mine) and the total is linear in the candidate count.
+def visible_rows.go(+rows: List<&2, V.AnchoredRow>, +acc: List<&2, Candidate>) -> List<&2, Candidate>:
   match rows:
-    case Nil{}: Nil{}
+    case Nil{}: List.reverse(&2, Candidate, acc)
     case Con{V.AnchoredRow{_, _, +line}, tail}:
-      List.append(&2, Candidate, visible_line(Some{line}), visible_rows(tail))
+      visible_rows.go(tail, List.append(&2, Candidate, List.reverse(&2, Candidate, visible_line(Some{line})), acc))
+
+def visible_rows(rows: List<&2, V.AnchoredRow>) -> List<&2, Candidate>:
+  visible_rows.go(rows, Nil{})
 
 # Prefer when the caller already holds rows from
 # V.visible_anchored_panes_media_cards_iso_pends. Live observe

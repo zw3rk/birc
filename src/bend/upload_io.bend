@@ -20,12 +20,29 @@ def HTTP_PREFIX() -> String:
 def http_rejection(+status: U32) -> Bool:
   U32.is_ge(status, 100) && U32.is_le(status, 599) && Bool.not(U32.is_eq(status, 200))
 
+# D216: the canonical envelope (`HTTP_PREFIX ++ show(status) ++ ")\n"`) was
+# built on every error path, even when the code/rejection gates discarded it.
+# The cheap numeric gates come first now; the envelope builds only when both
+# hold. Verdicts are unchanged.
+def http_status.exact(ok: Bool, +status: U32) -> U32:
+  match ok:
+    case False{}: 0
+    case True{}: status
+
+def http_status.rejected(rej: Bool, +status: U32, +stderr: String) -> U32:
+  match rej:
+    case False{}: 0
+    case True{}: http_status.exact(String.eq(stderr, HTTP_PREFIX() ++ U32.show(status) ++ ")\n"), status)
+
+def http_status.known(five: Bool, +status: U32, +stderr: String) -> U32:
+  match five:
+    case False{}: 0
+    case True{}: http_status.rejected(http_rejection(status), status, stderr)
+
 def http_status.read(got: Maybe<&2, U32>, +code: U32, +stderr: String) -> U32:
   match got:
     case None{}: 0
-    case Some{+status}:
-      Bool.pick(U32, U32.is_eq(code, 5) && http_rejection(status)
-        && String.eq(stderr, HTTP_PREFIX() ++ U32.show(status) ++ ")\n"), status, 0)
+    case Some{+status}: http_status.known(U32.is_eq(code, 5), status, stderr)
 
 # Admit only the exact canonical three-digit envelope. No body, reason phrase,
 # path, escape sequence, suffix, or OS error can enter this numeric channel.

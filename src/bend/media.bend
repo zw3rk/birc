@@ -76,6 +76,14 @@ def targets.keep(hit: Bool, url: String, k: Unit -> List<&2, String>) -> List<&2
     case True{}: url <> k(Unit{})
     case False{}: k(Unit{})
 
+# D87: the `previous ++ text` append was built even for styled runs that
+# select `""`, then discarded. A pure selector chooses the carried string
+# first; the append constructs only in the taken arm.
+def targets.prev(plain: Bool, +previous: String, +text: String) -> String:
+  match plain:
+    case True{}: previous ++ text
+    case False{}: ""
+
 # Consume the same boundary-aware runs the view paints and /open collects:
 # style bytes split runs, so glued forgeries and style-infixed URLs never
 # autofetch while genuine styled images still do.
@@ -85,7 +93,7 @@ def targets.go(xs: List<&2, Ws.SRun>, +previous: String) -> List<&2, String>:
     case Con{Ws.SRun{+attrs, _, _, +text, url}, +tail}:
       match url:
         case None{}:
-          targets.go(tail, Bool.pick(String, U32.is_eq(attrs, 0), previous ++ text, ""))
+          targets.go(tail, targets.prev(U32.is_eq(attrs, 0), previous, text))
         case Some{+exact}:
           targets.keep(media_run_hit(previous, exact, tail),
             exact, _ => targets.go(tail, ""))

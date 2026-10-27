@@ -160,8 +160,18 @@ def fresh.ok(+st: State, +scope: String, +id: Nat, ok: Bool) -> Bool:
     case True{}: fresh.got(id, hi_of(st, scope))
     case False{}: False{}
 
+# D208: single mark-list walk. The old shape (`admitted` then `fresh.ok`)
+# walked the <=8-scope list twice per admitted event; the lookup result is
+# threaded into the single arm that needs it. `admitted`/`is_known`/`fresh.ok`
+# are retained untouched (now unreferenced) for seam stability; `room_for`
+# still serves `remember.admit`.
+def fresh.known(got: Maybe<&2, Nat>, +st: State, +id: Nat) -> Bool:
+  match got:
+    case None{}: room_for(st)
+    case Some{hi}: fresh.hi(id, hi)
+
 def fresh(+st: State, +scope: String, +id: Nat) -> Bool:
-  fresh.ok(st, scope, id, admitted(st, scope))
+  fresh.known(hi_of(st, scope), st, id)
 
 def bump.set(hit: Bool, +s: String, +hi: Nat, +id: Nat) -> Mark:
   match hit:
@@ -264,15 +274,20 @@ def ev_lt(+a: NotifyEvent, +b: NotifyEvent) -> Bool:
   match a:
     case NotifyEvent{+ida, +sa, _, _, _, _, _}: ev_lt.b(b, ida, sa)
 
-def sort_inserted(lt: Bool, +ev: NotifyEvent, +h: NotifyEvent, +t: List<&2, NotifyEvent>, +rec: List<&2, NotifyEvent>) -> List<&2, NotifyEvent>:
+# Miss arm is a lazy continuation: Bend evaluates arguments eagerly, so the
+# tail walk must live inside the taken arm (links.bend alias_step idiom).
+# D86: the head-insert path used to pay the full tail walk before discarding it.
+def sort_inserted(lt: Bool, +ev: NotifyEvent, +h: NotifyEvent, +t: List<&2, NotifyEvent>, k: Unit -> List<&2, NotifyEvent>) -> List<&2, NotifyEvent>:
   match lt:
     case True{}: ev <> h <> t
-    case False{}: rec
+    case False{}: k(Unit{})
 
 def sort_insert(+ev: NotifyEvent, +sorted: List<&2, NotifyEvent>) -> List<&2, NotifyEvent>:
   match sorted:
     case Nil{}: ev <> Nil{}
-    case Con{+h, +t}: sort_inserted(ev_lt(ev, h), ev, h, t, h <> sort_insert(ev, t))
+    case Con{+h, +t}:
+      +lt = ev_lt(ev, h)
+      sort_inserted(lt, ev, h, t, _ => h <> sort_insert(ev, t))
 
 def sort_events(+evs: List<&2, NotifyEvent>) -> List<&2, NotifyEvent>:
   match evs:
@@ -341,10 +356,23 @@ def enqueue.admit(full: Bool, +pending: List<&2, Req>, +r: Req) -> Queue:
     case True{}: Queue{pending}
     case False{}: Queue{List.append(&2, Req, pending, r <> Nil{})}
 
+# D209: single counting walk with early full exit. The old shape paid a full
+# `List.length` walk and then a second `List.append` walk; the fuel stops at
+# QUEUE_CAP (a full queue returns the original list after at most CAP steps)
+# and the append walk runs only when the queue has room. `enqueue.admit` is
+# retained untouched for seam stability.
+def enqueue.go(fuel: Nat, +xs: List<&2, Req>, +r: Req, +orig: List<&2, Req>) -> Queue:
+  match fuel:
+    case 0n: Queue{orig}
+    case 1n+p:
+      match xs:
+        case Nil{}: Queue{List.append(&2, Req, orig, r <> Nil{})}
+        case Con{_, t}: enqueue.go(p, t, r, orig)
+
 def enqueue(q: Queue, r: Req) -> Queue:
   match q:
     case Queue{+pending}:
-      enqueue.admit(Nat.is_ge(List.length(&2, Req, pending), QUEUE_CAP()), pending, r)
+      enqueue.go(QUEUE_CAP(), pending, r, pending)
 
 def enqueue_all(+q: Queue, +rs: List<&2, Req>) -> Queue:
   List.foldl(~&2, ~Req, ~Queue, ~enqueue, rs, q)
@@ -357,8 +385,12 @@ def take_jobs(+q: Queue, +n: Nat) -> Queue & List<&2, Req>:
 # Single-handoff drain: one call hands the whole bounded queue to the single
 # worker, FIFO. The worker delivers the handed list one job at a time; the
 # queue keeps only what was never handed (nothing here: drain_all takes all).
+# D209: draining via length + drop + take is three walks for a result that is
+# provably (empty, whole); matching the queue directly performs no walk.
+# `take_jobs` keeps its partial-take callers in the test seam.
 def drain_all(+q: Queue) -> Queue & List<&2, Req>:
-  take_jobs(q, queue_len(q))
+  match q:
+    case Queue{+pending}: (Queue{Nil{}}, pending)
 
 # ---- staged dispatch (marks on admit) ----------------------------------------
 # decide() advances marks for every fresh event, even when the bounded queue
@@ -407,8 +439,16 @@ def stage_step(acc: Stage, ev: NotifyEvent) -> Stage:
     case Stage{+st, +q, +reqs, +hi, +user, +pass}:
       stage_step.ev(st, q, reqs, hi, ev, user, pass)
 
+# D210: a disabled chunk used to pay the full insertion sort before discarding
+# it in the `send=False` arm. The fold over an empty admission is the identity
+# (reqs stay Nil, hi stays floor), so a disabled state returns it directly.
+def stage.gated(on: Bool, +st: State, +events: List<&2, NotifyEvent>, +user: String, +pass: String, +q: Queue, +floor: Nat) -> Stage:
+  match on:
+    case False{}: Stage{st, q, Nil{}, floor, user, pass}
+    case True{}: List.foldl(~&2, ~NotifyEvent, ~Stage, ~stage_step, sort_events(events), Stage{st, q, Nil{}, floor, user, pass})
+
 def stage(+st: State, +events: List<&2, NotifyEvent>, +user: String, +pass: String, +q: Queue, +floor: Nat) -> Stage:
-  List.foldl(~&2, ~NotifyEvent, ~Stage, ~stage_step, sort_events(events), Stage{st, q, Nil{}, floor, user, pass})
+  stage.gated(enabled(st), st, events, user, pass, q, floor)
 
 # ---- batch-claimed archive exclusion (per-ID, no floor bump) ------------------
 # H5's batch claim arrives as an ID set at the dispatch seam. Claimed rows are
@@ -486,8 +526,17 @@ def claim_union(+stored: List<&2, Nat>, +fresh: List<&2, Nat>) -> List<&2, Nat>:
   +combined = List.append(&2, Nat, stored, claim_fresh(fresh, stored))
   List.take(&2, Nat, combined, CLAIM_CAP())
 
+# D207: plain steps (no durable claims) used to rebuild the claim set three
+# times per chunk (prune walk + append rebuild + take rebuild) for an empty
+# result. An empty stored set skips the prune; a fully empty union returns
+# directly — both provably identical to the walked result.
 def claim_union_floor(+stored: List<&2, Nat>, +fresh: List<&2, Nat>, +floor: Nat) -> List<&2, Nat>:
-  claim_union(claim_prune(stored, floor), fresh)
+  match stored:
+    case Nil{}:
+      match fresh:
+        case Nil{}: Nil{}
+        case Con{_, _}: claim_union(Nil{}, fresh)
+    case Con{_, _}: claim_union(claim_prune(stored, floor), fresh)
 
 # Session-free mention/DM classification. Moved from session.bend;
 # session keeps Sess.notify_* wrappers.
@@ -534,14 +583,23 @@ def notify_collect_line.keep(keep: Bool, +scope: String, +author: String, +targe
     case True{}: NotifyEvent{id, scope, author, target, text, dm, mention} <> tail
     case False{}: tail
 
+# D110: below-cutoff rows — the majority on every dispatch — used to pay full
+# DM/mention classification (ieq folds, casemap folds, substring scan) before
+# the cutoff test discarded them. The cutoff gates first now (the sibling
+# `notify_claims_lines` shape); classification runs only on surviving rows.
+def notify_collect_lines.live(live: Bool, +k: Cl.LineKind, +scope: String, +author: String, +target: String, +text: String, +nick: String, +id: Nat, +query: Bool, +tail: List<&2, NotifyEvent>) -> List<&2, NotifyEvent>:
+  match live:
+    case False{}: tail
+    case True{}:
+      +dm = notify_line_dm(query, author, nick, k)
+      +men = notify_is_mention(author, text, nick, k)
+      notify_collect_line.keep(men || dm, scope, author, target, text, id, dm, men, tail)
+
 def notify_collect_lines(lines: List<&2, Cl.Line>, +scope: String, +target: String, +nick: String, +cutoff: Nat, +query: Bool) -> List<&2, NotifyEvent>:
   match lines:
     case Nil{}: Nil{}
     case Con{Cl.Line{+k, _, +text, +author, +id}, t}:
-      +dm = notify_line_dm(query, author, nick, k)
-      +men = notify_is_mention(author, text, nick, k)
-      +tail = notify_collect_lines(t, scope, target, nick, cutoff, query)
-      notify_collect_line.keep(Nat.is_gt(id, cutoff) && (men || dm), scope, author, target, text, id, dm, men, tail)
+      notify_collect_lines.live(Nat.is_gt(id, cutoff), k, scope, author, target, text, nick, id, query, notify_collect_lines(t, scope, target, nick, cutoff, query))
 
 def notify_collect_bufs(bufs: List<&2, Cl.Buffer>, +scope: String, +nick: String, +cutoff: Nat, +index: Nat) -> List<&2, NotifyEvent>:
   match bufs:

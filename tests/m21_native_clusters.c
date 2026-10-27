@@ -66,7 +66,7 @@ static int clipped(const char *text, size_t expected) {
   const char *labels[1];
   Env e = fixture_env();
   Term list = fixture_cons((Term)(uintptr_t)text, term_pak(CID_NIL, 0));
-  CHECK(birc_str_list(e, list, store, labels, 1) == 1);
+  CHECK(birc_str_list(e, NULL, list, store, labels, 1) == 1);
   CHECK(labels[0] == store[0]);
   CHECK(strlen(labels[0]) == expected);
   CHECK(!memcmp(labels[0], text, expected));
@@ -151,7 +151,7 @@ static int tabs(void) {
   memcpy(text + 63, "X", 2);
   names = fixture_cons((Term)(uintptr_t)"#first", fixture_cons((Term)(uintptr_t)text,
             fixture_cons((Term)(uintptr_t)"#last", term_pak(CID_NIL, 0))));
-  CHECK(birc_str_list(e, names, store, labels, 3) == 3);
+  CHECK(birc_str_list(e, NULL, names, store, labels, 3) == 3);
   CHECK(!strcmp(labels[0], "#first") && !strcmp(labels[2], "#last"));
   CHECK(strlen(labels[1]) == 63 && !memcmp(labels[1] + 52, "👩‍💻", strlen("👩‍💻")));
   CHECK(timui_tabs_layout(labels, 3, 1, spans, 3) == 73);

@@ -36,19 +36,33 @@ def entry_is_cm(+cm: String, +e: Entry, +target: String, +nick: String) -> Bool:
     case Entry{+t, +n, _, _}:
       Cl.buf_eq_cm(cm, t, target) && Cl.buf_eq_cm(cm, n, nick)
 
+# D227: the strict `||` evaluated the tail even on a head hit, defeating the
+# early exit (plus two ieq folds per step). The tail walk is a lazy
+# continuation now (links.bend alias_step idiom): it runs only in the miss
+# arm. Hit and miss verdicts are unchanged.
+def has_entries.hit(hit: Bool, k: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: k(Unit{})
+
 def has_entries(xs: List<&2, Entry>, +target: String, +nick: String) -> Bool:
   match xs:
     case Nil{}:
       False{}
     case Con{+h, t}:
-      entry_is(h, target, nick) || has_entries(t, target, nick)
+      has_entries.hit(entry_is(h, target, nick), _ => has_entries(t, target, nick))
+
+def has_entries_cm.hit(hit: Bool, k: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: k(Unit{})
 
 def has_entries_cm(+cm: String, xs: List<&2, Entry>, +target: String, +nick: String) -> Bool:
   match xs:
     case Nil{}:
       False{}
     case Con{+h, t}:
-      entry_is_cm(cm, h, target, nick) || has_entries_cm(cm, t, target, nick)
+      has_entries_cm.hit(entry_is_cm(cm, h, target, nick), _ => has_entries_cm(cm, t, target, nick))
 
 def has(+state: State, +target: String, +nick: String) -> Bool:
   match state:
@@ -124,15 +138,26 @@ def upsert.pick(+rest: List<&2, Entry>, +e: Entry, existed: Bool) -> List<&2, En
     case False{}:
       append_new(rest, e, Nat.is_lt(List.length(&2, Entry, rest), MAX_TYPERS()))
 
+# D226: the miss path paid two full scans (`has_entries` walk 1, then
+# `remove_one` walk 2 which provably removes nothing and rebuilds an equal
+# list). Existence gates first now: the miss arm reuses the list directly
+# (identical to what `remove_one` would rebuild), the hit arm removes as
+# before. Insert position and cap behavior are unchanged.
+def upsert.exists(found: Bool, +xs: List<&2, Entry>, +target: String, +nick: String, status: Irc.TypingStatus, +now_ms: U32) -> List<&2, Entry>:
+  match found:
+    case True{}: upsert.pick(remove_one(xs, target, nick), Entry{target, nick, status, now_ms}, True{})
+    case False{}: upsert.pick(xs, Entry{target, nick, status, now_ms}, False{})
+
 def upsert(+xs: List<&2, Entry>, +target: String, +nick: String, status: Irc.TypingStatus, +now_ms: U32) -> List<&2, Entry>:
-  +existed = has_entries(xs, target, nick)
-  +rest = remove_one(xs, target, nick)
-  upsert.pick(rest, Entry{target, nick, status, now_ms}, existed)
+  upsert.exists(has_entries(xs, target, nick), xs, target, nick, status, now_ms)
+
+def upsert_cm.exists(found: Bool, +cm: String, +xs: List<&2, Entry>, +target: String, +nick: String, status: Irc.TypingStatus, +now_ms: U32) -> List<&2, Entry>:
+  match found:
+    case True{}: upsert.pick(remove_one_cm(cm, xs, target, nick), Entry{target, nick, status, now_ms}, True{})
+    case False{}: upsert.pick(xs, Entry{target, nick, status, now_ms}, False{})
 
 def upsert_cm(+cm: String, +xs: List<&2, Entry>, +target: String, +nick: String, status: Irc.TypingStatus, +now_ms: U32) -> List<&2, Entry>:
-  +existed = has_entries_cm(cm, xs, target, nick)
-  +rest = remove_one_cm(cm, xs, target, nick)
-  upsert.pick(rest, Entry{target, nick, status, now_ms}, existed)
+  upsert_cm.exists(has_entries_cm(cm, xs, target, nick), cm, xs, target, nick, status, now_ms)
 
 def apply_event(+state: State, e: Irc.TypingEvent, +now_ms: U32) -> State:
   match state:

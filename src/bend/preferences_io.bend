@@ -30,18 +30,26 @@ def resolve_prefs_path.default(xdg: Result<&1, &1, U32 & String, String>, home: 
     case Done{+value}: resolve_prefs_path.xdg_empty(String.is_empty(value), value, home)
     case Fail{_}: resolve_prefs_path.home(home)
 
-def resolve_prefs_path.env(b: Result<&1, &1, U32 & String, String>, xdg: Result<&1, &1, U32 & String, String>, home: Result<&1, &1, U32 & String, String>) -> String:
+# D173: an explicit BIRC_PREFERENCES answers without touching XDG/HOME.
+# Each job resolves the helper name once and threads it through (run_named),
+# so H.run never re-resolves the same variable mid-job; the path likewise
+# resolves once per native job. Hoisting either out of the job entirely
+# (resolve once at startup) needs signature and caller changes outside this
+# lane.
+def resolve_prefs_path.b(b: Result<&1, &1, U32 & String, String>) -> IO(String):
   match b:
-    case Done{+val}:
-      Bool.pick(String, String.eq(val, "none") || String.is_empty(val), "", val)
-    case Fail{_}: resolve_prefs_path.default(xdg, home)
+    case Done{+val}: IO.pure(String, Bool.pick(String, String.eq(val, "none") || String.is_empty(val), "", val))
+    case Fail{_}:
+      do IO<String>:
+        xdg : Result<&1, &1, U32 & String, String> <- IO.get_env("XDG_CONFIG_HOME")
+        home : Result<&1, &1, U32 & String, String> <- IO.get_env("HOME")
+        return resolve_prefs_path.default(xdg, home)
 
 def resolve_prefs_path() -> IO(String):
   do IO<String>:
     b : Result<&1, &1, U32 & String, String> <- IO.get_env("BIRC_PREFERENCES")
-    xdg : Result<&1, &1, U32 & String, String> <- IO.get_env("XDG_CONFIG_HOME")
-    home : Result<&1, &1, U32 & String, String> <- IO.get_env("HOME")
-    return resolve_prefs_path.env(b, xdg, home)
+    out : String <- resolve_prefs_path.b(b)
+    return out
 
 law prefs_load:
   String -> String -> U32 -> IO(U32 & String)
@@ -97,20 +105,20 @@ def load.native(+host: String, +port: U32) -> IO(Maybe<&2, P.Preferences> & U32)
     path : String <- resolve_prefs_path()
     load.native.got(path, host, port)
 
-def load.helper(+host: String, +port: U32) -> IO(Maybe<&2, P.Preferences> & U32):
+def load.helper(+helper: String, +host: String, +port: U32) -> IO(Maybe<&2, P.Preferences> & U32):
   do IO<Maybe<&2, P.Preferences> & U32>:
-    got : Result<&1, &1, U32 & String, U32 & (String & String)> <- H.run(spec(P.MAX_WIRE()), ["read", host, U32.show(port)], "")
+    got : Result<&1, &1, U32 & String, U32 & (String & String)> <- H.run_named(helper, spec(P.MAX_WIRE()), ["read", host, U32.show(port)], "")
     return load_result(got)
 
-def load.choose(native: Bool, +host: String, +port: U32) -> IO(Maybe<&2, P.Preferences> & U32):
+def load.choose(native: Bool, +helper: String, +host: String, +port: U32) -> IO(Maybe<&2, P.Preferences> & U32):
   match native:
     case True{}: load.native(host, port)
-    case False{}: load.helper(host, port)
+    case False{}: load.helper(helper, host, port)
 
 def load(host: String, port: U32) -> IO(Maybe<&2, P.Preferences> & U32):
   do IO<Maybe<&2, P.Preferences> & U32>:
-    helper : String <- program()
-    load.choose(String.eq(helper, "native"), host, port)
+    +helper : String <- program()
+    load.choose(String.eq(helper, "native"), helper, host, port)
 
 def save_result.exit(code: U32, out: String, err: String) -> U32:
   match code:
@@ -135,23 +143,23 @@ def save.native(+host: String, +port: U32, +body: String) -> IO(U32):
     path : String <- resolve_prefs_path()
     save.native.got(path, host, port, body)
 
-def save.helper(+host: String, +port: U32, +body: String) -> IO(U32):
+def save.helper(+helper: String, +host: String, +port: U32, +body: String) -> IO(U32):
   do IO<U32>:
-    result : Result<&1, &1, U32 & String, U32 & (String & String)> <- H.run(spec(4096), ["write", host, U32.show(port)], body)
+    result : Result<&1, &1, U32 & String, U32 & (String & String)> <- H.run_named(helper, spec(4096), ["write", host, U32.show(port)], body)
     return save_result(result)
 
-def save.choose(native: Bool, +host: String, +port: U32, +body: String) -> IO(U32):
+def save.choose(native: Bool, +helper: String, +host: String, +port: U32, +body: String) -> IO(U32):
   match native:
     case True{}: save.native(host, port, body)
-    case False{}: save.helper(host, port, body)
+    case False{}: save.helper(helper, host, port, body)
 
 def save.serialized(host: String, port: U32, got: Maybe<&2, String>) -> IO(U32):
   match got:
     case None{}: IO.pure(U32, 2)
     case Some{body}:
       do IO<U32>:
-        helper : String <- program()
-        save.choose(String.eq(helper, "native"), host, port, body)
+        +helper : String <- program()
+        save.choose(String.eq(helper, "native"), helper, host, port, body)
 
 def save(host: String, port: U32, prefs: P.Preferences) -> IO(U32):
   save.serialized(host, port, P.serialize(prefs))

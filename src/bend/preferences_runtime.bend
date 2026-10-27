@@ -66,11 +66,73 @@ def canonical(prefs: P.Preferences) -> P.Preferences:
     case P.Preferences{j, t, m, h, c, a, b, i, u, channels, _, +th, nk}:
       P.Preferences{j, t, m, h, c, a, b, i, u, channels, True{}, th, nk}
 
-def equal(a: P.Preferences, b: P.Preferences) -> Bool:
-  String.eq(P.show(canonical(a)), P.show(canonical(b)))
-
 def changed_bool(+a: Bool, +b: Bool) -> Bool:
   (a && Bool.not(b)) || (Bool.not(a) && b)
+
+# D64/D174: structural equality with early exit. show(canonical()) is
+# injective in the compared fields (fixed settings order, kind-prefixed
+# records, canonical known), so this matches the old serialization verdict
+# exactly, but an unchanged snapshot never builds the 8 per-tick texts.
+# A pathological control-char record can only flip equal->different (an
+# extra save), never different->equal, so no edit is ever dropped.
+# Thunk shape mirrors links.bend alias_step: the helper never names
+# equal.strings, so the only recursion is the direct self-call.
+def equal.strings.step(eq: Bool, k: Unit -> Bool) -> Bool:
+  match eq:
+    case False{}: False{}
+    case True{}: k(Unit{})
+
+def equal.strings(xs: List<&2, String>, ys: List<&2, String>) -> Bool:
+  match xs:
+    case Nil{}:
+      match ys:
+        case Nil{}: True{}
+        case _: False{}
+    case Con{+h, +t}:
+      match ys:
+        case Nil{}: False{}
+        case Con{+h2, +t2}: equal.strings.step(String.eq(h, h2), _ => equal.strings(t, t2))
+
+def equal.theme(a: Theme.Id, b: Theme.Id) -> Bool:
+  match a:
+    case Theme.Dark{}:
+      match b:
+        case Theme.Dark{}: True{}
+        case _: False{}
+    case Theme.Light{}:
+      match b:
+        case Theme.Light{}: True{}
+        case _: False{}
+    case Theme.Mono{}:
+      match b:
+        case Theme.Mono{}: True{}
+        case _: False{}
+
+def equal.scalars(j0: Bool, t0: Bool, m0: Bool, h0: Bool, c0: U32, a0: Bool, b0: Bool, i0: Bool, nk0: Bool, th0: Theme.Id, j1: Bool, t1: Bool, m1: Bool, h1: Bool, c1: U32, a1: Bool, b1: Bool, i1: Bool, nk1: Bool, th1: Theme.Id) -> Bool:
+  Bool.not(changed_bool(j0, j1)) && Bool.not(changed_bool(t0, t1)) && Bool.not(changed_bool(m0, m1))
+    && Bool.not(changed_bool(h0, h1)) && U32.is_eq(c0, c1) && Bool.not(changed_bool(a0, a1))
+    && Bool.not(changed_bool(b0, b1)) && Bool.not(changed_bool(i0, i1)) && Bool.not(changed_bool(nk0, nk1))
+    && equal.theme(th0, th1)
+
+def equal.content.channels(ok: Bool, +ch0: List<&2, String>, +ch1: List<&2, String>) -> Bool:
+  match ok:
+    case False{}: False{}
+    case True{}: equal.strings(ch0, ch1)
+
+def equal.content.mutes(ok: Bool, +u0: List<&2, String>, +u1: List<&2, String>, +ch0: List<&2, String>, +ch1: List<&2, String>) -> Bool:
+  match ok:
+    case False{}: False{}
+    case True{}: equal.content.channels(equal.strings(u0, u1), ch0, ch1)
+
+def equal.content(a: P.Preferences, b: P.Preferences) -> Bool:
+  match a:
+    case P.Preferences{j0, t0, m0, h0, c0, a0, b0, i0, u0, ch0, _, th0, nk0}:
+      match b:
+        case P.Preferences{j1, t1, m1, h1, c1, a1, b1, i1, u1, ch1, _, th1, nk1}:
+          equal.content.mutes(equal.scalars(j0, t0, m0, h0, c0, a0, b0, i0, nk0, th0, j1, t1, m1, h1, c1, a1, b1, i1, nk1, th1), u0, u1, ch0, ch1)
+
+def equal(a: P.Preferences, b: P.Preferences) -> Bool:
+  equal.content(a, b)
 
 def edits(prior: Edits, before: P.Preferences, after: P.Preferences) -> Edits:
   match prior:
@@ -79,7 +141,9 @@ def edits(prior: Edits, before: P.Preferences, after: P.Preferences) -> Edits:
         case P.Preferences{j0, t0, m0, h0, c0, a0, b0, i0, u0, _, _, th0, nk0}:
           match after:
             case P.Preferences{j1, t1, m1, h1, c1, a1, b1, i1, u1, _, _, th1, nk1}:
-              Edits{j || changed_bool(j0, j1), t || changed_bool(t0, t1), m || changed_bool(m0, m1), h || changed_bool(h0, h1), c || Bool.not(U32.is_eq(c0, c1)), a || changed_bool(a0, a1), b || changed_bool(b0, b1), i || changed_bool(i0, i1), u || Bool.not(String.eq(P.records_text(u0, "mute"), P.records_text(u1, "mute"))), th || Bool.not(String.eq(Theme.show(th0), Theme.show(th1))), nk || changed_bool(nk0, nk1)}
+              # D64: structural field diffs; the old records_text/Theme.show
+              # builds serialized both sides on every tick.
+              Edits{j || changed_bool(j0, j1), t || changed_bool(t0, t1), m || changed_bool(m0, m1), h || changed_bool(h0, h1), c || Bool.not(U32.is_eq(c0, c1)), a || changed_bool(a0, a1), b || changed_bool(b0, b1), i || changed_bool(i0, i1), u || Bool.not(equal.strings(u0, u1)), th || Bool.not(equal.theme(th0, th1)), nk || changed_bool(nk0, nk1)}
 
 def mark.field(+name: String, mask: Edits) -> Edits:
   match mask:
@@ -95,6 +159,18 @@ def mask_text(mask: Edits) -> String:
   match mask:
     case Edits{j, t, m, h, c, a, b, i, u, th, nk}: P.bit(j) ++ P.bit(t) ++ P.bit(m) ++ P.bit(h) ++ P.bit(c) ++ P.bit(a) ++ P.bit(b) ++ P.bit(i) ++ P.bit(u) ++ P.bit(th) ++ P.bit(nk)
 
+# D170: any set bit means a new edit; mask_text serialized both 11-char
+# masks on every tick only to compare them.
+def edits.any(mask: Edits) -> Bool:
+  match mask:
+    case Edits{j, t, m, h, c, a, b, i, u, th, nk}: j || t || m || h || c || a || b || i || u || th || nk
+
+def edits.fresh(a: Edits, b: Edits) -> Edits:
+  match a:
+    case Edits{j0, t0, m0, h0, c0, a0, b0, i0, u0, th0, nk0}:
+      match b:
+        case Edits{j1, t1, m1, h1, c1, a1, b1, i1, u1, th1, nk1}: Edits{j0 && Bool.not(j1), t0 && Bool.not(t1), m0 && Bool.not(m1), h0 && Bool.not(h1), c0 && Bool.not(c1), a0 && Bool.not(a1), b0 && Bool.not(b1), i0 && Bool.not(i1), u0 && Bool.not(u1), th0 && Bool.not(th1), nk0 && Bool.not(nk1)}
+
 def mark.changed(changed: Bool, state: State, mask: Edits) -> State:
   match changed:
     case False{}: state
@@ -108,7 +184,9 @@ def mark(+state: State, names: List<&2, String>) -> State:
   match state:
     case State{_, _, _, _, _, _, _, _, _, +mask, _, _, _}:
       +next = mark.names(names, mask)
-      mark.changed(Bool.not(String.eq(mask_text(mask), mask_text(next))), state, next)
+      # D170: mark.names only sets bits, so next differs from mask exactly
+      # when fresh carries a set bit; no serialization either side.
+      mark.changed(edits.any(edits.fresh(next, mask)), state, next)
     case _: state
 
 def merge(+global: Bool, keep_channels: Bool, mask: Edits, current: P.Preferences, stored: P.Preferences) -> P.Preferences:
@@ -215,12 +293,6 @@ def edits.union(a: Edits, b: Edits) -> Edits:
     case Edits{j0, t0, m0, h0, c0, a0, b0, i0, u0, th0, nk0}:
       match b:
         case Edits{j1, t1, m1, h1, c1, a1, b1, i1, u1, th1, nk1}: Edits{j0 || j1, t0 || t1, m0 || m1, h0 || h1, c0 || c1, a0 || a1, b0 || b1, i0 || i1, u0 || u1, th0 || th1, nk0 || nk1}
-
-def edits.fresh(a: Edits, b: Edits) -> Edits:
-  match a:
-    case Edits{j0, t0, m0, h0, c0, a0, b0, i0, u0, th0, nk0}:
-      match b:
-        case Edits{j1, t1, m1, h1, c1, a1, b1, i1, u1, th1, nk1}: Edits{j0 && Bool.not(j1), t0 && Bool.not(t1), m0 && Bool.not(m1), h0 && Bool.not(h1), c0 && Bool.not(c1), a0 && Bool.not(a1), b0 && Bool.not(b1), i0 && Bool.not(i1), u0 && Bool.not(u1), th0 && Bool.not(th1), nk0 && Bool.not(nk1)}
 
 # Global patches retain each endpoint's own public names.
 def globals(current: P.Preferences, endpoint: P.Preferences) -> P.Preferences:
