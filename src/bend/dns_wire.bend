@@ -201,6 +201,35 @@ def ascii_go(s: String, ok: Bool) -> Bool:
 def len_ok(+n: Nat) -> Bool:
   Nat.is_ge(n, 1n) && Nat.is_le(n, 63n)
 
+# Single validating walk (D194): one pass counts the label length with its
+# ASCII verdict, encoded as one Nat (0 = invalid, otherwise length + 1),
+# replacing the length walk plus the separate ascii walk. The encoder arms
+# below match on that code directly instead of re-walking the label for its
+# length at the EOk and push sites.
+def scan_code.bounded(ok: Bool, +n: Nat) -> Nat:
+  match ok:
+    case True{}:
+      1n+n
+    case False{}:
+      0n
+
+def scan_code.fin(ok: Bool, +n: Nat) -> Nat:
+  match ok:
+    case False{}:
+      0n
+    case True{}:
+      scan_code.bounded(Nat.is_ge(n, 1n) && Nat.is_le(n, 63n), n)
+
+def scan_code.go(+s: String, +n: Nat, ok: Bool) -> Nat:
+  match s:
+    case SNil{}:
+      scan_code.fin(ok, n)
+    case SCon{+h, t}:
+      scan_code.go(t, 1n+n, ok && U32.is_lt(Char.to_u32(h), 128))
+
+def scan_code(+lab: String) -> Nat:
+  scan_code.go(lab, 0n, True{})
+
 def label_ok_len(+lab: String, ok: Bool) -> Bool:
   match ok:
     case False{}:
@@ -209,7 +238,7 @@ def label_ok_len(+lab: String, ok: Bool) -> Bool:
       ascii_go(lab, True{})
 
 def label_ok(+lab: String) -> Bool:
-  label_ok_len(lab, len_ok(String.length(lab)))
+  Bool.not(Nat.is_eq(scan_code(lab), 0n))
 
 def u8(+n: U32) -> U32:
   U32.and(n, 255)
@@ -239,6 +268,22 @@ def lab_octets(+lab: String) -> List<&2, U32>:
 def push_lab(+acc: List<&2, U32>, +lab: String) -> List<&2, U32>:
   List.append(&2, U32, acc, U32.from_nat(String.length(lab)) <> lab_octets(lab))
 
+# D192: reversed-accumulation twin of push_lab. push_lab re-walked the whole
+# accumulated prefix per label (quadratic in label count). Segments are
+# consed newest-first onto the reversed header, so one List.reverse at the
+# end restores wire order: reverse(seg_n_rev ++ ... ++ seg_1_rev ++
+# reverse(header)) = header ++ L1 ++ ... ++ Ln, with Li = [len_i] ++
+# octets(lab_i). Total assembly is linear; emitted bytes are identical.
+def lab_octets_rev(+lab: String, +acc: List<&2, U32>) -> List<&2, U32>:
+  match lab:
+    case SNil{}:
+      acc
+    case SCon{+h, t}:
+      lab_octets_rev(t, Char.to_u32(h) <> acc)
+
+def push_lab_rev(+acc: List<&2, U32>, +lab: String) -> List<&2, U32>:
+  lab_octets_rev(lab, U32.from_nat(String.length(lab)) <> acc)
+
 def enc_err(+msg: String) -> Result<&1, &1, U32 & String, List<&2, U32>>:
   Fail{(1, msg)}
 
@@ -257,7 +302,8 @@ def encode_go(
   xs: List<&2, String>,
   acc: List<&2, U32>,
   +lab: String,
-  ok: Bool,
+  code: Nat,
+  over: Bool,
   +nlen: U32
 ) -> Result<&1, &1, U32 & String, List<&2, U32>>:
   match fuel:
@@ -268,25 +314,27 @@ def encode_go(
         case ELab{}:
           match xs:
             case Nil{}:
-              enc_ok(List.append(&2, U32, acc, 0 <> 0 <> 1 <> 0 <> 1 <> Nil{}))
+              +fwd = List.reverse(&2, U32, acc)
+              enc_ok(List.append(&2, U32, fwd, 0 <> 0 <> 1 <> 0 <> 1 <> Nil{}))
             case Con{+h, t}:
-              encode_go(p, EOk{}, t, acc, h, label_ok(h), nlen)
+              encode_go(p, EOk{}, t, acc, h, scan_code(h), False{}, nlen)
         case EOk{}:
-          match ok:
-            case False{}:
+          match code:
+            case 0n:
               enc_err("bad name")
-            case True{}:
-              +n2 = U32.add(nlen, U32.add(1, U32.from_nat(String.length(lab))))
-              encode_go(p, ELen{}, xs, acc, lab, U32.is_gt(n2, 255), n2)
+            case 1n+len:
+              +n2 = U32.add(nlen, U32.add(1, U32.from_nat(len)))
+              encode_go(p, ELen{}, xs, acc, lab, 0n, U32.is_gt(n2, 255), n2)
         case ELen{}:
-          match ok:
+          match over:
             case True{}:
               enc_err("bad name")
             case False{}:
-              encode_go(p, ELab{}, xs, push_lab(acc, lab), "", True{}, nlen)
+              encode_go(p, ELab{}, xs, push_lab_rev(acc, lab), "", 0n, False{}, nlen)
 
 def encode_xs(+id: U32, +xs: List<&2, String>) -> Result<&1, &1, U32 & String, List<&2, U32>>:
-  encode_go(Nat.add(1n, Nat.mul(3n, List.length(&2, String, xs))), ELab{}, xs, header(id), "", True{}, 1)
+  +rev_hdr = List.reverse(&2, U32, header(id))
+  encode_go(Nat.add(1n, Nat.mul(3n, List.length(&2, String, xs))), ELab{}, xs, rev_hdr, "", 0n, False{}, 1)
 
 # Remove only the terminal DNS root label. A second dot remains an empty label
 # and is rejected by the ordinary encoder validation.
@@ -320,7 +368,8 @@ def encode_edns_tail(r: Result<&1, &1, U32 & String, List<&2, U32>>) -> Result<&
       Done{List.append(&2, U32, q, opt_rr())}
 
 def encode_edns_xs(+id: U32, +xs: List<&2, String>) -> Result<&1, &1, U32 & String, List<&2, U32>>:
-  encode_edns_tail(encode_go(Nat.add(1n, Nat.mul(3n, List.length(&2, String, xs))), ELab{}, xs, header_edns(id), "", True{}, 1))
+  +rev_hdr = List.reverse(&2, U32, header_edns(id))
+  encode_edns_tail(encode_go(Nat.add(1n, Nat.mul(3n, List.length(&2, String, xs))), ELab{}, xs, rev_hdr, "", 0n, False{}, 1))
 
 def encode_edns_id(+id: U32, +host: String) -> Result<&1, &1, U32 & String, List<&2, U32>>:
   encode_edns_xs(id, String.split(without_root_dot(host), Chr{46}))
@@ -585,12 +634,19 @@ type RdN is Data:
   RdLabZ{}
   RdLabB{}
 
+# Compression jumps need absolute offsets; every sequential advance threads
+# the cursor instead (D85). Each byte used to re-drop from the packet head
+# via at_off(pkt, pos), an O(pos) walk per byte; cur_add threads the same
+# position in O(1). Only the RdHop arm rebuilds from the head, which is
+# exactly the jump target. Invariant: cur.off == pos on every sequential
+# path (each U32.add(pos, 1) pairs with a cur_add(cur, 1)).
 # checker: expected a decreasing self-call (arguments are read left to right: each passed unchanged until one shrinks) / observed read_name_go
 def read_name_go(
   fuel: Nat,
   ph: RdN,
   +pkt: List<&2, U32>,
   +pos: U32,
+  +cur: Cur,
   ret: End,
   +hops: U32,
   +acc: String,
@@ -606,57 +662,57 @@ def read_name_go(
     case 1n+p:
       match ph:
         case RdGet{}:
-          read_name_go(p, RdGot{}, pkt, pos, ret, hops, acc, lab, n, b, byte_at(at_off(pkt, pos)), False{})
+          read_name_go(p, RdGot{}, pkt, pos, cur, ret, hops, acc, lab, n, b, byte_at(cur), False{})
         case RdGot{}:
           match got:
             case None{}:
               None{}
             case Some{+x}:
-              read_name_go(p, RdKind{}, pkt, pos, ret, hops, acc, lab, n, x, None{}, U32.is_ge(x, 192))
+              read_name_go(p, RdKind{}, pkt, pos, cur, ret, hops, acc, lab, n, x, None{}, U32.is_ge(x, 192))
         case RdKind{}:
           match flag:
             case True{}:
-              read_name_go(p, RdPtr{}, pkt, pos, ret, hops, acc, lab, n, b, byte_at(at_off(pkt, U32.add(pos, 1))), False{})
+              read_name_go(p, RdPtr{}, pkt, pos, cur, ret, hops, acc, lab, n, b, byte_at(cur_add(cur, 1)), False{})
             case False{}:
-              read_name_go(p, RdRes{}, pkt, pos, ret, hops, acc, lab, n, b, None{}, U32.is_ge(b, 64))
+              read_name_go(p, RdRes{}, pkt, pos, cur, ret, hops, acc, lab, n, b, None{}, U32.is_ge(b, 64))
         case RdRes{}:
           match flag:
             case True{}:
               None{}
             case False{}:
-              read_name_go(p, RdZero{}, pkt, pos, ret, hops, acc, lab, n, b, None{}, U32.is_zero(b))
+              read_name_go(p, RdZero{}, pkt, pos, cur, ret, hops, acc, lab, n, b, None{}, U32.is_zero(b))
         case RdZero{}:
           match flag:
             case True{}:
               Some{Nm{acc, end_of(pos, ret)}}
             case False{}:
-              read_name_go(p, RdLab{}, pkt, U32.add(pos, 1), ret, hops, acc, "", b, 0, None{}, False{})
+              read_name_go(p, RdLab{}, pkt, U32.add(pos, 1), cur_add(cur, 1), ret, hops, acc, "", b, 0, None{}, False{})
         case RdPtr{}:
           match got:
             case None{}:
               None{}
             case Some{lo}:
-              read_name_go(p, RdHop{}, pkt, u16_of(U32.and(b, 63), lo), freeze_end(pos, ret), U32.add(hops, 1), acc, lab, n, 0, None{}, U32.is_ge(hops, 10))
+              read_name_go(p, RdHop{}, pkt, u16_of(U32.and(b, 63), lo), cur, freeze_end(pos, ret), U32.add(hops, 1), acc, lab, n, 0, None{}, U32.is_ge(hops, 10))
         case RdHop{}:
           match flag:
             case True{}:
               None{}
             case False{}:
-              read_name_go(p, RdGet{}, pkt, pos, ret, hops, acc, lab, n, b, None{}, False{})
+              read_name_go(p, RdGet{}, pkt, pos, at_off(pkt, pos), ret, hops, acc, lab, n, b, None{}, False{})
         case RdLab{}:
-          read_name_go(p, RdLabZ{}, pkt, pos, ret, hops, acc, lab, n, b, None{}, U32.is_zero(n))
+          read_name_go(p, RdLabZ{}, pkt, pos, cur, ret, hops, acc, lab, n, b, None{}, U32.is_zero(n))
         case RdLabZ{}:
           match flag:
             case True{}:
-              read_name_go(p, RdGet{}, pkt, pos, ret, hops, name_join(acc, lab), "", 0, 0, None{}, False{})
+              read_name_go(p, RdGet{}, pkt, pos, cur, ret, hops, name_join(acc, lab), "", 0, 0, None{}, False{})
             case False{}:
-              read_name_go(p, RdLabB{}, pkt, pos, ret, hops, acc, lab, n, b, label_byte(at_off(pkt, pos)), False{})
+              read_name_go(p, RdLabB{}, pkt, pos, cur, ret, hops, acc, lab, n, b, label_byte(cur), False{})
         case RdLabB{}:
           match got:
             case None{}:
               None{}
             case Some{c}:
-              read_name_go(p, RdLab{}, pkt, U32.add(pos, 1), ret, hops, acc, lab ++ byte(lo_byte(c)), U32.sub(n, 1), b, None{}, False{})
+              read_name_go(p, RdLab{}, pkt, U32.add(pos, 1), cur_add(cur, 1), ret, hops, acc, lab ++ byte(lo_byte(c)), U32.sub(n, 1), b, None{}, False{})
 
 def read_name(+pkt: List<&2, U32>, +off: U32) -> Maybe<&2, Nm>:
   read_name_go(
@@ -664,6 +720,7 @@ def read_name(+pkt: List<&2, U32>, +off: U32) -> Maybe<&2, Nm>:
     RdGet{},
     pkt,
     off,
+    at_off(pkt, off),
     EndOpen{},
     0,
     "",
@@ -698,6 +755,21 @@ def read_rr(+pkt: List<&2, U32>, +off: U32) -> Maybe<&2, RR>:
     +bound : Unit <- rr_bounds(U32.is_le(U32.add(cur_off(got_cur(gr)), got_v(gr)), U32.from_nat(List.length(&2, U32, pkt))))
     return RR{nm_name(nm), got_v(gt), got_v(gc), got_v(gr), cur_off(got_cur(gr)), U32.add(cur_off(got_cur(gr)), got_v(gr))}
 
+# D190: length-bound twin of read_rr. walk_an_go passes pkt unchanged through
+# every arm, so the packet length is constant for the whole walk; threading
+# it removes the per-RR full-packet length walk. read_rr stays for its
+# ipv6.bend caller.
+def read_rr_len(+pkt: List<&2, U32>, +off: U32, +plen: U32) -> Maybe<&2, RR>:
+  do Maybe<&2, RR>:
+    +nm : Nm <- read_name(pkt, off)
+    +gt : Got <- take16(at_off(pkt, nm_off(nm)))
+    +gc : Got <- take16(got_cur(gt))
+    +t0 : Got <- take16(got_cur(gc))
+    +t1 : Got <- take16(got_cur(t0))
+    +gr : Got <- take16(got_cur(t1))
+    +bound : Unit <- rr_bounds(U32.is_le(U32.add(cur_off(got_cur(gr)), got_v(gr)), plen))
+    return RR{nm_name(nm), got_v(gt), got_v(gc), got_v(gr), cur_off(got_cur(gr)), U32.add(cur_off(got_cur(gr)), got_v(gr))}
+
 def cname_bound(ok: Bool, n: Nm) -> Maybe<&2, Nm>:
   match ok:
     case True{}: Some{n}
@@ -729,6 +801,7 @@ def walk_an_go(
   fuel: Nat,
   ph: Aw,
   +pkt: List<&2, U32>,
+  +plen: U32,
   +base_off: U32,
   +an_total: U32,
   +off: U32,
@@ -750,43 +823,43 @@ def walk_an_go(
             case True{}:
               err("no A")
             case False{}:
-              walk_an_go(p, AwGot{}, pkt, base_off, an_total, off, left, sought, rec, read_rr(pkt, off), None{}, None{}, False{})
+              walk_an_go(p, AwGot{}, pkt, plen, base_off, an_total, off, left, sought, rec, read_rr_len(pkt, off, plen), None{}, None{}, False{})
         case AwGot{}:
           match mrr:
             case None{}:
               err("bad dns")
             case Some{+r}:
-              walk_an_go(p, AwIn{}, pkt, base_off, an_total, off, left, sought, r, None{}, None{}, None{}, U32.is_eq(rr_cls(r), 1))
+              walk_an_go(p, AwIn{}, pkt, plen, base_off, an_total, off, left, sought, r, None{}, None{}, None{}, U32.is_eq(rr_cls(r), 1))
         case AwIn{}:
           match flag:
             case False{}:
-              walk_an_go(p, AwSkip{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
+              walk_an_go(p, AwSkip{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
             case True{}:
-              walk_an_go(p, AwTyA{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, U32.is_eq(rr_ty(rec), 1) && U32.is_eq(rr_rdlen(rec), 4))
+              walk_an_go(p, AwTyA{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, U32.is_eq(rr_ty(rec), 1) && U32.is_eq(rr_rdlen(rec), 4))
         case AwTyA{}:
           match flag:
             case True{}:
-              walk_an_go(p, AwOwnA{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, String.eq(rr_owner(rec), sought))
+              walk_an_go(p, AwOwnA{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, String.eq(rr_owner(rec), sought))
             case False{}:
-              walk_an_go(p, AwTyCn{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, U32.is_eq(rr_ty(rec), 5))
+              walk_an_go(p, AwTyCn{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, U32.is_eq(rr_ty(rec), 5))
         case AwOwnA{}:
           match flag:
             case True{}:
-              walk_an_go(p, AwA{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, ip4_at(pkt, rr_rd(rec)), False{})
+              walk_an_go(p, AwA{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, ip4_at(pkt, rr_rd(rec)), False{})
             case False{}:
-              walk_an_go(p, AwSkip{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
+              walk_an_go(p, AwSkip{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
         case AwTyCn{}:
           match flag:
             case True{}:
-              walk_an_go(p, AwOwnCn{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, String.eq(rr_owner(rec), sought))
+              walk_an_go(p, AwOwnCn{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, String.eq(rr_owner(rec), sought))
             case False{}:
-              walk_an_go(p, AwSkip{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
+              walk_an_go(p, AwSkip{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
         case AwOwnCn{}:
           match flag:
             case True{}:
-              walk_an_go(p, AwCn{}, pkt, base_off, an_total, off, left, sought, rec, None{}, cname_read(rec, read_name(pkt, rr_rd(rec))), None{}, False{})
+              walk_an_go(p, AwCn{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, cname_read(rec, read_name(pkt, rr_rd(rec))), None{}, False{})
             case False{}:
-              walk_an_go(p, AwSkip{}, pkt, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
+              walk_an_go(p, AwSkip{}, pkt, plen, base_off, an_total, off, left, sought, rec, None{}, None{}, None{}, False{})
         case AwA{}:
           match mip:
             case None{}:
@@ -799,22 +872,25 @@ def walk_an_go(
               err("bad dns")
             case Some{+tgt}:
               +new_sought = nm_name(tgt)
-              walk_an_go(p, AwLoop{}, pkt, base_off, an_total, off, left, new_sought, rec, None{}, None{}, None{}, String.eq(new_sought, sought))
+              walk_an_go(p, AwLoop{}, pkt, plen, base_off, an_total, off, left, new_sought, rec, None{}, None{}, None{}, String.eq(new_sought, sought))
         case AwLoop{}:
           match flag:
             case True{}:
               err("bad dns")
             case False{}:
-              walk_an_go(p, AwLeft{}, pkt, base_off, an_total, base_off, an_total, sought, rec, None{}, None{}, None{}, U32.is_zero(an_total))
+              walk_an_go(p, AwLeft{}, pkt, plen, base_off, an_total, base_off, an_total, sought, rec, None{}, None{}, None{}, U32.is_zero(an_total))
         case AwSkip{}:
           +left2 = U32.sub(left, 1)
-          walk_an_go(p, AwLeft{}, pkt, base_off, an_total, rr_next(rec), left2, sought, rec, None{}, None{}, None{}, U32.is_zero(left2))
+          walk_an_go(p, AwLeft{}, pkt, plen, base_off, an_total, rr_next(rec), left2, sought, rec, None{}, None{}, None{}, U32.is_zero(left2))
 
 def walk_an(+pkt: List<&2, U32>, +off: U32, +an: U32, +sought: String) -> Result<&1, &1, U32 & String, String>:
+  +len = List.length(&2, U32, pkt)
+  +plen = U32.from_nat(len)
   walk_an_go(
-    Nat.add(32n, Nat.mul(32n, List.length(&2, U32, pkt))),
+    Nat.add(32n, Nat.mul(32n, len)),
     AwLeft{},
     pkt,
+    plen,
     off,
     an,
     off,
@@ -895,6 +971,25 @@ def parse_q_qs_ok(
     case True{}:
       parse_q_rcode(rcode_ok(sb), host, pkt, an, off, tc)
 
+# D193: the strict && evaluated the full String.eq even on numeric
+# mismatch. Match numerics first; the string compare runs only when both
+# match. Rejections are the identical err("bad dns").
+def parse_q_qs_cls(+host: String, +pkt: List<&2, U32>, +an: U32, +off: U32, tc: Bool, sb: U32, +qname: String, clseq: Bool) -> Result<&1, &1, U32 & String, String>:
+  match clseq:
+    case False{}:
+      err("bad dns")
+    case True{}:
+      +eq = String.eq(qname, host)
+      parse_q_qs_ok(host, pkt, an, off, tc, sb, eq)
+
+def parse_q_qs_ty(+host: String, +pkt: List<&2, U32>, +an: U32, +off: U32, tc: Bool, sb: U32, +qname: String, tyeq: Bool, +cls: U32) -> Result<&1, &1, U32 & String, String>:
+  match tyeq:
+    case False{}:
+      err("bad dns")
+    case True{}:
+      +clseq = U32.is_eq(cls, 1)
+      parse_q_qs_cls(host, pkt, an, off, tc, sb, qname, clseq)
+
 def parse_q_qs(+host: String, +an: U32, +pkt: List<&2, U32>, tc: Bool, sb: U32, m: Maybe<&2, Qsec>) -> Result<&1, &1, U32 & String, String>:
   match m:
     case None{}:
@@ -902,7 +997,8 @@ def parse_q_qs(+host: String, +an: U32, +pkt: List<&2, U32>, tc: Bool, sb: U32, 
     case Some{q}:
       match q:
         case Qsec{qname, ty, cls, off}:
-          parse_q_qs_ok(host, pkt, an, off, tc, sb, U32.is_eq(ty, 1) && U32.is_eq(cls, 1) && String.eq(qname, host))
+          +tyeq = U32.is_eq(ty, 1)
+          parse_q_qs_ty(host, pkt, an, off, tc, sb, qname, tyeq, cls)
 
 def parse_q_chk(fail: Maybe<&2, String>, +host: String, +h: Hdr) -> Result<&1, &1, U32 & String, String>:
   match fail:
@@ -918,8 +1014,29 @@ def parse_q_h(+want: U32, +host: String, m: Maybe<&2, Hdr>) -> Result<&1, &1, U3
     case Some{+h}:
       parse_q_chk(first_fail(hdr_chks(want, h)), host, h)
 
+# D191: the hostname walks (without_root_dot = reverse + reverse-back,
+# name_lo = accumulate + reverse) ran before header validation and were
+# discarded on invalid headers. Validate the header first; normalize only
+# on the accept path. Accepted inputs take the identical
+# parse_q_qs(host, an, pkt, tc, sb, qsec) call as parse_q_h/parse_q_chk did.
+def parse_q_validated(+fail: Maybe<&2, String>, +host: String, +h: Hdr) -> Result<&1, &1, U32 & String, String>:
+  match fail:
+    case Some{+msg}:
+      err(msg)
+    case None{}:
+      parse_q_qs(name_lo(without_root_dot(host)), hdr_an(h), hdr_pkt(h), Bool.not(U32.is_zero(U32.and(hdr_fb(h), 2))), hdr_sb(h), read_qsec(hdr_pkt(h)))
+
+def parse_q_hdr(+want: U32, +host: String, m: Maybe<&2, Hdr>) -> Result<&1, &1, U32 & String, String>:
+  match m:
+    case None{}:
+      err("short")
+    case Some{+h}:
+      +fail = first_fail(hdr_chks(want, h))
+      parse_q_validated(fail, host, h)
+
 def parse_q(+want: U32, +host: String, +xs: List<&2, U32>) -> Result<&1, &1, U32 & String, String>:
-  parse_q_h(want, name_lo(without_root_dot(host)), parse_hdr(xs))
+  +mh = parse_hdr(xs)
+  parse_q_hdr(want, host, mh)
 
 def parse_id(+want: U32, xs: List<&2, U32>) -> Result<&1, &1, U32 & String, String>:
   parse_q(want, "a", xs)

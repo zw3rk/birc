@@ -318,28 +318,121 @@ def after_bind(
         sent : Socket & Result<&1, &1, U32 & String, Unit> <- send_octets(sock, ns, dport, q)
         after_send(sent, id, host, ns, dport, q, aaaa)
 
-def tcp_idle(sock: Socket, acc: List<&2, U32>, k: Socket -> List<&2, U32> -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+# Cons-style TCP reassembly (D90): chunks arrive in order, so the accumulator
+# keeps reversed bytes (O(chunk) cons per chunk), a byte count, and the first
+# two header bytes stashed on arrival. The ready check compares the count
+# against the framed length without scanning the accumulator, and the full
+# list is materialized exactly once, when the frame completes. Verdicts match
+# the old per-chunk Wire.tcp_packet scan: short reads wait, overlong or
+# short-framed input fails closed with "tcp length", and completion parses
+# the same forward bytes.
+type TcpAcc is Data:
+  TcpAcc{rev: List<&2, U32>, have: U32, hdr: List<&2, U32>}
+
+type TcpReady is Data:
+  ReadyMore{}
+  ReadyFull{}
+  ReadyBad{}
+
+def tcp_cons(+xs: List<&2, U32>, +rev: List<&2, U32>) -> List<&2, U32>:
+  match xs:
+    case Nil{}:
+      rev
+    case Con{+h, t}:
+      tcp_cons(t, h <> rev)
+
+def tcp_hdr.take(+n: Nat, +xs: List<&2, U32>, +hdr: List<&2, U32>) -> List<&2, U32>:
+  match n:
+    case 0n:
+      hdr
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          hdr
+        case Con{+h, t}:
+          tcp_hdr.take(p, t, List.append(&2, U32, hdr, h <> Nil{}))
+
+def tcp_hdr.go(+hdr: List<&2, U32>, +xs: List<&2, U32>) -> List<&2, U32>:
+  tcp_hdr.take(Nat.sub(2n, List.length(&2, U32, hdr)), xs, hdr)
+
+def tcp_ready.gt(gt: Bool) -> TcpReady:
+  match gt:
+    case True{}:
+      ReadyBad{}
+    case False{}:
+      ReadyMore{}
+
+def tcp_ready.eq(eq: Bool, +have: U32, +want: U32) -> TcpReady:
+  match eq:
+    case True{}:
+      ReadyFull{}
+    case False{}:
+      tcp_ready.gt(U32.is_gt(have, want))
+
+def tcp_ready.want(valid: Bool, +have: U32, +want: U32) -> TcpReady:
+  match valid:
+    case False{}:
+      ReadyBad{}
+    case True{}:
+      tcp_ready.eq(U32.is_eq(have, want), have, want)
+
+def tcp_ready.second(+t: List<&2, U32>, +h0: U32, +have: U32) -> TcpReady:
+  match t:
+    case Con{+h1, +dropped_rest}:
+      +n = Wire.u16_of(h0, h1)
+      tcp_ready.want(U32.is_le(h0, 255) && U32.is_le(h1, 255) && U32.is_ge(n, 12), have, U32.add(n, 2))
+    case _:
+      ReadyMore{}
+
+def tcp_ready(+hdr: List<&2, U32>, +have: U32) -> TcpReady:
+  match hdr:
+    case Con{+h0, t}:
+      tcp_ready.second(t, h0, have)
+    case _:
+      ReadyMore{}
+
+def tcp_acc.zero() -> TcpAcc:
+  TcpAcc{Nil{}, 0, Nil{}}
+
+def tcp_acc.add(+acc: TcpAcc, +xs: List<&2, U32>) -> TcpAcc:
+  match acc:
+    case TcpAcc{+rev, +have, +hdr}:
+      TcpAcc{tcp_cons(xs, rev), U32.add(have, U32.from_nat(List.length(&2, U32, xs))), tcp_hdr.go(hdr, xs)}
+
+def tcp_frame.full(sock: Socket, +id: U32, +host: String, +acc: TcpAcc, +aaaa: Bool) -> IO(Result<&1, &1, U32 & String, String>):
+  match acc:
+    case TcpAcc{+rev, +dropped_have, +dropped_hdr}:
+      do IO<Result<&1, &1, U32 & String, String>>:
+        Unit <- Socket.close(sock)
+        return Dq.tcp_parse(aaaa, id, host, List.reverse(&2, U32, rev))
+
+def tcp_frame(sock: Socket, +id: U32, +host: String, +acc: TcpAcc, +aaaa: Bool, ready: TcpReady, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+  match ready:
+    case ReadyBad{}: fail_close(sock, "tcp length")
+    case ReadyMore{}: k(sock, acc)
+    case ReadyFull{}:
+      tcp_frame.full(sock, id, host, acc, aaaa)
+
+def tcp_chunk.got(sock: Socket, +id: U32, +host: String, +rev: List<&2, U32>, +have: U32, +hdr: List<&2, U32>, +aaaa: Bool, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+  tcp_frame(sock, id, host, TcpAcc{rev, have, hdr}, aaaa, tcp_ready(hdr, have), k)
+
+def tcp_chunk.acc(+acc: TcpAcc, sock: Socket, +id: U32, +host: String, +aaaa: Bool, +xs: List<&2, U32>, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+  match acc:
+    case TcpAcc{+rev, +have, +hdr}:
+      tcp_chunk.got(sock, id, host, tcp_cons(xs, rev), U32.add(have, U32.from_nat(List.length(&2, U32, xs))), tcp_hdr.go(hdr, xs), aaaa, k)
+
+def tcp_chunk(sock: Socket, +id: U32, +host: String, +acc: TcpAcc, +aaaa: Bool, +xs: List<&2, U32>, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+  match xs:
+    case Nil{}: fail_close(sock, "tcp eof")
+    case Con{_, _}:
+      tcp_chunk.acc(acc, sock, id, host, aaaa, xs, k)
+
+def tcp_idle(sock: Socket, acc: TcpAcc, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
   do IO<Result<&1, &1, U32 & String, String>>:
     Unit <- IO.sleep(10)
     k(sock, acc)
 
-def tcp_frame(sock: Socket, +id: U32, +host: String, +acc: List<&2, U32>, +aaaa: Bool, frame: Wire.TcpFrame, k: Socket -> List<&2, U32> -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
-  match frame:
-    case Wire.TcpInvalid{}: fail_close(sock, "tcp length")
-    case Wire.TcpMore{}: k(sock, acc)
-    case Wire.TcpPayload{+xs}:
-      do IO<Result<&1, &1, U32 & String, String>>:
-        Unit <- Socket.close(sock)
-        return Dq.tcp_parse(aaaa, id, host, xs)
-
-def tcp_chunk(sock: Socket, +id: U32, +host: String, acc: List<&2, U32>, +aaaa: Bool, xs: List<&2, U32>, k: Socket -> List<&2, U32> -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
-  match xs:
-    case Nil{}: fail_close(sock, "tcp eof")
-    case Con{h, t}:
-      +all = List.append(&2, U32, acc, h <> t)
-      tcp_frame(sock, id, host, all, aaaa, Wire.tcp_packet(all), k)
-
-def tcp_poll(pair: Socket & Result<&1, &1, U32 & String, Maybe<&1, String & (U32 & List<&2, U32>)>>, +id: U32, +host: String, acc: List<&2, U32>, +aaaa: Bool, k: Socket -> List<&2, U32> -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+def tcp_poll(pair: Socket & Result<&1, &1, U32 & String, Maybe<&1, String & (U32 & List<&2, U32>)>>, +id: U32, +host: String, acc: TcpAcc, +aaaa: Bool, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
   match pair:
     case (sock, r):
       match r:
@@ -349,7 +442,7 @@ def tcp_poll(pair: Socket & Result<&1, &1, U32 & String, Maybe<&1, String & (U32
             case None{}: tcp_idle(sock, acc, k)
             case Some{(_, (_, xs))}: tcp_chunk(sock, id, host, acc, aaaa, xs, k)
 
-def tcp_deadline(expired: Bool, sock: Socket, +id: U32, +host: String, acc: List<&2, U32>, +aaaa: Bool, k: Socket -> List<&2, U32> -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
+def tcp_deadline(expired: Bool, sock: Socket, +id: U32, +host: String, acc: TcpAcc, +aaaa: Bool, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
   match expired:
     case True{}: fail_close(sock, "tcp timeout")
     case False{}:
@@ -359,7 +452,7 @@ def tcp_deadline(expired: Bool, sock: Socket, +id: U32, +host: String, acc: List
 
 # The monotonic deadline is shared by every chunk, so slow/trickling peers
 # cannot extend it. Fuel is only a second, structural guardrail.
-def tcp_wait(fuel: Nat, sock: Socket, +id: U32, +host: String, +start: U32, acc: List<&2, U32>, +aaaa: Bool) -> IO(Result<&1, &1, U32 & String, String>):
+def tcp_wait(fuel: Nat, sock: Socket, +id: U32, +host: String, +start: U32, acc: TcpAcc, +aaaa: Bool) -> IO(Result<&1, &1, U32 & String, String>):
   match fuel:
     case 0n: fail_close(sock, "tcp timeout")
     case 1n+p:
@@ -380,7 +473,7 @@ def lookup_tcp_sent(
     case Done{_}:
       do IO<Result<&1, &1, U32 & String, String>>:
         start : U32 <- Clock.millis()
-        tcp_wait(U32.to_nat(65538), sock, id, host, start, Nil{}, aaaa)
+        tcp_wait(U32.to_nat(65538), sock, id, host, start, tcp_acc.zero(), aaaa)
 
 def lookup_tcp_send(
   pair: Socket & Result<&1, &1, U32 & String, Unit>,
@@ -724,10 +817,57 @@ def dial_dual.v6known(
 # a v6 TCP failure (or a failed AAAA); a healthy v6 path issues no A query
 # at all. connect_dual/connect_pair stay as the tested pair primitive, but
 # production takes this lazy path so no dial waits on an unneeded family.
+# D156: /etc/resolv.conf is read once per dial_dual and the nameserver
+# result threads into both lookups. lookup_ns(_aaaa) on Done{ns} is exactly
+# lookup_a(_aaaa) minus its own file read, so every path resolves identically
+# with one fewer file IO on fallback dials.
+def dial_dual.v4wanted_ns(+ns: String, +host: String, +port: U32, +timeout: U32) -> IO(Result<&1, &1, U32 & String, Socket & String>):
+  do IO<Result<&1, &1, U32 & String, Socket & String>>:
+    r4 : Result<&1, &1, U32 & String, String> <- lookup_ns(Done{ns}, host)
+    dial_dual.v4known(r4, port, timeout)
+
+def dial_dual.v6dialed_ns(
+  cr: Result<&1, &1, U32 & String, Socket>,
+  +ns: String,
+  +host: String,
+  +port: U32,
+  +timeout: U32,
+  +ip6: String
+) -> IO(Result<&1, &1, U32 & String, Socket & String>):
+  match cr:
+    case Done{sock}:
+      IO.pure(Result<&1, &1, U32 & String, Socket & String>, Done{(sock, ip6)})
+    case Fail{_}:
+      dial_dual.v4wanted_ns(ns, host, port, timeout)
+
+def dial_dual.v6known_ns(
+  r6: Result<&1, &1, U32 & String, String>,
+  +ns: String,
+  +host: String,
+  +port: U32,
+  +timeout: U32
+) -> IO(Result<&1, &1, U32 & String, Socket & String>):
+  match r6:
+    case Done{+ip6}:
+      do IO<Result<&1, &1, U32 & String, Socket & String>>:
+        cr : Result<&1, &1, U32 & String, Socket> <- TCP.connect_for(ip6, port, v6_attempt_ms())
+        dial_dual.v6dialed_ns(cr, ns, host, port, timeout, ip6)
+    case Fail{_}:
+      dial_dual.v4wanted_ns(ns, host, port, timeout)
+
+def dial_dual.host_rns(rns: Result<&1, &1, U32 & String, String>, +host: String, +port: U32, +timeout: U32) -> IO(Result<&1, &1, U32 & String, Socket & String>):
+  match rns:
+    case Fail{e}:
+      IO.pure(Result<&1, &1, U32 & String, Socket & String>, Fail{e})
+    case Done{+ns}:
+      do IO<Result<&1, &1, U32 & String, Socket & String>>:
+        r6 : Result<&1, &1, U32 & String, String> <- lookup_ns_aaaa(Done{ns}, host)
+        dial_dual.v6known_ns(r6, ns, host, port, timeout)
+
 def dial_dual.host(+host: String, +port: U32, +timeout: U32) -> IO(Result<&1, &1, U32 & String, Socket & String>):
   do IO<Result<&1, &1, U32 & String, Socket & String>>:
-    r6 : Result<&1, &1, U32 & String, String> <- lookup_aaaa(host)
-    dial_dual.v6known(r6, host, port, timeout)
+    rns : Result<&1, &1, U32 & String, String> <- load_ns()
+    dial_dual.host_rns(rns, host, port, timeout)
 
 def dial_dual_at.v4wanted(+host: String, +ns: String, +dport: U32, +port: U32, +timeout: U32) -> IO(Result<&1, &1, U32 & String, Socket & String>):
   do IO<Result<&1, &1, U32 & String, Socket & String>>:
