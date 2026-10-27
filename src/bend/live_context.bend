@@ -126,10 +126,17 @@ def clean.details(value: Details) -> Bool:
 def clean(ctx: Context) -> Bool:
   clean.details(details(ctx))
 
-def gate_scope(gate: Gate, +st: S.Session, gen: U32) -> Gate:
+def gate_scope.still(still: Bool, gate: Gate, gen: U32, +ep: String) -> Gate:
+  match still:
+    case True{}: gate
+    case False{}: Waiting{gen, ep}
+
+def gate_scope(gate: Gate, +st: S.Session, +gen: U32) -> Gate:
   match gate:
     case Open{}: Open{}
-    case Waiting{_, _}: Waiting{gen, endpoint(st)}
+    case Waiting{+wanted, +scope}:
+      +ep = endpoint(st)
+      gate_scope.still(U32.is_eq(wanted, gen) && String.eq(scope, ep), gate, gen, ep)
 
 def archive_needed(gate: Gate, prefs: L.Context, active: Maybe<&2, Archive>) -> Bool:
   match active:
@@ -262,10 +269,13 @@ def history.install(current: Bool, prefs: L.Context, gate: Gate, +decision: Mayb
     case False{}: IO.pure(Context & S.Session, (wrap(Details{prefs, gate, decision, path, None{}, next}), st))
     case True{}:
       do IO<Context & S.Session>:
-        local : Cl.Client <- history.flush(decision_known(decision) || explicit_history(st), path, ep, S.session_cl(st))
+        # Begin is the dial and takes only the generation: send it before the
+        # local file flush so dialing never waits on file IO. The flush result
+        # merges afterwards; there is no data dependency between them.
         _ : Result<&1, &1, S.NetCmd, Unit> <- Chan.send(S.NetCmd, cmd, S.Begin{gen})
+        local : Cl.Client <- history.flush(decision_known(decision) || explicit_history(st), path, ep, S.session_cl(st))
         # ep is the HistoryLoaded snapshot claim; Session re-derives current_ep.
-        # Begin is the dial. The notice is a no-op until startup_log opened *log*.
+        # The notice is a no-op until startup_log opened *log*.
         return (wrap(Details{prefs, Open{}, decision, path, None{}, next}), S.session_set_client(st, history.merge(Cl.startup_connect(local, ep), st, snapshot, ep)))
 
 def history.result(owned: Bool, ctx: Details, +st: S.Session, +gen: U32, got_gen: U32, +ep: String, snapshot: Cl.Client, cmd: Chan(S.NetCmd)) -> IO(Context & S.Session):

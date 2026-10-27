@@ -14,6 +14,7 @@ import ./history.bend as Hist
 import ./history_io.bend as HistIO
 import ./history_search.bend as Hs
 import ./history_search_io.bend as HSIO
+import ./irc.bend as Irc
 import ./typing.bend as Ty
 import ./media.bend as M
 import ./media_io.bend as MediaIO
@@ -1244,6 +1245,22 @@ def media_stage.job(pair: M.State & Maybe<&2, M.Request>, ui: T.Ui, +st: Sess.Se
         ui2 : T.Ui <- media_stage.effects(Bool.not(Nat.is_eq(old_gen, M.generation(media))), job, ui, evt)
         k((ui2, Sess.session_set_media(st, media), gen, more))
 
+# D88: session_observe_visible_media already runs M.maintain in its gated
+# arm (media enabled, overlay closed); running it again on the observed
+# state only re-proves aliveness of the same rows against the same client.
+# Maintain is idempotent, so the second pass runs only when the observe did
+# not cover this state (disabled, overlay open, or Demo/Stopping net).
+# Read on the observed session, the gate replicates the gated-arm condition
+# exactly: the observe never changes net or the enabled flag, and it stores
+# the maintain_full'd fullscreen the gate decided on.
+def media_stage.covered(+observed: Sess.Session) -> Bool:
+  Sess.visible_media_net(Sess.session_net(observed)) && M.enabled(Sess.session_media(observed)) && Bool.not(C.is_open(Sess.session_full(observed)))
+
+def media_stage.maintained(already: Bool, +observed: Sess.Session) -> M.State:
+  match already:
+    case True{}: Sess.session_media(observed)
+    case False{}: M.maintain(Sess.session_media(observed), Sess.session_cl(observed))
+
 def media_stage(acc: T.Ui & Sess.Session & U32 & Bool, old_gen: Nat, +evt: Chan(Sess.UiMsg), k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
   match acc:
     case (ui, +st, gen, pending):
@@ -1254,7 +1271,7 @@ def media_stage(acc: T.Ui & Sess.Session & U32 & Bool, old_gen: Nat, +evt: Chan(
         repaint : Bool <- more_schedule(pending, False{},
           Nat.is_gt(Cl.log_seq_of(Sess.session_cl(observed)), Cl.log_seq_of(Sess.session_cl(st))), evt)
         media_stage.job(M.take_job_allowed(Sess.session_media_job_allowed(observed),
-          M.maintain(Sess.session_media(observed), Sess.session_cl(observed))), ui, observed, gen, repaint, old_gen, evt, k)
+          media_stage.maintained(media_stage.covered(observed), observed)), ui, observed, gen, repaint, old_gen, evt, k)
 
 def upload_run.result(result: String & U32 & U32, request: Up.Request, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
   match result:
@@ -1322,22 +1339,52 @@ def on_upload.url(fits: Bool, ui: T.Ui, +st: Sess.Session, url: String, +evt: Ch
       # the real draft and composer history; the helper is not a keystroke.
       on_upload.sent(Sess.apply_keys_echo(Sess.session_cl(st), Sess.session_net(st), Sess.session_port(st), url, True{}, Sess.session_negotiated(st), Sess.session_echo_ok(st)), ui, st, evt, cmd, ack, gen, k)
 
-def on_upload.completed(pair: Sess.Session & Maybe<&2, String>, ui: T.Ui, request: Up.Request, allowed: Bool, +error: U32, http_status: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
+# D183: the nested Bool.pick built the discarded message (including the
+# U32.show in error_text) on every failure arm. Match-first builds only the
+# selected message; selection is identical to the old pick chain.
+def on_upload.completed_err_zero(+error: U32, +http_status: U32, zero: Bool) -> String:
+  match zero:
+    case True{}: "upload returned an invalid URL"
+    case False{}: UploadIO.error_text(error, http_status)
+
+def on_upload.completed_err(+error: U32, http_status: U32) -> String:
+  on_upload.completed_err_zero(error, http_status, U32.is_zero(error))
+
+def on_upload.completed_none(ui: T.Ui, +st: Sess.Session, allowed: Bool, +error: U32, +http_status: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
+  match allowed:
+    case False{}:
+      paint_input(ui, Sess.session_error(st, "upload result discarded: canceled or destination changed"), False{}, evt, cmd, ack, gen, k)
+    case True{}:
+      paint_input(ui, Sess.session_error(st, on_upload.completed_err(error, http_status)), False{}, evt, cmd, ack, gen, k)
+
+# D182: Up.finish (inside session_upload_complete) already proved eligible
+# and response_url for the accepted URL; re-proving them here re-walks the
+# scope strings, the ASCII path, and the split segments. Only the wire
+# framing the finisher never checks still needs proving here.
+def on_upload.url_checks(+request: Up.Request, +url: String) -> Bool:
+  match request:
+    case Up.Request{+scope, _}:
+      match scope:
+        case Up.Scope{_, _, +target}:
+          Up.scope_valid(scope) && Irc.line_ok(Irc.format_privmsg(target, url))
+
+def on_upload.done(pair: Sess.Session & Maybe<&2, String>, ui: T.Ui, +request: Up.Request, +st: Sess.Session, error: U32, http_status: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
   match pair:
-    case (+st, result):
-      match result:
-        case Some{+url}: on_upload.url(Up.wire_fits(request, url), ui, st, url, evt, cmd, ack, gen, k)
+    case (+st2, +res):
+      match res:
+        case Some{+url}: on_upload.url(on_upload.url_checks(request, url), ui, st2, url, evt, cmd, ack, gen, k)
         case None{}:
-          +msg = Bool.pick(String, Bool.not(allowed), "upload result discarded: canceled or destination changed",
-            Bool.pick(String, U32.is_zero(error), "upload returned an invalid URL", UploadIO.error_text(error, http_status)))
-          paint_input(ui, Sess.session_error(st, msg), False{}, evt, cmd, ack, gen, k)
+          # Eligibility is decided only on the disallowed path now; the
+          # success arm above carries finish's acceptance verdict.
+          on_upload.completed_none(ui, st2,
+            Up.eligible(Sess.session_upload(st), request, Sess.session_upload_scope(st), Sess.session_upload_online(st)),
+            error, http_status, evt, cmd, ack, gen, k)
 
 def on_upload(owned: Bool, ui: T.Ui, +st: Sess.Session, +request: Up.Request, result: String, error: U32, http_status: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
   match owned:
     case False{}: k((ui, st, gen, False{}))
     case True{}:
-      on_upload.completed(Sess.session_upload_complete(st, request, result), ui, request,
-        Up.eligible(Sess.session_upload(st), request, Sess.session_upload_scope(st), Sess.session_upload_online(st)), error, http_status, evt, cmd, ack, gen, k)
+      on_upload.done(Sess.session_upload_complete(st, request, result), ui, request, st, error, http_status, evt, cmd, ack, gen, k)
 
 def on_media.added(pair: T.Ui & U32, +st: Sess.Session, +generation: Nat, +ticket: Nat, +url: String, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), +ack: Chan(Unit), +gen: U32, k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)) -> IO(Unit):
   match pair:

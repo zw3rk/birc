@@ -1420,8 +1420,14 @@ def ws_history.write_chan.suffix(longer: Bool, +n: Nat, +grown: String) -> Strin
     case False{}: ""
     case True{}: String.drop(grown, n)
 
-def ws_history.write_chan.suffix_of(+stored: String, +grown: String) -> String:
-  ws_history.write_chan.suffix(Nat.is_gt(String.length(grown), String.length(stored)), String.length(stored), grown)
+# D186: the queue blob was re-copied and re-measured per write (the grown
+# blob measured in go/send plus again in suffix_of, the stored blob in send
+# plus again in suffix_of, then a drop). The entry points measure each blob
+# once and thread the two lengths down; the drain path below performs a
+# single length comparison and a single drop. Length-tagged chunks would
+# need a WsPend shape change the tests pin, so the blob stays.
+def ws_history.write_chan.suffix_of(+slen: Nat, +glen: Nat, +grown: String) -> String:
+  ws_history.write_chan.suffix(Nat.is_gt(glen, slen), slen, grown)
 
 def ws_history.write_chan.rest_on(has: Bool, +extra: String, +hot: WsHot, +sid: Nat, +base: Nat, +seq: Nat) -> WsHot:
   match has:
@@ -1431,52 +1437,67 @@ def ws_history.write_chan.rest_on(has: Bool, +extra: String, +hot: WsHot, +sid: 
 def ws_history.write_chan.rest_at(+extra: String, +hot: WsHot, +sid: Nat, +base: Nat, +seq: Nat) -> WsHot:
   ws_history.write_chan.rest_on(Bool.not(String.is_empty(extra)), extra, hot, sid, base, seq)
 
-def ws_history.write_chan.rest_bytes(+hot: WsHot, +sbytes: String, +grown: WsPend) -> WsHot:
+def ws_history.write_chan.rest_bytes(+hot: WsHot, +slen: Nat, +glen: Nat, +grown: WsPend) -> WsHot:
   match grown:
     case WsPend{+gbytes, +sid, +base, +seq}:
-      ws_history.write_chan.rest_at(ws_history.write_chan.suffix_of(sbytes, gbytes), hot, sid, base, seq)
+      ws_history.write_chan.rest_at(ws_history.write_chan.suffix_of(slen, glen, gbytes), hot, sid, base, seq)
 
-def ws_history.write_chan.rest_go(+hot: WsHot, +stored: WsPend, +grown: WsPend) -> WsHot:
+def ws_history.write_chan.rest_go(+hot: WsHot, +stored: WsPend, +grown: WsPend, +slen: Nat, +glen: Nat) -> WsHot:
   match stored:
-    case WsPend{+sbytes, _, _, _}:
-      ws_history.write_chan.rest_bytes(hot, sbytes, grown)
+    case WsPend{_, _, _, _}:
+      ws_history.write_chan.rest_bytes(hot, slen, glen, grown)
 
 # Accept: stored bytes are in the channel; keep only a non-empty suffix.
 # Reject: the channel took nothing, so hold the offered blob for the retry.
-def ws_history.write_chan.rest(cleared: Bool, +hot: WsHot, +stored: WsPend, +grown: WsPend) -> WsHot:
+def ws_history.write_chan.rest(cleared: Bool, +hot: WsHot, +stored: WsPend, +grown: WsPend, +slen: Nat, +glen: Nat) -> WsHot:
   match cleared:
     case False{}: ws_hot.with_pending(hot, grown)
-    case True{}: ws_history.write_chan.rest_go(hot, stored, grown)
+    case True{}: ws_history.write_chan.rest_go(hot, stored, grown, slen, glen)
 
-def ws_history.write_chan.drained_in(inner: Maybe<&2, String> & WsHot, durable: Bool, +stored: WsPend, +grown: WsPend) -> (Maybe<&2, String> & WsHot) & Bool:
+def ws_history.write_chan.drained_in(inner: Maybe<&2, String> & WsHot, durable: Bool, +stored: WsPend, +grown: WsPend, +slen: Nat, +glen: Nat) -> (Maybe<&2, String> & WsHot) & Bool:
   match inner:
     case (+notice, +hot):
-      ((notice, ws_history.write_chan.rest(String.is_empty(ws_hot.pending_of(hot)), hot, stored, grown)), durable)
+      ((notice, ws_history.write_chan.rest(String.is_empty(ws_hot.pending_of(hot)), hot, stored, grown, slen, glen)), durable)
 
-def ws_history.write_chan.drained(pair: (Maybe<&2, String> & WsHot) & Bool, +stored: WsPend, +grown: WsPend) -> (Maybe<&2, String> & WsHot) & Bool:
+def ws_history.write_chan.drained(pair: (Maybe<&2, String> & WsHot) & Bool, +stored: WsPend, +grown: WsPend, +slen: Nat, +glen: Nat) -> (Maybe<&2, String> & WsHot) & Bool:
   match pair:
     case (inner, +durable):
-      ws_history.write_chan.drained_in(inner, durable, stored, grown)
+      ws_history.write_chan.drained_in(inner, durable, stored, grown, slen, glen)
 
-def ws_history.write_chan.drain(+ch: Chan(HistJob), +hot: WsHot, +path: String, +stored: WsPend, +grown: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
+def ws_history.write_chan.drain(+ch: Chan(HistJob), +hot: WsHot, +path: String, +stored: WsPend, +grown: WsPend, +slen: Nat, +glen: Nat) -> IO((Maybe<&2, String> & WsHot) & Bool):
   do IO<(Maybe<&2, String> & WsHot) & Bool>:
     pair : (Maybe<&2, String> & WsHot) & Bool <- ws_history.write_chan.put(ch, hot, path, stored)
-    return ws_history.write_chan.drained(pair, stored, grown)
+    return ws_history.write_chan.drained(pair, stored, grown, slen, glen)
 
-def ws_history.write_chan.over(stuck: Bool, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
+def ws_history.write_chan.over(stuck: Bool, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend, +slen: Nat, +glen: Nat) -> IO((Maybe<&2, String> & WsHot) & Bool):
   match stuck:
-    case True{}: ws_history.write_chan.drain(ch, hot, path, ws_hot.pend_of(hot), pend)
+    case True{}: ws_history.write_chan.drain(ch, hot, path, ws_hot.pend_of(hot), pend, slen, glen)
     case False{}: IO.pure((Maybe<&2, String> & WsHot) & Bool, ((Some{"history queue full"}, hot), False{}))
+
+def ws_history.write_chan.send_len(+slen: Nat, +glen: Nat, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
+  ws_history.write_chan.over(ws_history.over_cap(slen), ch, hot, path, pend, slen, glen)
 
 def ws_history.write_chan.send(over: Bool, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
   match over:
-    case True{}: ws_history.write_chan.over(ws_history.over_cap(String.length(ws_hot.pending_of(hot))), ch, hot, path, pend)
     case False{}: ws_history.write_chan.put(ch, hot, path, pend)
+    case True{}:
+      match pend:
+        case WsPend{+bytes, _, _, _}:
+          ws_history.write_chan.send_len(String.length(ws_hot.pending_of(hot)), String.length(bytes), ch, hot, path, pend)
+
+def ws_history.write_chan.go_fit(fit: Bool, +glen: Nat, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
+  match fit:
+    case True{}: ws_history.write_chan.put(ch, hot, path, pend)
+    case False{}: ws_history.write_chan.send_len(String.length(ws_hot.pending_of(hot)), glen, ch, hot, path, pend)
 
 def ws_history.write_chan.go(empty: Bool, +ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
   match empty:
     case True{}: IO.pure((Maybe<&2, String> & WsHot) & Bool, ((None{}, hot), True{}))
-    case False{}: ws_history.write_chan.send(ws_history.over_cap(String.length(ws_pend.bytes(pend))), ch, hot, path, pend)
+    case False{}:
+      match pend:
+        case WsPend{+bytes, _, _, _}:
+          +glen = String.length(bytes)
+          ws_history.write_chan.go_fit(Bool.not(ws_history.over_cap(glen)), glen, ch, hot, path, pend)
 
 def ws_history.write_chan(+ch: Chan(HistJob), +hot: WsHot, +path: String, +pend: WsPend) -> IO((Maybe<&2, String> & WsHot) & Bool):
   ws_history.write_chan.go(String.is_empty(ws_pend.bytes(pend)), ch, hot, path, pend)
@@ -1949,7 +1970,10 @@ def ws_media_stage(ui: T.Ui, +ws: W.Workspace, +evts: WsEvts, +lease: Maybe<&2, 
   old_generation = M.generation(Sess.session_media(st))
   old_after = Cl.log_seq_of(Sess.session_cl(st))
   +observed = Sess.session_observe_visible_media(st)
-  ws_media.jobs(M.take_job_allowed(Sess.session_media_job_allowed(observed) && ws_mlease.free(lease), M.maintain(Sess.session_media(observed), Sess.session_cl(observed))), observed, old_generation, old_after, ui, ws, id, ws_part.gen(ws, id), evts, lease)
+  # D187: the observe already ran M.maintain in its gated arm (enabled,
+  # overlay closed); share that maintained state instead of re-proving
+  # aliveness. Net.media_stage.covered replicates the gated-arm condition.
+  ws_media.jobs(M.take_job_allowed(Sess.session_media_job_allowed(observed) && ws_mlease.free(lease), Net.media_stage.maintained(Net.media_stage.covered(observed), observed)), observed, old_generation, old_after, ui, ws, id, ws_part.gen(ws, id), evts, lease)
 
 def ws_upload.job(job: Maybe<&2, Up.Request>, +st: Sess.Session, +ws: W.Workspace, +id: Key.ServerId, +gen: U32, +evts: WsEvts, +ups: List<&2, WsLease>) -> IO(W.Workspace & List<&2, WsLease>):
   match job:
@@ -2029,15 +2053,25 @@ def ws_cards.jobs(pair: C.State & Maybe<&2, C.Request>, +ws: W.Workspace, +id: K
   match pair:
     case (+next, +job): ws_cards.jobbed(job, ws, id, gen, next, fl, cards, evts)
 
+# D185: gate the candidate build on `open` first (the session-twin shape).
+# sized + paint_entries are pure, so skipping them on fullscreen-open frames
+# only drops discarded work. Both arms pass the identical spawn_ok and
+# enqueue arguments the strict version computed.
+def ws_cards.staged_open(open: Bool, +kept: C.State, +full: C.Fullscreen, +ws: W.Workspace, +id: Key.ServerId, +gen: U32, +st: Sess.Session, +cards: WsCardsAll, +evts: WsEvts, on: Bool) -> IO(W.Workspace & WsCardsAll):
+  match open:
+    case True{}:
+      ws_cards.jobs(C.take_job_allowed(ws_cards.spawn_ok(on, kept, Sess.session_net(st), True{}, ws_cards_all.lease(cards)), C.enqueue_candidates(Nil{}, kept)), ws, id, gen, full, cards, evts)
+    case False{}:
+      +isc = Isupport.as_iso(Sess.session_iso(st))
+      +cands = ws_cards.cands_open(False{}, ws_cards.sized(isc, Sess.session_size(st), Sess.session_cl(st), Sess.session_split(st), Sess.session_media(st), C.paint_entries(kept), Sess.session_pends(st)))
+      ws_cards.jobs(C.take_job_allowed(ws_cards.spawn_ok(on, kept, Sess.session_net(st), False{}, ws_cards_all.lease(cards)), C.enqueue_candidates(cands, kept)), ws, id, gen, full, cards, evts)
+
 def ws_cards.staged(found: C.State & C.Fullscreen, +ws: W.Workspace, +id: Key.ServerId, +gen: U32, +st: Sess.Session, +cards: WsCardsAll, +evts: WsEvts, on: Bool) -> IO(W.Workspace & WsCardsAll):
   match found:
     case (+cs, +fl):
       +kept = C.maintain(cs, Sess.session_cl(st))
       +full = C.maintain_full(fl, Sess.session_media(st), Sess.session_cl(st))
-      +isc = Isupport.as_iso(Sess.session_iso(st))
-      +open = C.is_open(full)
-      +cands = ws_cards.cands_open(open, ws_cards.sized(isc, Sess.session_size(st), Sess.session_cl(st), Sess.session_split(st), Sess.session_media(st), C.paint_entries(kept), Sess.session_pends(st)))
-      ws_cards.jobs(C.take_job_allowed(ws_cards.spawn_ok(on, kept, Sess.session_net(st), open, ws_cards_all.lease(cards)), C.enqueue_candidates(cands, kept)), ws, id, gen, full, cards, evts)
+      ws_cards.staged_open(C.is_open(full), kept, full, ws, id, gen, st, cards, evts, on)
 
 def ws_cards_stage(+ws: W.Workspace, +evts: WsEvts, +cards: WsCardsAll) -> IO(W.Workspace & WsCardsAll):
   +id = W.ws_current(ws)
@@ -2384,6 +2418,10 @@ def ws_f7(+loop: WsLoop, ui: T.Ui, +typed: String, +rows: U32, +cols: U32, +more
   match loop:
     case WsLoop{+ws, +bell, +scheduled, +ctx, +media, +owner, +ups, +notify, +cards, +begun}:
       +sized = W.set_current_size(ws, rows, cols)
+      # D189 NOT fixed: sharing one cycle_server result between cycle_ws
+      # and cycle_moved is rejected by the checker (expected Data,
+      # observed Type at ws_f7): the Workspace & Bool pair cannot be named
+      # and consumed twice; each projection must consume its own call.
       +ws2 = W.cycle_ws(W.cycle_server(sized, typed))
       +moved = W.cycle_moved(W.cycle_server(sized, typed))
       do IO<Unit>:

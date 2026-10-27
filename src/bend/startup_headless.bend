@@ -47,9 +47,15 @@ def archive.pick(read: Bool, ctx: LP.Context, +st: S.Session, +path: String, all
         snapshot : Cl.Client <- Archive.load(path, snapshot_ep, Cl.settings_hist_cap(Cl.get_settings(cl)), Cl.nick_of(cl), Cl.server_of(cl), LC.now(cl))
         return archive.install(snapshot, snapshot_ep, ctx, st, allowed)
 
+def archive.current.gated(allowed: Bool, ctx: LP.Context, +st: S.Session, +path: String) -> IO(LP.Context & S.Session & Bool):
+  match allowed:
+    case False{}: archive.pick(False{}, ctx, st, path, allowed)
+    case True{}:
+      archive.pick(Bool.not(String.is_empty(path)) && Cl.settings_history(Cl.get_settings(S.session_cl(st)))
+        && Bool.not(U32.is_zero(Cl.settings_hist_cap(Cl.get_settings(S.session_cl(st))))), ctx, st, path, allowed)
+
 def archive.current(ctx: LP.Context, +st: S.Session, +allowed: Bool, +path: String) -> IO(LP.Context & S.Session & Bool):
-  archive.pick(allowed && Bool.not(String.is_empty(path)) && Cl.settings_history(Cl.get_settings(S.session_cl(st)))
-    && Bool.not(U32.is_zero(Cl.settings_hist_cap(Cl.get_settings(S.session_cl(st))))), ctx, st, path, allowed)
+  archive.current.gated(allowed, ctx, st, path)
 
 def archive.prepared(result: LP.Context & S.Session & Bool, path: String) -> IO(LP.Context & S.Session & Bool):
   match result:

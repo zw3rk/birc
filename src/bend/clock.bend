@@ -175,5 +175,17 @@ def line_stamps.go(fuel: Nat, lines: List<&2, String>) -> IO(List<&2, Maybe<&2, 
             stamps : List<&2, Maybe<&2, String>> <- line_stamps.go(p, rest)
             return stamp <> stamps
 
+# D188: structural walk; the old fuel seeded one List.length per chunk even
+# though the walk already terminates on Nil. line_stamps.go stays for any
+# fuel-pinned caller.
+def line_stamps.walk(+lines: List<&2, String>) -> IO(List<&2, Maybe<&2, String>>):
+  match lines:
+    case Nil{}: IO.pure(List<&2, Maybe<&2, String>>, Nil{})
+    case Con{line, rest}:
+      do IO<List<&2, Maybe<&2, String>>>:
+        stamp : Maybe<&2, String> <- line_stamp(line)
+        stamps : List<&2, Maybe<&2, String>> <- line_stamps.walk(rest)
+        return stamp <> stamps
+
 def line_stamps(+lines: List<&2, String>) -> IO(List<&2, Maybe<&2, String>>):
-  line_stamps.go(List.length(&2, String, lines), lines)
+  line_stamps.walk(lines)

@@ -106,19 +106,18 @@ def pong_cons.on(+pong: String, +acc: List<&2, String>, empty: Bool) -> List<&2,
 def pong_cons(+pong: String, +acc: List<&2, String>) -> List<&2, String>:
   pong_cons.on(pong, acc, String.is_empty(pong))
 
-def reader_pongs.go(fuel: Nat, +lines: List<&2, String>, +acc: List<&2, String>) -> List<&2, String>:
-  match fuel:
-    case 0n:
+# D148: fuel was List.length(lines) and both the fuel-0 and Nil arms return
+# the identical reverse, so the length walk was pure waste. Structural
+# termination on Nil holds exactly.
+def reader_pongs.go(+lines: List<&2, String>, +acc: List<&2, String>) -> List<&2, String>:
+  match lines:
+    case Nil{}:
       List.reverse(&2, String, acc)
-    case 1n+f:
-      match lines:
-        case Nil{}:
-          List.reverse(&2, String, acc)
-        case Con{h, t}:
-          reader_pongs.go(f, t, pong_cons(Irc.pong_for(h), acc))
+    case Con{h, t}:
+      reader_pongs.go(t, pong_cons(Irc.pong_for(h), acc))
 
 def reader_pongs(+lines: List<&2, String>) -> List<&2, String>:
-  reader_pongs.go(List.length(&2, String, lines), lines, Nil{})
+  reader_pongs.go(lines, Nil{})
 
 # The reply carries this read's request ID (when the read holds PINGs) and
 # the Chunk carries the same ID, so the reply, post, dequeue, receive, and
@@ -612,12 +611,23 @@ def writer_queued(sock: Tr.Conn, +gen: U32, +plan: Out.Batch, +all_txn: List<&2,
       writer_split_go(split, sock, gen, now, later, budget, scheduled, total, next_txn, evt, cmd, k)
 
 # Overflow beyond PENDING_CAP discards the newest excess without retry and
-# reports the drop count; the kept prefix stays paired line-for-line.
-def writer_queue_notice(+dropped: Nat, +gen: U32, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
+# reports the drop count once per entry into overflow; the kept prefix stays
+# paired line-for-line. The queue is truncated every step, so a still-full
+# queue stays silent until it drains below the cap and refills; a new
+# generation starts empty and notifies again on its own first overflow.
+# D93: every over-cap Cont used to spawn its own identical notice (plus a
+# redundant reconnect-path evaluation per heartbeat); identical notices now
+# coalesce on the entry edge keyed by generation (fresh queue) and count.
+def writer_queue_notice.entered(entered: Bool, +dropped: Nat, +gen: U32, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
+  match entered:
+    case False{}: IO.pure(Unit, Unit{})
+    case True{}:
+      IO.spawn(Unit, writer_fail(evt, gen, "outbound queue overflow; " ++ Nat.show(dropped) ++ " lines were discarded without retry"))
+
+def writer_queue_notice(+dropped: Nat, +old: Nat, +gen: U32, +evt: Chan(Sess.UiMsg)) -> IO(Unit):
   match dropped:
     case 0n: IO.pure(Unit, Unit{})
-    case 1n+p:
-      IO.spawn(Unit, writer_fail(evt, gen, "outbound queue overflow; " ++ Nat.show(dropped) ++ " lines were discarded without retry"))
+    case 1n+p: writer_queue_notice.entered(Nat.is_lt(old, Out.PENDING_CAP()), dropped, gen, evt)
 
 def writer_queue(st: Writer, +outs: List<&2, String>, +txn: U32, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), k: Writer -> IO(Unit)) -> IO(Unit):
   match st:
@@ -627,7 +637,11 @@ def writer_queue(st: Writer, +outs: List<&2, String>, +txn: U32, +evt: Chan(Sess
         case Some{s}:
           +all = List.append(&2, String, pending, outs)
           +all_txn = List.append(&2, U32, pending_txn, Out.repeat_txn(txn, List.length(&2, String, outs)))
-          +total = List.length(&2, String, all)
+          # D93: the pre-append length is the entry-edge signal (a truncated
+          # queue never exceeds the cap, so old < CAP means this step entered
+          # overflow); the sum equals the old length(all) walk exactly.
+          +old = List.length(&2, String, pending)
+          +total = Nat.add(old, List.length(&2, String, outs))
           +kept = Out.bound_kept(total)
           +tpending = List.take(&2, String, all, kept)
           +tpending_txn = List.take(&2, U32, all_txn, kept)
@@ -639,7 +653,7 @@ def writer_queue(st: Writer, +outs: List<&2, String>, +txn: U32, +evt: Chan(Sess
           +has_new = Bool.not(List.is_empty(&2, String, outs))
           +next = Bool.pick(U32, has_new, advanced, next_txn)
           do IO<Unit>:
-            Unit <- writer_queue_notice(Out.bound_dropped(total), gen, evt)
+            Unit <- writer_queue_notice(Out.bound_dropped(total), old, gen, evt)
             writer_queued(s, gen, plan, tpending_txn, scheduled, List.length(&2, String, tpending), next, evt, cmd, k)
 
 def writer_pump(same: Bool, st: Writer, +evt: Chan(Sess.UiMsg), +cmd: Chan(Sess.NetCmd), k: Writer -> IO(Unit)) -> IO(Unit):
@@ -720,7 +734,11 @@ def admit_dial(+host: String, +port: U32, +gen: U32, +nick: String, +acc: AdmitA
   match acc:
     case AdmitAcc{_, +dials, _, +closed, _}:
       +qd: QueuedDial = QueuedDial{host, port, gen, nick}
-      +grown = List.append(&2, QueuedDial, dials, qd <> Nil{})
+      # D92: prepend, not append. `dials` feeds only the auth_scope_dial
+      # fold (a conjunction: enabled && host-match && port-match), which is
+      # order-insensitive, so newest-first accumulation is identical. The
+      # append walks only the 1-cell prefix, so enqueue is O(1), not O(D).
+      +grown = List.append(&2, QueuedDial, qd <> Nil{}, dials)
       # Newer Dial clears kept and any prior Drop; winner path abandons this sock.
       (AdmitAcc{Some{qd}, grown, Nil{}, closed, False{}}, False{})
 
@@ -812,16 +830,14 @@ def writer_drain_rounds(rounds: Nat, +cmd: Chan(Sess.NetCmd), +setup_gen: U32, +
 def writer_drain(+cmd: Chan(Sess.NetCmd), +setup_gen: U32, +acc: AdmitAcc) -> IO(AdmitAcc):
   writer_drain_rounds(32n, cmd, setup_gen, acc)
 
-def writer_admit_scope(fuel: Nat, +dials: List<&2, QueuedDial>, +scope: AuthScope) -> AuthScope:
-  match fuel:
-    case 0n:
+# D92: fuel was List.length(dials) at every call site and exhausts exactly
+# at Nil, so it was pure waste. Structural termination on Nil holds exactly.
+def writer_admit_scope(+dials: List<&2, QueuedDial>, +scope: AuthScope) -> AuthScope:
+  match dials:
+    case Nil{}:
       scope
-    case 1n+p:
-      match dials:
-        case Nil{}:
-          scope
-        case Con{QueuedDial{+host, +port, _, _}, t}:
-          writer_admit_scope(p, t, auth_scope_dial(scope, host, port))
+    case Con{QueuedDial{+host, +port, _, _}, t}:
+      writer_admit_scope(t, auth_scope_dial(scope, host, port))
 
 def writer_kept_drop(honor: Bool, st: Writer, k: Writer -> IO(Unit)) -> IO(Unit):
   match honor:
@@ -971,9 +987,9 @@ def writer_admit_latest.open(+latest: Maybe<&2, QueuedDial>, +dials: List<&2, Qu
           # Drop after Dial B: cancel without TCP to B, but AuthScope still
           # follows the drained dials (B disabled when A≠B).
           writer_admit_single(kept, False{}, True{}, sock, nick, gen, evt, boot, cmd,
-            writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), budget, next_txn, k)
+            writer_admit_scope(dials, scope), budget, next_txn, k)
         case False{}:
-          writer_admit_winner(h2, p2, g2, n2, writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), kept, False{}, False{}, sock, k, retry)
+          writer_admit_winner(h2, p2, g2, n2, writer_admit_scope(dials, scope), kept, False{}, False{}, sock, k, retry)
 
 def writer_admit_latest(+latest: Maybe<&2, QueuedDial>, +dials: List<&2, QueuedDial>, +kept: List<&2, Sess.NetCmd>, +closed: Bool, dropped: Bool, sock: Tr.Conn, +nick: String, +gen: U32, +force_tls: Bool, +evt: Chan(Sess.UiMsg), +boot: Chan(Boot), +cmd: Chan(Sess.NetCmd), +scope: AuthScope, budget: Out.Budget, +next_txn: U32, k: (Writer & AuthScope) -> IO(Unit), retry: String -> U32 -> U32 -> String -> AuthScope -> List<&2, Sess.NetCmd> -> Bool -> Bool -> ((Writer & AuthScope) -> IO(Unit)) -> IO(Unit)) -> IO(Unit):
   match closed:
@@ -982,7 +998,7 @@ def writer_admit_latest(+latest: Maybe<&2, QueuedDial>, +dials: List<&2, QueuedD
       # closed=False cancel so k still observes the folded scope (writer_admit_done
       # with closed=True finishes without calling k).
       writer_admit_single(kept, False{}, True{}, sock, nick, gen, evt, boot, cmd,
-        writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), budget, next_txn, k)
+        writer_admit_scope(dials, scope), budget, next_txn, k)
     case False{}:
       writer_admit_latest.open(latest, dials, kept, dropped, sock, nick, gen, evt, boot, cmd, scope, budget, next_txn, k, retry)
 
@@ -1056,11 +1072,11 @@ def after_conn_latest.open(+latest: Maybe<&2, QueuedDial>, +dials: List<&2, Queu
         case True{}:
           # Drop after Dial B: no TCP to B; returned scope follows dials.
           dial_conn_cancel(live, boot, sock, gen,
-            writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), k)
+            writer_admit_scope(dials, scope), k)
         case False{}:
           do IO<Unit>:
             Unit <- Tr.close(sock)
-            retry(h2, p2, g2, n2, writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope),
+            retry(h2, p2, g2, n2, writer_admit_scope(dials, scope),
               DialCarry{kept, False{}, False{}}, k)
     case None{}:
       after_conn_open(False{}, dropped, kept, sock, nick, gen, evt, boot, cmd, live, scope, k)
@@ -1070,7 +1086,7 @@ def after_conn_latest(+latest: Maybe<&2, QueuedDial>, +dials: List<&2, QueuedDia
     case True{}:
       # Cmd-close after Dial B: AuthScope follows dials (parity with Drop).
       after_conn_open(True{}, dropped, kept, sock, nick, gen, evt, boot, cmd, live,
-        writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), k)
+        writer_admit_scope(dials, scope), k)
     case False{}:
       after_conn_latest.open(latest, dials, kept, dropped, sock, nick, gen, evt, boot, cmd, live, scope, k, retry)
 
@@ -1112,11 +1128,11 @@ def dial_after_latest.open(latest: Maybe<&2, QueuedDial>, +dials: List<&2, Queue
         case True{}:
           # Drop after Dial B: no TCP to B; returned scope follows dials.
           dial_cancel(live, boot, sock, gen,
-            writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), k)
+            writer_admit_scope(dials, scope), k)
         case False{}:
           do IO<Unit>:
             Unit <- Socket.close(sock)
-            retry(h2, p2, g2, n2, writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope),
+            retry(h2, p2, g2, n2, writer_admit_scope(dials, scope),
               DialCarry{kept, False{}, False{}}, k)
     case None{}:
       dial_after_plain(dropped, False{}, sock, host, port, force_tls, nick, gen, evt, boot, cmd, live, scope, acc0, k, retry)
@@ -1126,7 +1142,7 @@ def dial_after_latest(latest: Maybe<&2, QueuedDial>, +dials: List<&2, QueuedDial
     case True{}:
       # Cmd-close after Dial B: AuthScope follows dials (parity with Drop).
       dial_cancel(live, boot, sock, gen,
-        writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), k)
+        writer_admit_scope(dials, scope), k)
     case False{}:
       dial_after_latest.open(latest, dials, kept, dropped, sock, host, port, force_tls, nick, gen, evt, boot, cmd, live, scope, acc0, k, retry)
 
@@ -1208,9 +1224,9 @@ def writer_admit_sock.latest.open(latest: Maybe<&2, QueuedDial>, dropped: Bool, 
         case True{}:
           # Drop after Dial B: cancel without TCP to B; scope follows dials.
           writer_admit_raw_drop(kept, False{}, sock, gen, evt, cmd,
-            writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), budget, next_txn, k)
+            writer_admit_scope(dials, scope), budget, next_txn, k)
         case False{}:
-          writer_admit_raw_winner(h2, p2, g2, n2, writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), kept, False{}, False{}, sock, k, retry)
+          writer_admit_raw_winner(h2, p2, g2, n2, writer_admit_scope(dials, scope), kept, False{}, False{}, sock, k, retry)
     case None{}:
       writer_admit_sock.plain(dropped, sock, host, nick, gen, force_tls, evt, boot, cmd, scope, budget, next_txn, kept, False{}, k, retry)
 
@@ -1220,7 +1236,7 @@ def writer_admit_sock.latest(latest: Maybe<&2, QueuedDial>, dropped: Bool, +dial
       # Cmd-close after Dial B: fold AuthScope like Drop; closed=False so k
       # observes the fold (writer_admit_done True finishes without calling k).
       writer_admit_raw_drop(kept, False{}, sock, gen, evt, cmd,
-        writer_admit_scope(List.length(&2, QueuedDial, dials), dials, scope), budget, next_txn, k)
+        writer_admit_scope(dials, scope), budget, next_txn, k)
     case False{}:
       writer_admit_sock.latest.open(latest, dropped, dials, sock, host, nick, gen, force_tls, evt, boot, cmd, scope, budget, next_txn, kept, k, retry)
 
@@ -1411,11 +1427,15 @@ def writer_command(c: Sess.NetCmd, st: Writer, +evt: Chan(Sess.UiMsg), +cmd: Cha
       match st:
         case Writer{sock, +gen, +pending, +pending_txn, +next_txn, budget, +scheduled}:
           writer_pump(U32.is_eq(pgen, gen), Writer{sock, gen, pending, pending_txn, next_txn, budget, scheduled}, evt, cmd, next => k((next, scope)))
+    # D261: a Drop without autoreconnect redial used to discard the queue
+    # silently; report the discarded count through writer_fail like the
+    # sibling fail arms (hangup/flush/overflow), even when it is zero.
     case Sess.Drop{}:
       match st:
-        case Writer{sock, gen, _, _, +next_txn, budget, _}:
+        case Writer{sock, +gen, +pending, _, +next_txn, budget, _}:
           do IO<Unit>:
             Unit <- close_socket(sock)
+            Unit <- IO.spawn(Unit, writer_fail(evt, gen, "disconnect; " ++ Nat.show(List.length(&2, String, pending)) ++ " queued lines were discarded without retry"))
             k((Writer{None{}, gen, Nil{}, Nil{}, next_txn, budget, False{}}, scope))
     case Sess.Hangup{}:
       match st:

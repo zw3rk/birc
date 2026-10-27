@@ -104,8 +104,19 @@ def fold_step.lag_on_at(+cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +
     case Some{sent}:
       fold_step.lag_rtt_at(cl, pongs, now_ms, h, sent, stamp)
 
+# D155: pre-gate on the lag token before parsing. extract_pong_lag can only
+# return Some when a param starts with "birc_", so a line without that
+# substring parses to None; the gate skips the parse on all such lines with
+# zero behavior change (case-exact: the token match itself is case-sensitive).
+def fold_step.lag_at.tagged(tagged: Bool, +cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +h: String, +stamp: Maybe<&2, String>) -> FoldAcc:
+  match tagged:
+    case True{}:
+      fold_step.lag_on_at(cl, pongs, now_ms, h, Irc.extract_pong_lag_line(h), stamp)
+    case False{}:
+      fold_step.normal_at(cl, pongs, now_ms, h, stamp)
+
 def fold_step.lag_at(+cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +h: String, +stamp: Maybe<&2, String>) -> FoldAcc:
-  fold_step.lag_on_at(cl, pongs, now_ms, h, Irc.extract_pong_lag_line(h), stamp)
+  fold_step.lag_at.tagged(String.contains(h, "birc_"), cl, pongs, now_ms, h, stamp)
 
 def fold_step.auth.fed(fed: FoldAcc, phase: Cl.AuthPhase, outs: List<&2, String>, notice: Auth.Notice) -> FoldAcc:
   match fed:
@@ -172,8 +183,16 @@ def fold_step.lag_on_at_with(+isc: Cl.Iso, +cl: Cl.Client, pongs: List<&2, Strin
     case Some{sent}:
       fold_step.lag_rtt_at_with(isc, cl, pongs, now_ms, h, sent, stamp)
 
+# D155 twin: same birc_ pre-gate as lag_at.tagged for the Iso path.
+def fold_step.lag_at_with.tagged(tagged: Bool, +isc: Cl.Iso, +cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +h: String, +stamp: Maybe<&2, String>) -> FoldAcc:
+  match tagged:
+    case True{}:
+      fold_step.lag_on_at_with(isc, cl, pongs, now_ms, h, Irc.extract_pong_lag_line(h), stamp)
+    case False{}:
+      fold_step.normal_at_with(isc, cl, pongs, now_ms, h, stamp)
+
 def fold_step.lag_at_with(+isc: Cl.Iso, +cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +h: String, +stamp: Maybe<&2, String>) -> FoldAcc:
-  fold_step.lag_on_at_with(isc, cl, pongs, now_ms, h, Irc.extract_pong_lag_line(h), stamp)
+  fold_step.lag_at_with.tagged(String.contains(h, "birc_"), isc, cl, pongs, now_ms, h, stamp)
 
 def fold_step.auth.feed_at_with(+isc: Cl.Iso, consumed: Bool, +cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, +h: String, +stamp: Maybe<&2, String>) -> FoldAcc:
   match consumed:
@@ -213,21 +232,6 @@ def fold_lines_ms(+cl: Cl.Client, +xs: List<&2, String>, +now_ms: U32) -> Cl.Cli
 
 def fold_lines(+cl: Cl.Client, +xs: List<&2, String>) -> Cl.Client & List<&2, String>:
   fold_lines_ms(cl, xs, 0)
-
-# Resolve each typing event against the Client at that wire position. A JOIN
-# earlier in one chunk can establish an otherwise ambiguous +channel identity.
-def fold_typing_step.fed(fed: FoldAcc, typing: Ty.State) -> FoldAcc & Ty.State:
-  match fed:
-    case FoldAcc{+cl, pongs, now_ms}:
-      (FoldAcc{cl, pongs, now_ms}, Ty.retain_client(typing, cl))
-
-def fold_typing_step.line(+cl: Cl.Client, pongs: List<&2, String>, +now_ms: U32, typing: Ty.State, +line: String) -> FoldAcc & Ty.State:
-  fold_typing_step.fed(fold_step.got(cl, pongs, now_ms, line), Ty.apply_line_for(typing, cl, line, now_ms))
-
-def fold_typing_step(st: FoldAcc & Ty.State, line: String) -> FoldAcc & Ty.State:
-  match st:
-    case (FoldAcc{+cl, pongs, +now_ms}, typing):
-      fold_typing_step.line(cl, pongs, now_ms, typing, line)
 
 def live_fuel(+frames: U32) -> Nat:
   U32.to_nat(frames)
@@ -463,8 +467,10 @@ def can_send(net: NetState) -> Bool:
 # Shared disconnected hold for single-line and adapter multiline submits.
 # Both gate on can_send; when held, echo to the server buffer with no wire
 # output and no Self echo. Session owns the text; adapters must call this.
-def hold_offline(+cl: Cl.Client) -> Cl.Client & String & NetCmd:
-  (Sub.echo_err_server(cl, "not connected"), "", Cont{Nil{}})
+# D150: the hold routes through the shared hold_cmd policy so the offline
+# Cont hold lives in one place (identity on Cont{Nil{}} for every net).
+def hold_offline(net: NetState, +cl: Cl.Client) -> Cl.Client & String & NetCmd:
+  (Sub.echo_err_server(cl, "not connected"), "", hold_cmd(net, Cont{Nil{}}))
 
 def connect_apply.busy(+cl: Cl.Client, online: Bool) -> Cl.Client & String & NetCmd:
   match online:
@@ -535,43 +541,50 @@ def submit_local_with(+iso: Isupport.State, input: Sub.Input, +cl: Cl.Client) ->
     case _:
       wrap_local(Sub.submit_parsed_with(iso, cl, input))
 
-def submit_offline.wire(+cl: Cl.Client, input: Sub.Input) -> Cl.Client & String & NetCmd:
+def submit_offline.wire(net: NetState, +cl: Cl.Client, input: Sub.Input) -> Cl.Client & String & NetCmd:
   match input:
     # PART cancels desired membership even before registration or while offline.
     # Submission validates the target; this local path never emits its wire.
     case Sub.CommandInput{Sub.Part{}, verb, rest}: submit_local(Sub.CommandInput{Sub.Part{}, verb, rest}, cl)
-    case _: hold_offline(cl)
+    case _: hold_offline(net, cl)
 
-def submit_offline(+cl: Cl.Client, +input: Sub.Input, needs_wire: Bool) -> Cl.Client & String & NetCmd:
+def submit_offline(net: NetState, +cl: Cl.Client, +input: Sub.Input, needs_wire: Bool) -> Cl.Client & String & NetCmd:
   match needs_wire:
-    case True{}: submit_offline.wire(cl, input)
+    case True{}: submit_offline.wire(net, cl, input)
     case False{}: submit_local(input, cl)
 
-def submit_offline.wire_with(+iso: Isupport.State, +cl: Cl.Client, input: Sub.Input) -> Cl.Client & String & NetCmd:
+def submit_offline.wire_with(net: NetState, +iso: Isupport.State, +cl: Cl.Client, input: Sub.Input) -> Cl.Client & String & NetCmd:
   match input:
     case Sub.CommandInput{Sub.Part{}, verb, rest}: submit_local_with(iso, Sub.CommandInput{Sub.Part{}, verb, rest}, cl)
-    case _: hold_offline(cl)
+    case _: hold_offline(net, cl)
 
-def submit_offline_with(+iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, needs_wire: Bool) -> Cl.Client & String & NetCmd:
+def submit_offline_with(net: NetState, +iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, needs_wire: Bool) -> Cl.Client & String & NetCmd:
   match needs_wire:
-    case True{}: submit_offline.wire_with(iso, cl, input)
+    case True{}: submit_offline.wire_with(net, iso, cl, input)
     case False{}: submit_local_with(iso, input, cl)
 
-def submit_send_echo(+cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
+# D150: test-pinned submit_send/submit_send_with keep the online flag; the net
+# they thread down only feeds hold_cmd on the held path.
+def online_net(online: Bool) -> NetState:
+  match online:
+    case True{}: Online{}
+    case False{}: Offline{}
+
+def submit_send_echo(net: NetState, +cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
   match online:
     case True{}: wrap_outs(Sub.submit_parsed_echo(cl, input, echo_ok))
-    case False{}: submit_offline(cl, input, Sub.needs_connection(input))
+    case False{}: submit_offline(net, cl, input, Sub.needs_connection(input))
 
-def submit_send(+cl: Cl.Client, +input: Sub.Input, online: Bool) -> Cl.Client & String & NetCmd:
-  submit_send_echo(cl, input, online, False{})
+def submit_send(+cl: Cl.Client, +input: Sub.Input, +online: Bool) -> Cl.Client & String & NetCmd:
+  submit_send_echo(online_net(online), cl, input, online, False{})
 
-def submit_send_with_echo(+iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
+def submit_send_with_echo(net: NetState, +iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
   match online:
     case True{}: wrap_outs(Sub.submit_parsed_with_echo(iso, cl, input, echo_ok))
-    case False{}: submit_offline_with(iso, cl, input, Sub.needs_connection(input))
+    case False{}: submit_offline_with(net, iso, cl, input, Sub.needs_connection(input))
 
-def submit_send_with(+iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, online: Bool) -> Cl.Client & String & NetCmd:
-  submit_send_with_echo(iso, cl, input, online, False{})
+def submit_send_with(+iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, +online: Bool) -> Cl.Client & String & NetCmd:
+  submit_send_with_echo(online_net(online), iso, cl, input, online, False{})
 
 # ---- /history interception ----------------------------------------------
 # /history is a Session-owned catalog constructor (like connect), intercepted
@@ -580,22 +593,22 @@ def submit_send_with(+iso: Isupport.State, +cl: Cl.Client, +input: Sub.Input, on
 # client and no outs. The negotiated flag comes from the session's live
 # history owner (shared CAP registry); the key loop threads it from Session
 # into submit_or_split/apply_keys.
-def history_apply.offline(offline: Bool, +cl: Cl.Client, +rest: String, +negotiated: Bool) -> Cl.Client & String & NetCmd:
+def history_apply.offline(net: NetState, offline: Bool, +cl: Cl.Client, +rest: String, +negotiated: Bool) -> Cl.Client & String & NetCmd:
   match offline:
-    case True{}: (Sub.echo_err_server(cl, "not connected"), "", Cont{Nil{}})
+    case True{}: (Sub.echo_err_server(cl, "not connected"), "", hold_cmd(net, Cont{Nil{}}))
     case False{}: wrap_outs(Hs.submit_history(cl, rest, negotiated))
 
 def history_apply(+cl: Cl.Client, +net: NetState, +rest: String, +negotiated: Bool) -> Cl.Client & String & NetCmd:
-  history_apply.offline(Hs.history_needs_connection(rest) && Bool.not(can_send(net)), cl, rest, negotiated)
+  history_apply.offline(net, Hs.history_needs_connection(rest) && Bool.not(can_send(net)), cl, rest, negotiated)
 
-def submit_send_ctx.iso(iso: Maybe<&2, Isupport.State>, +cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
+def submit_send_ctx.iso(iso: Maybe<&2, Isupport.State>, +net: NetState, +cl: Cl.Client, +input: Sub.Input, online: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
   match iso:
-    case None{}: submit_send_echo(cl, input, online, echo_ok)
-    case Some{+s}: submit_send_with_echo(s, cl, input, online, echo_ok)
+    case None{}: submit_send_echo(net, cl, input, online, echo_ok)
+    case Some{+s}: submit_send_with_echo(net, s, cl, input, online, echo_ok)
 
-def submit_send_ctx(ctx: Sub.SubmitCtx, +cl: Cl.Client, +input: Sub.Input, online: Bool) -> Cl.Client & String & NetCmd:
+def submit_send_ctx(ctx: Sub.SubmitCtx, net: NetState, +cl: Cl.Client, +input: Sub.Input, online: Bool) -> Cl.Client & String & NetCmd:
   match ctx:
-    case Sub.SubmitCtx{iso, +echo_ok}: submit_send_ctx.iso(iso, cl, input, online, echo_ok)
+    case Sub.SubmitCtx{iso, +echo_ok}: submit_send_ctx.iso(iso, net, cl, input, online, echo_ok)
 
 # Session verbs are catalog constructors. Connect and history never reach the
 # wire submitter; open stays local even when the negotiated path is on.
@@ -605,14 +618,14 @@ def submit_input_ctx.cmd(ctx: Sub.SubmitCtx, cmd: Sub.Slash, +verb: String, +res
     case Sub.Connect{}: connect_apply(cl, net, port, Sub.connect_from_input.verb(False{}, rest))
     case Sub.Reconnect{}: connect_apply(cl, net, port, Sub.connect_from_input.verb(True{}, rest))
     case Sub.OpenCmd{}: open_apply.got(cl, Sub.open_resolve_target(cl, rest))
-    case _: submit_send_ctx(ctx, cl, Sub.CommandInput{cmd, verb, rest}, can_send(net))
+    case _: submit_send_ctx(ctx, net, cl, Sub.CommandInput{cmd, verb, rest}, can_send(net))
 
 def submit_input_ctx(ctx: Sub.SubmitCtx, input: Sub.Input, +cl: Cl.Client, +net: NetState, +port: U32, +negotiated: Bool) -> Cl.Client & String & NetCmd:
   match input:
     case Sub.CommandInput{+cmd, +verb, +rest}:
       submit_input_ctx.cmd(ctx, cmd, verb, rest, cl, net, port, negotiated)
     case _:
-      submit_send_ctx(ctx, cl, input, can_send(net))
+      submit_send_ctx(ctx, net, cl, input, can_send(net))
 
 def submit_input_echo(input: Sub.Input, +cl: Cl.Client, +net: NetState, +port: U32, +negotiated: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd:
   submit_input_ctx(Sub.submit_ctx_plain(echo_ok), input, cl, net, port, negotiated)
@@ -1114,13 +1127,6 @@ def nick_match.ok(own: Bool, sw: Bool) -> Bool:
     case False{}:
       sw
 
-def match_nicks.keep(+cand: String, rest: List<&2, String>, hit: Bool) -> List<&2, String>:
-  match hit:
-    case True{}:
-      cand <> rest
-    case False{}:
-      rest
-
 def comp_next_idx.wrap(wrap: Bool, +p: Nat) -> Nat:
   match wrap:
     case True{}:
@@ -1153,20 +1159,22 @@ def slash_command_list() -> List<&2, String>:
 def is_slash_word(+w: String) -> Bool:
   String.starts_with(w, "/")
 
-def match_slash.keep(+cand: String, rest: List<&2, String>, hit: Bool) -> List<&2, String>:
+def match_slash.step(hit: Bool, +cand: String, k: Unit -> List<&2, String>) -> List<&2, String>:
   match hit:
     case True{}:
-      cand <> rest
+      cand <> k(Unit{})
     case False{}:
-      rest
+      k(Unit{})
 
-def match_slash.go(xs: List<&2, String>, +word: String) -> List<&2, String>:
+def match_slash.scan(xs: List<&2, String>, +folded: String) -> List<&2, String>:
   match xs:
     case Nil{}:
       Nil{}
     case Con{+h, +t}:
-      +rest = match_slash.go(t, word)
-      match_slash.keep(h, rest, Sub.slash_starts(h, word))
+      match_slash.step(String.starts_with(String.to_upper(h), folded), h, _ => match_slash.scan(t, folded))
+
+def match_slash.go(xs: List<&2, String>, +word: String) -> List<&2, String>:
+  match_slash.scan(xs, String.to_upper(word))
 
 def comp_format.choice(+pre: String, +item: String, slash: Bool) -> String:
   match slash:
@@ -1198,16 +1206,25 @@ def comp_pick.on(
 # differ exactly on []\^~); slash commands compare ASCII-only through the
 # shared Sub.slash_eq/slash_starts predicates, identical under every mapping
 # in dispatch, completion, ghost, and help alike.
-def nick_match_iso(+iso: Isupport.State, +cand: String, +my_nick: String, +word: String) -> Bool:
-  nick_match.ok(Isupport.cm_eq(iso, cand, my_nick), String.starts_with(Isupport.cm_fold(iso, cand), Isupport.cm_fold(iso, word)))
+def nick_match_folded(+cand_folded: String, +my_folded: String, +folded: String) -> Bool:
+  nick_match.ok(String.eq(cand_folded, my_folded), String.starts_with(cand_folded, folded))
 
-def match_nicks_iso.go(+iso: Isupport.State, xs: List<&2, String>, +my_nick: String, +word: String) -> List<&2, String>:
+def match_nicks_iso.step(hit: Bool, +cand: String, k: Unit -> List<&2, String>) -> List<&2, String>:
+  match hit:
+    case True{}:
+      cand <> k(Unit{})
+    case False{}:
+      k(Unit{})
+
+def match_nicks_iso.scan(+iso: Isupport.State, xs: List<&2, String>, +my_folded: String, +folded: String) -> List<&2, String>:
   match xs:
     case Nil{}:
       Nil{}
     case Con{+h, +t}:
-      +rest = match_nicks_iso.go(iso, t, my_nick, word)
-      match_nicks.keep(h, rest, nick_match_iso(iso, h, my_nick, word))
+      match_nicks_iso.step(nick_match_folded(Isupport.cm_fold(iso, h), my_folded, folded), h, _ => match_nicks_iso.scan(iso, t, my_folded, folded))
+
+def match_nicks_iso.go(+iso: Isupport.State, xs: List<&2, String>, +my_nick: String, +word: String) -> List<&2, String>:
+  match_nicks_iso.scan(iso, xs, Isupport.cm_fold(iso, my_nick), Isupport.cm_fold(iso, word))
 
 def comp_candidates_iso.on(+iso: Isupport.State, +cl: Cl.Client, +word: String, slash: Bool) -> List<&2, String>:
   match slash:
@@ -1234,36 +1251,43 @@ def slash_case_ok() -> Bool:
     && Bool.not(Sub.slash_known("nope"))
     && slash_dispatch_join(Sub.parse_input("/JOIN #x"))
 
-def comp_step_iso.active(+iso: Isupport.State, +cl: Cl.Client, +pre: String, +word: String, +idx: Nat, +typed: String) -> Comp & String & U32:
+# D204: resolve the completion word first, then build the candidate list once
+# and share it across the active/fresh arms instead of rebuilding per arm.
+def comp_step_iso.splitword(pair: String & String) -> String & String & Nat & Bool:
+  match pair:
+    case (pre, word):
+      (pre, word, 0n, True{})
+
+def comp_step_iso.freshword(+typed: String) -> String & String & Nat & Bool:
+  comp_step_iso.splitword(split_word(typed))
+
+def comp_step_iso.upword(word: Maybe<&2, CompWord>, +typed: String) -> String & String & Nat & Bool:
+  match word:
+    case None{}: comp_step_iso.freshword(typed)
+    case Some{CompWord{+pre, +word, idx}}: (pre, word, idx, False{})
+
+def comp_step_iso.worded(+comp: Comp, +typed: String) -> String & String & Nat & Bool:
+  match comp:
+    case CompActive{+pre, +word, idx}: (pre, word, idx, False{})
+    case CompUpload{_, completion, _}: comp_step_iso.upword(completion, typed)
+    case _: comp_step_iso.freshword(typed)
+
+def comp_step_iso.picked(+matches: List<&2, String>, +pre: String, +word: String, +typed: String, +idx: Nat, +len: Nat, fresh: Bool) -> Comp & String & U32:
+  match fresh:
+    case True{}: comp_pick.on(matches, pre, word, typed, 0n, Nat.is_eq(len, 0n))
+    case False{}: comp_pick.on(matches, pre, word, typed, comp_next_idx(idx, len), Nat.is_eq(len, 0n))
+
+def comp_step_iso.built(+iso: Isupport.State, +cl: Cl.Client, +pre: String, +word: String, +idx: Nat, fresh: Bool, +typed: String) -> Comp & String & U32:
   +matches = comp_candidates_iso(iso, cl, word)
   +len = List.length(&2, String, matches)
-  comp_pick.on(matches, pre, word, typed, comp_next_idx(idx, len), Nat.is_eq(len, 0n))
+  comp_step_iso.picked(matches, pre, word, typed, idx, len, fresh)
 
-def comp_step_iso.fresh(+iso: Isupport.State, +cl: Cl.Client, pair: String & String, +typed: String) -> Comp & String & U32:
-  match pair:
-    case (+pre, +word):
-      +matches = comp_candidates_iso(iso, cl, word)
-      comp_pick.on(matches, pre, word, typed, 0n, Nat.is_eq(List.length(&2, String, matches), 0n))
-
-def comp_step_iso.upload(+iso: Isupport.State, word: Maybe<&2, CompWord>, +cl: Cl.Client, +typed: String) -> Comp & String & U32:
-  match word:
-    case None{}: comp_step_iso.fresh(iso, cl, split_word(typed), typed)
-    case Some{CompWord{pre, word, idx}}: comp_step_iso.active(iso, cl, pre, word, idx, typed)
+def comp_step_iso.go(worded: String & String & Nat & Bool, +iso: Isupport.State, +cl: Cl.Client, +typed: String) -> Comp & String & U32:
+  match worded:
+    case (pre, word, idx, fresh): comp_step_iso.built(iso, cl, pre, word, idx, fresh, typed)
 
 def comp_step_iso(+iso: Isupport.State, +cl: Cl.Client, comp: Comp, +typed: String) -> Comp & String & U32:
-  match comp:
-    case CompNone{}:
-      comp_step_iso.fresh(iso, cl, split_word(typed), typed)
-    case CompActive{+pre, +word, idx}:
-      comp_step_iso.active(iso, cl, pre, word, idx, typed)
-    case CompUpload{_, completion, _}:
-      comp_step_iso.upload(iso, completion, cl, typed)
-    case CompHelp{_}:
-      comp_step_iso.fresh(iso, cl, split_word(typed), typed)
-    case CompHidden{}:
-      comp_step_iso.fresh(iso, cl, split_word(typed), typed)
-    case CompPick{_}:
-      comp_step_iso.fresh(iso, cl, split_word(typed), typed)
+  comp_step_iso.go(comp_step_iso.worded(comp, typed), iso, cl, typed)
 
 def comp_step_ok.check(c: Comp, +str: String, seed: U32) -> Bool:
   String.eq(str, "/join ") && U32.is_eq(seed, 1)
@@ -1964,8 +1988,17 @@ def session_set_upload(st: Session, state: Up.State) -> Session:
 
 # Every connection/focus transition must call this, not only completion. Busy
 # retains physical ownership but cannot regain permission after leaving scope.
+# D179: retain is identity on Idle, and the Idle rebuild is identity too
+# (joined is a pure predicate of the untouched plan; comp_ordinary is identity
+# when the upload state read from comp is already Idle, and CompUpload never
+# holds Idle). Gate first so the idle frame/event path skips the rebuild.
+def session_upload_maintain.idle(+st: Session, +state: Up.State) -> Session:
+  match state:
+    case Up.Idle{}: st
+    case _: session_set_upload(st, Up.retain(state, session_upload_scope(st), session_upload_online(st)))
+
 def session_upload_maintain(+st: Session) -> Session:
-  session_set_upload(st, Up.retain(session_upload(st), session_upload_scope(st), session_upload_online(st)))
+  session_upload_maintain.idle(st, session_upload(st))
 
 # Net chokepoint: Offline/Connecting/Reconnecting/Stopping clear upload online;
 # retain drops Confirm/Armed and cancels Busy permission without releasing ownership.
@@ -2893,11 +2926,6 @@ def session_expire_typing.install(reaped: Bool, +cl: Cl.Client, +draft: String, 
     case False{}: session_set_pends(session_set_draft(st, draft), kept)
     case True{}: session_set_pends(session_set_draft(session_put_client(st, cl), draft), kept)
 
-def session_expire_typing.drop_changed(tchanged: Bool) -> Bool:
-  match tchanged:
-    case True{}: True{}
-    case False{}: True{}
-
 def session_expire_typing.restored_at(reaped: Bool, got: Cl.Client & String, +st: Session, +kept: List<&2, Cl.PendSend>, changed: Bool) -> Session & Bool:
   match got:
     case (+cl, +draft):
@@ -2906,7 +2934,7 @@ def session_expire_typing.restored_at(reaped: Bool, got: Cl.Client & String, +st
 def session_expire_typing.restored(reaped: Bool, got: Cl.Client & String, +st: Session, +kept: List<&2, Cl.PendSend>, tchanged: Bool) -> Session & Bool:
   match reaped:
     case False{}: session_expire_typing.restored_at(False{}, got, st, kept, tchanged)
-    case True{}: session_expire_typing.restored_at(True{}, got, st, kept, session_expire_typing.drop_changed(tchanged))
+    case True{}: session_expire_typing.restored_at(True{}, got, st, kept, True{})
 
 def session_expire_typing.merge(+kept: List<&2, Cl.PendSend>, +dropped: List<&2, Cl.PendSend>, pair: Session & Bool, +draft: String) -> Session & Bool:
   match pair:
@@ -3070,9 +3098,16 @@ def pend_record_cont.recorded(got: List<&2, Cl.PendSend> & List<&2, Cl.PendSend>
       pend_record_cont.choose(pend_reaped.any(evicted), pends, evicted, st)
 
 def pend_record_cont(+st: Session, +outs: List<&2, String>, echo_ok: Bool) -> Session:
-  match echo_ok:
-    case False{}: st
-    case True{}: pend_record_cont.recorded(pend_record_outs(session_pends(st), session_cl(st), Isupport.as_iso(session_iso(st)), outs, pend_now(session_cl(st)), Cl.nick_of(session_cl(st))), st)
+  # D111: idle key frames (including redo repaints) carry no submission outs.
+  # Recording over Nil returns (pends, Nil) with nothing reaped and the
+  # setter is a pure field copy, so the result is exactly the input session.
+  # Match outs first to skip the iso/nick/now builds and the rebuild.
+  match outs:
+    case Nil{}: st
+    case Con{+h, +t}:
+      match echo_ok:
+        case False{}: st
+        case True{}: pend_record_cont.recorded(pend_record_outs(session_pends(st), session_cl(st), Isupport.as_iso(session_iso(st)), h <> t, pend_now(session_cl(st)), Cl.nick_of(session_cl(st))), st)
 
 def pend_record_cmd(+st: Session, +cmd: NetCmd) -> Session:
   match cmd:
@@ -3119,9 +3154,14 @@ def session_tick_typing(+st: Session, +now_ms: U32) -> Session & List<&2, String
 # and non-Cont commands (dial, drop, open, begin, pump, pong, search), so a
 # live span is never committed and then dropped — the next TypingTick
 # delivers the done.
+def merge_typing_outs.kept(+outs: List<&2, String>, +touts: List<&2, String>) -> NetCmd:
+  match touts:
+    case Nil{}: Cont{outs}
+    case Con{+h, +t}: Cont{List.append(&2, String, outs, h <> t)}
+
 def merge_typing_outs(cmd: NetCmd, +touts: List<&2, String>) -> NetCmd:
   match cmd:
-    case Cont{+outs}: Cont{List.append(&2, String, outs, touts)}
+    case Cont{+outs}: merge_typing_outs.kept(outs, touts)
     case Dial{+host, port, gen, +nick}: Dial{host, port, gen, nick}
     case Drop{}: Drop{}
     case Hangup{}: Hangup{}
@@ -3207,6 +3247,11 @@ def nav_focus.on(on: Bool, +cm: String, pair: Cl.Client & List<&2, View.ScrollHo
   match pair:
     case (+cl, +hold): nav_focus.go(on, cm, cl, split, hold)
 
+def nav_after.scroll(move: Bool, +iso: Isupport.State, +cl: Cl.Client, +rows: U32, +cols: U32, split: Sp.State, +up: Nat, +dn: Nat, +media: M.State, +cards: C.State, +pends: List<&2, Cl.PendSend>, +th: Theme.Id) -> Cl.Client & List<&2, View.ScrollHold>:
+  match move:
+    case False{}: (cl, hold_nil())
+    case True{}: View.scroll_active_media_cards_iso(Isupport.as_iso(iso), cl, rows, cols, split, up, dn, media, C.paint_entries(cards), pends, th)
+
 def nav_after(
   +cl: Cl.Client,
   split: Sp.State,
@@ -3228,7 +3273,7 @@ def nav_after(
       +cm = Isupport.casemapping(iso)
       +cl2 = apply_click_cm(cm, Cl.cycle_tab_cm(cm, cl, tab), click)
       +split2 = Sp.follow_active_cm(cm, cl2, split)
-      nav_focus.on(U32.is_eq(focus, 1), cm, nav_kept(enter, View.scroll_active_media_cards_iso(Isupport.as_iso(iso), cl2, rows, cols, split2, up, dn, media, C.paint_entries(cards), pends, th)), split2)
+      nav_focus.on(U32.is_eq(focus, 1), cm, nav_kept(enter, nav_after.scroll(Nat.is_gt(up, 0n) || Nat.is_gt(dn, 0n), iso, cl2, rows, cols, split2, up, dn, media, cards, pends, th)), split2)
 
 def panel_keep(comp: Comp, +typed: String, +draft: String) -> Comp:
   comp_of(Sk.panel_keep(view_of(comp), typed, draft))
@@ -3543,9 +3588,15 @@ def session_observe_media(+st: Session, +after: Nat) -> Session:
 # paths only settle dead state (never schedule). The physical cards worker
 # stays owned until its exact completion, even across disable/reset.
 
+# D221: every observe arm leaves maintained cards so the stage shares the one
+# pass instead of re-scanning. Pruned entries are dead targets that can
+# neither schedule (job gates) nor complete (admission rechecks aliveness).
+def session_observe_visible_cards.settled(+st: Session) -> Session:
+  session_set_cards(st, C.maintain(session_cards(st), session_cl(st)))
+
 def session_observe_visible_cards.gated(+isc: Cl.Iso, open: Bool, +st: Session, +cl: Cl.Client, +rows: U32, +cols: U32, split: Sp.State, +media: M.State, +cards: C.State, +pends: List<&2, Cl.PendSend>) -> Session:
   match open:
-    case True{}: st
+    case True{}: session_observe_visible_cards.settled(st)
     case False{}:
       +kept = C.maintain(cards, cl)
       +anchored = View.visible_anchored_panes_media_cards_iso_pends(isc, cl, rows, cols, split, media, C.paint_entries(kept), pends)
@@ -3553,7 +3604,7 @@ def session_observe_visible_cards.gated(+isc: Cl.Iso, open: Bool, +st: Session, 
 
 def session_observe_visible_cards.allowed(allowed: Bool, +st: Session) -> Session:
   match allowed:
-    case False{}: st
+    case False{}: session_observe_visible_cards.settled(st)
     case True{}:
       match st:
         case Session{+cl, _, _, _, _, _, _, _, Size{rows, cols}, _, _, split, _, _, +media, _, _, +iso, _, +cf, _, _, labelsbox, +pends}:
@@ -3785,8 +3836,13 @@ def multiline_sensitive.go(+iso: Isupport.State, +lines: List<&2, String>, +cl: 
     case Nil{}: False{}
     case Con{+h, +t}: multiline_sensitive.any(multiline_sensitive.go(iso, t, cl, target), multiline_sensitive.line(iso, cl, target, h))
 
+# D237: the split-once Enter threads one line list (and one fits verdict)
+# through history and submit instead of splitting the text three times.
+def hist_after_typed.lines(+hist: Hist, +cl: Cl.Client, +target: String, +lines: List<&2, String>, +typed: String, fits: Bool, +iso: Isupport.State) -> Hist:
+  hist_after_enter(hist, typed, fits && Bool.not(multiline_sensitive.go(iso, lines, cl, target) || Sub.input_sensitive_iso(iso, cl, typed)))
+
 def hist_after_typed(+hist: Hist, +cl: Cl.Client, +target: String, +typed: String, +iso: Isupport.State) -> Hist:
-  hist_after_enter(hist, typed, Drafts.fits_bytes(typed) && Bool.not(multiline_sensitive.go(iso, Drafts.nonempty(Drafts.split_lines(typed)), cl, target) || Sub.input_sensitive_iso(iso, cl, typed)))
+  hist_after_typed.lines(hist, cl, target, Drafts.nonempty(Drafts.split_lines(typed)), typed, Drafts.fits_bytes(typed), iso)
 
 def multiline_held.triple.r1(+cm: String, rest: String & NetCmd, +cl_err: Cl.Client, split: Sp.State, +typed: String) -> Cl.Client & String & NetCmd & Sp.State:
   match rest:
@@ -3796,8 +3852,8 @@ def multiline_held.triple(+cm: String, triple: Cl.Client & String & NetCmd, spli
   match triple:
     case (+cl_err, rest): multiline_held.triple.r1(cm, rest, cl_err, split, typed)
 
-def multiline_held(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String) -> Cl.Client & String & NetCmd & Sp.State:
-  multiline_held.triple(cm, hold_offline(cl), split, typed)
+def multiline_held(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +net: NetState) -> Cl.Client & String & NetCmd & Sp.State:
+  multiline_held.triple(cm, hold_offline(net, cl), split, typed)
 
 def multiline_quad.empty(+cm: String, +cl2: Cl.Client, +outs: List<&2, String>, split: Sp.State, +typed: String, empty: Bool) -> Cl.Client & String & NetCmd & Sp.State:
   match empty:
@@ -3813,22 +3869,22 @@ def multiline_quad.pair(+cm: String, pair: Cl.Client & List<&2, String>, split: 
     case (cl2, outs):
       multiline_quad.outs(cm, cl2, outs, split, typed)
 
-def multiline_quad_echo.gated(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +net: NetState, admits: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd & Sp.State:
+def multiline_quad_echo.gated(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +lines: List<&2, String>, over: Bool, +net: NetState, admits: Bool, +echo_ok: Bool) -> Cl.Client & String & NetCmd & Sp.State:
   match admits:
     case True{}:
       +bi = Cl.active_of(cl)
-      multiline_quad.pair(cm, Drafts.submit_lines_echo(cl, bi, Sp.name_at(cl, bi), typed, False{}, echo_ok), split, typed)
+      multiline_quad.pair(cm, Drafts.submit_lines_echo.lines(cl, bi, Sp.name_at(cl, bi), lines, False{}, over, echo_ok), split, typed)
     case False{}:
-      multiline_held(cm, cl, split, typed)
+      multiline_held(cm, cl, split, typed, net)
 
-def multiline_quad.gated(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +net: NetState, admits: Bool) -> Cl.Client & String & NetCmd & Sp.State:
-  multiline_quad_echo.gated(cm, cl, split, typed, net, admits, False{})
+def multiline_quad.gated(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +lines: List<&2, String>, over: Bool, +net: NetState, admits: Bool) -> Cl.Client & String & NetCmd & Sp.State:
+  multiline_quad_echo.gated(cm, cl, split, typed, lines, over, net, admits, False{})
 
-def multiline_quad_echo(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +net: NetState, +echo_ok: Bool) -> Cl.Client & String & NetCmd & Sp.State:
-  multiline_quad_echo.gated(cm, cl, split, typed, net, can_send(net), echo_ok)
+def multiline_quad_echo(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +lines: List<&2, String>, over: Bool, +net: NetState, +echo_ok: Bool) -> Cl.Client & String & NetCmd & Sp.State:
+  multiline_quad_echo.gated(cm, cl, split, typed, lines, over, net, can_send(net), echo_ok)
 
-def multiline_quad(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +net: NetState) -> Cl.Client & String & NetCmd & Sp.State:
-  multiline_quad_echo(cm, cl, split, typed, net, False{})
+def multiline_quad(+cm: String, +cl: Cl.Client, split: Sp.State, +typed: String, +lines: List<&2, String>, over: Bool, +net: NetState) -> Cl.Client & String & NetCmd & Sp.State:
+  multiline_quad_echo(cm, cl, split, typed, lines, over, net, False{})
 
 # Shared completion for explicitly supplied history + submit quads.
 # Separate frame finishing from command hooks so multiline production can
@@ -3943,20 +3999,25 @@ def keys_without_enter(keys: Keys) -> Keys:
 # Finish with the original keys so navigation/completion see the real frame.
 # Command hooks must not reinterpret a rejected multiline block as a single
 # slash command. Accepted chat wires still update the plan through outbound.
-def step_keys.ordinary_route(route: Drafts.Route, +st: Session, +keys: Keys, +typed: String, input: Sub.Input) -> Session & NetCmd & Bool:
+# D237: one split and one fits verdict per Enter, threaded through the route,
+# history, and submit legs instead of re-splitting the text on each leg.
+def step_keys.ordinary_route.go(route: Drafts.Route, +st: Session, +keys: Keys, +lines: List<&2, String>, +typed: String, +fits: Bool, input: Sub.Input) -> Session & NetCmd & Bool:
   match route:
     case Drafts.RouteMulti{_}:
       +cl = session_cl(st)
       +bi = Cl.active_of(cl)
-      +hist2 = hist_after_typed(session_hist(st), cl, Sp.name_at(cl, bi), typed, session_iso(st))
-      trip = step_keys.supplied_finish(st, keys, hist2, multiline_quad_echo(session_cm(st), cl, session_split(st), typed, session_net(st), session_echo_ok(st)))
+      +hist2 = hist_after_typed.lines(session_hist(st), cl, Sp.name_at(cl, bi), lines, typed, fits, session_iso(st))
+      trip = step_keys.supplied_finish(st, keys, hist2, multiline_quad_echo(session_cm(st), cl, session_split(st), typed, lines, Bool.not(fits), session_net(st), session_echo_ok(st)))
       step_keys.supplied_hooks(st, keys_without_enter(keys), step_keys.multiline_done(trip))
     case _: step_keys.normal(st, keys, input)
+
+def step_keys.ordinary_route(+lines: List<&2, String>, +st: Session, +keys: Keys, +typed: String, fits: Bool, input: Sub.Input) -> Session & NetCmd & Bool:
+  step_keys.ordinary_route.go(Drafts.route.multi(lines), st, keys, lines, typed, fits, input)
 
 def step_keys.ordinary_enter(enter: Bool, +st: Session, +keys: Keys, +typed: String, input: Sub.Input) -> Session & NetCmd & Bool:
   match enter:
     case False{}: step_keys.normal(st, keys, Sub.EmptyInput{})
-    case True{}: step_keys.ordinary_route(Drafts.route(typed), st, keys, typed, input)
+    case True{}: step_keys.ordinary_route(Drafts.nonempty(Drafts.split_lines(typed)), st, keys, typed, Drafts.fits_bytes(typed), input)
 
 def step_keys.ordinary_keys(+st: Session, +keys: Keys, input: Sub.Input) -> Session & NetCmd & Bool:
   match keys:
@@ -4018,8 +4079,12 @@ def upload_modal_keys(keys: Keys) -> Keys:
 def step_keys.upload_blocked.r1(rest: NetCmd & Bool, +st: Session, enter: Bool) -> Session & NetCmd & Bool:
   match rest:
     case (+cmd, +halt):
-      # Native Enter clears its editor; restore the same unsent draft once.
-      (Bool.pick(Session, enter, session_upload_draft(st, session_draft(st), 1), st), cmd, halt)
+      match enter:
+        case False{}:
+          (st, cmd, halt)
+        case True{}:
+          # Native Enter clears its editor; restore the same unsent draft once.
+          (session_upload_draft(st, session_draft(st), 1), cmd, halt)
 
 def step_keys.upload_blocked(trip: Session & NetCmd & Bool, enter: Bool) -> Session & NetCmd & Bool:
   match trip:
@@ -4030,9 +4095,19 @@ type UploadInput is Data:
   UploadPaths{paths: List<&2, String>}
   UploadBad{}
 
+def upload_input.paths.looks(local: Bool) -> UploadInput:
+  match local:
+    case True{}: UploadBad{}
+    case False{}: NotUpload{}
+
+def upload_input.paths.none(explicit: Bool, raw: String) -> UploadInput:
+  match explicit:
+    case True{}: UploadBad{}
+    case False{}: upload_input.paths.looks(Up.looks_local_drop(raw))
+
 def upload_input.paths(got: Maybe<&2, List<&2, String>>, explicit: Bool, raw: String) -> UploadInput:
   match got:
-    case None{}: Bool.pick(UploadInput, explicit || Up.looks_local_drop(raw), UploadBad{}, NotUpload{})
+    case None{}: upload_input.paths.none(explicit, raw)
     case Some{paths}: UploadPaths{paths}
 
 # Bare /name is a command, not an ambiguous root-level file. A second slash
@@ -4043,17 +4118,30 @@ def upload_input.path_verb(+verb: String) -> Bool:
     && (String.contains(verb, "/") || String.contains(verb, "\\")
       || String.contains(verb, "'") || String.contains(verb, "\""))
 
+def upload_input.plain.looks(local: Bool, +raw: String) -> UploadInput:
+  match local:
+    case False{}: NotUpload{}
+    case True{}: upload_input.paths(Up.parse_paths(raw, True{}), False{}, raw)
+
+# D180: looks_local_drop stops at the first word boundary, so ordinary prose
+# (no leading slash/file:// word) is rejected without the full parse_paths
+# lex. Verdicts are unchanged: absolute words must all carry a slash, so a
+# looks-False raw can never parse, and the looks-True arm runs the same
+# parse-then-none chain as before.
 def upload_input.unknown(command: Bool, +raw: String) -> UploadInput:
   match command:
     case True{}: NotUpload{}
-    case False{}: upload_input.paths(Up.parse_paths(raw, True{}), False{}, raw)
+    case False{}: upload_input.plain.looks(Up.looks_local_drop(raw), raw)
+
+def upload_input.plain(+raw: String) -> UploadInput:
+  upload_input.plain.looks(Up.looks_local_drop(raw), raw)
 
 def upload_input.parsed(input: Sub.Input, +raw: String) -> UploadInput:
   match input:
     case Sub.CommandInput{Sub.UploadCmd{}, _, rest}: upload_input.paths(Up.parse_paths(rest, False{}), True{}, raw)
     # Unknown is only a verb absent from the catalog, so it is not a command alias.
     case Sub.CommandInput{Sub.Unknown{}, +verb, _}: upload_input.unknown(Bool.not(upload_input.path_verb(verb)), raw)
-    case Sub.PlainInput{_}: upload_input.paths(Up.parse_paths(raw, True{}), False{}, raw)
+    case Sub.PlainInput{_}: upload_input.plain(raw)
     case _: NotUpload{}
 
 def upload_input.enter(enter: Bool, input: Sub.Input, +raw: String) -> UploadInput:
@@ -4155,12 +4243,16 @@ def stamped_lines(lines: List<&2, String>, stamps: List<&2, Maybe<&2, String>>) 
 type LiveAcc is Data:
   LiveAcc{fold: FoldAcc, typing: Ty.State, plan: JoinPlan.State, iso: Isupport.State, hl: Hs.HistLive, reg: CapNotify.Reg, renames: List<&2, Drafts.NickRename>}
 
+# D228: the per-line buffer retain is the chunk-end retain's job
+# (step_chunk_got retains once against the final client). Threading typing
+# through the fold unchanged keeps every intermediate apply identical except
+# the vanishingly rare at-cap insertion race, and shares the one chunk pass.
 def live_step.flushed(fed: FoldAcc, typing: Ty.State, flushed: JoinPlan.Flush, +iso: Isupport.State, +hl: Hs.HistLive, +reg: CapNotify.Reg, +renames: List<&2, Drafts.NickRename>) -> LiveAcc:
   match fed:
     case FoldAcc{+cl, reversed, now_ms}:
       match flushed:
         case JoinPlan.Flush{plan, outs, notice}:
-          LiveAcc{FoldAcc{join_notice(cl, notice), List.append(&2, String, List.reverse(&2, String, outs), reversed), now_ms}, Ty.retain_client_cm(Isupport.casemapping(iso), typing, cl), plan, iso, hl, reg, renames}
+          LiveAcc{FoldAcc{join_notice(cl, notice), List.append(&2, String, List.reverse(&2, String, outs), reversed), now_ms}, typing, plan, iso, hl, reg, renames}
 
 def live_step.fed(+fed: FoldAcc, typing: Ty.State, plan: JoinPlan.State, +iso: Isupport.State, +hl: Hs.HistLive, +reg: CapNotify.Reg, +renames: List<&2, Drafts.NickRename>) -> LiveAcc:
   match fed:
@@ -4171,7 +4263,7 @@ def live_step.flushed_with(+cm: String, fed: FoldAcc, typing: Ty.State, flushed:
     case FoldAcc{+cl, reversed, now_ms}:
       match flushed:
         case JoinPlan.Flush{plan, outs, notice}:
-          LiveAcc{FoldAcc{join_notice(cl, notice), List.append(&2, String, List.reverse(&2, String, outs), reversed), now_ms}, Ty.retain_client_cm(cm, typing, cl), plan, iso, hl, reg, renames}
+          LiveAcc{FoldAcc{join_notice(cl, notice), List.append(&2, String, List.reverse(&2, String, outs), reversed), now_ms}, typing, plan, iso, hl, reg, renames}
 
 def live_step.fed_with(+cm: String, +fed: FoldAcc, typing: Ty.State, plan: JoinPlan.State, +iso: Isupport.State, +hl: Hs.HistLive, +reg: CapNotify.Reg, +renames: List<&2, Drafts.NickRename>) -> LiveAcc:
   match fed:
@@ -5302,6 +5394,18 @@ def live_chunk_outs.got(pair: Session & List<&2, String>) -> List<&2, String>:
 def live_chunk_outs(+st: Session, +text: String) -> List<&2, String>:
   live_chunk_outs.got(step_on_chunk_ms(st, Fr.string_to_octets(text), 0))
 
+# D111: recording no submission outs is exactly the input session on both
+# echo arms, so idle key frames (including redo repaints) skip the record
+# leg without changing behavior.
+def pend_nil_idle_summary(+st: Session) -> String:
+  session_draft(st) ++ ";" ++ Nat.show(List.length(&2, Cl.PendSend, session_pends(st)))
+    ++ ";" ++ U32.show(session_seed(st)) ++ ";" ++ Cl.active_buf_name(session_cl(st))
+
+def pend_nil_idle_ok() -> Bool:
+  +st = session_demo(Cl.init("me", "s"), "#a")
+  String.eq(pend_nil_idle_summary(pend_record_cont(st, Nil{}, False{})), pend_nil_idle_summary(st))
+    && String.eq(pend_nil_idle_summary(pend_record_cont(st, Nil{}, True{})), pend_nil_idle_summary(st))
+
 # The frame merge appends the typing wire to Cont, leaves other commands
 # alone, and the live path keeps a single CAP-END owner (exactly one from a
 # SASL exchange, none from a chathistory ACK).
@@ -5313,3 +5417,4 @@ def live_merge_ok() -> Bool:
     && String.eq(show_netcmd(merge_typing_outs(Dial{"h", 6697, 0, "me"}, line <> Nil{})), "dial:h:6697")
     && Nat.is_eq(live_count_end(outs), 1n)
     && Nat.is_eq(live_count_end(live_chunk_outs(live_reg_fixture(), ":s CAP me ACK :draft/chathistory\r\n")), 0n)
+    && pend_nil_idle_ok()
