@@ -167,6 +167,7 @@ typedef struct {
   int preview_count;
   BircOutput output;
   BircMediaCache media;
+  unsigned media_seq; /* last cache generation birc_media_prune retired */
   /* Attrs 8: drawn after the composer widget so it is not cleared. */
   char ghost[128];
   int ghost_x;
@@ -174,7 +175,12 @@ typedef struct {
   int ghost_w; /* Bend OpGhost.w columns; paint maxx is gx + ghost_w. */
   int ghost_on;
   uint32_t ghost_fg;
-  /* Reused UTF-8 encode buffer for OpText / span paint (no per-op malloc). */
+  /* Reused UTF-8 encode buffer for OpText / span paint (no per-op malloc).
+   * D252: growth-only by design; the peak is retained for process lifetime
+   * and freed only in birc_state_destroy. Tab labels and link URLs (D70)
+   * reuse this same scratch transiently instead of heap-allocating per
+   * frame, which is why no shrink path is added: every user holds it only
+   * across its own synchronous copy-out. */
   char *paint_buf;
   size_t paint_cap;
 } BircUi;
@@ -481,6 +487,11 @@ static void birc_media_prune(Timui *ui, BircUi *bu) {
   int i;
   if (!bu || !bu->output.capturing)
     return;
+  /* Prune is a fixpoint for an unchanged cache: one generation compare per
+   * frame replaces the per-preview finds on steady frames. */
+  if (bu->media_seq == bu->media.seq)
+    return;
+  bu->media_seq = bu->media.seq;
   for (i = 0; i < BIRC_PREVIEW_CAP; i++)
     if (bu->previews[i].token &&
         !birc_media_find(&bu->media, bu->previews[i].token))
@@ -495,6 +506,7 @@ static void birc_draw_media(TimuiFrame *frame, BircUi *bu, Timui *ui,
   TimuiImage *image = NULL;
   BircPreview *preview = NULL;
   BircPreview *reusable = NULL;
+  BircPreview *empty = NULL;
   int i;
   int64_t top = (int64_t)y - clip_y;
   if (!frame || !bu || !ui || x > INT_MAX || y > INT_MAX ||
@@ -505,29 +517,24 @@ static void birc_draw_media(TimuiFrame *frame, BircUi *bu, Timui *ui,
   full = (TimuiRect){(int)x, (int)top, (int)width, (int)height};
   visible = (TimuiRect){(int)x, (int)y, (int)width, (int)clip_h};
   /* Split panes may emit OpMedia twice for one ready token. Reuse that slot
-   * so a duplicate never burns a second of the eight preview slots. */
+   * so a duplicate never burns a second of the eight preview slots. A miss
+   * takes the first slot whose token is 0; preview_count stops on that
+   * hole, so reusing a higher slot must not skip it. One pass records both
+   * the token match and the first hole. */
   for (i = 0; i < BIRC_PREVIEW_CAP; i++) {
-    if (bu->previews[i].token != token)
-      continue;
-    if (bu->previews[i].image) {
-      preview = &bu->previews[i];
-      break;
+    if (bu->previews[i].token == token) {
+      if (bu->previews[i].image) {
+        preview = &bu->previews[i];
+        break;
+      }
+      if (!reusable)
+        reusable = &bu->previews[i];
+    } else if (!empty && bu->previews[i].token == 0) {
+      empty = &bu->previews[i];
     }
-    if (!reusable)
-      reusable = &bu->previews[i];
   }
   if (!preview)
-    preview = reusable;
-  /* A miss takes the first slot whose token is 0. preview_count stops on
-   * that hole; reusing a higher slot must not skip it. */
-  if (!preview) {
-    for (i = 0; i < BIRC_PREVIEW_CAP; i++) {
-      if (bu->previews[i].token != 0)
-        continue;
-      preview = &bu->previews[i];
-      break;
-    }
-  }
+    preview = reusable ? reusable : empty;
   if (preview) {
     int idx = (int)(preview - bu->previews);
     int hole = bu->preview_count;
@@ -557,6 +564,15 @@ static void __attribute__((constructor)) timui_image_supported_use(void) {
 }
 #endif
 
+/* D250: isatty answers by fd number and the UI pins its descriptors for life,
+ * so the probe is cached per (ui, fds) and the 1-2 syscalls per frame are
+ * skipped on a hit. The ioctl below still runs every frame: it is the
+ * resize check, and a failed ioctl keeps the old cached-grid behavior. */
+static Timui *birc_size_ui;
+static int birc_size_wfd;
+static int birc_size_rfd;
+static int birc_size_fd = -1;
+
 /* Same floors as the UiKeys rows/cols taken from timui_root after begin.
  * Returns 1 when the native grid changed, so the frame can full-redraw. */
 static void birc_floor_grid(int w, int h, uint32_t *rows, uint32_t *cols) {
@@ -581,10 +597,19 @@ static int birc_sync_term_size(Timui *ui, uint32_t *rows, uint32_t *cols) {
     return 0;
   if (ui->w > 0 && ui->h > 0)
     birc_floor_grid(ui->w, ui->h, rows, cols);
-  if (ui->fd.write_fd >= 0 && isatty(ui->fd.write_fd))
-    check_fd = ui->fd.write_fd;
-  else if (ui->fd.read_fd >= 0 && isatty(ui->fd.read_fd))
-    check_fd = ui->fd.read_fd;
+  if (ui == birc_size_ui && ui->fd.write_fd == birc_size_wfd &&
+      ui->fd.read_fd == birc_size_rfd)
+    check_fd = birc_size_fd;
+  else {
+    if (ui->fd.write_fd >= 0 && isatty(ui->fd.write_fd))
+      check_fd = ui->fd.write_fd;
+    else if (ui->fd.read_fd >= 0 && isatty(ui->fd.read_fd))
+      check_fd = ui->fd.read_fd;
+    birc_size_ui = ui;
+    birc_size_wfd = ui->fd.write_fd;
+    birc_size_rfd = ui->fd.read_fd;
+    birc_size_fd = check_fd;
+  }
   if (check_fd < 0)
     return 0;
   if (timui_term_size_pixels(check_fd, &tw, &th, &px_w, &px_h) != TIMUI_OK)
@@ -752,7 +777,9 @@ static size_t birc_clip_cols(const char *s, size_t n, int x, int maxx, int *out_
  * sets *out / *out_n on success. Falls back to io_cstr when the term is not
  * an SCon chain (unit-test stubs) — caller frees only in that path. On any
  * allocation failure: *out="", *out_n=0, return 0 so callers that ignore the
- * status still pass a zero-length span. */
+ * status still pass a zero-length span. D70: tab labels and link URLs share
+ * this scratch (copied out synchronously) instead of heap-allocating per
+ * op per frame; bu==NULL keeps the old io_cstr path. */
 static int birc_draw_str(Env e, Term s, BircUi *bu, const char **out, size_t *out_n,
                          char **owned) {
   size_t n = 0;
@@ -896,21 +923,23 @@ static size_t birc_cluster_fit(const char *text, size_t length, size_t cap) {
   }
   return kept;
 }
-static int birc_str_list(Env e, Term xs, char store[][BIRC_TAB_LABEL],
+static int birc_str_list(Env e, BircUi *bu, Term xs, char store[][BIRC_TAB_LABEL],
                          const char **labs, int max) {
   int n = 0;
   while (n < max && term_aux(xs) == CID_CON) {
     Term t;
-    u64 len = 0;
-    char *s;
+    const char *s = "";
+    size_t len = 0;
+    char *owned = NULL;
     size_t nlen;
     Term h = birc_cons_head(e, xs, &t);
     xs = t;
-    s = io_cstr(e, h, &len);
-    /* OOM (NULL with a nonzero length) ends the list here; the tail below
-     * is sunk, not painted as empty labels. A NULL empty source still
-     * stores "". */
-    if (!s && len != 0)
+    /* D70: decode into the shared paint_buf scratch (copied to store[]
+     * synchronously), not one heap alloc per label per frame. OOM (return
+     * 0) ends the list here; the tail below is sunk, not painted as empty
+     * labels. A NULL empty source still stores "". The local is named len
+     * so the fit expressions below keep their grepped spelling. */
+    if (!birc_draw_str(e, h, bu, &s, &len, &owned))
       break;
     /* Keep the byte/code-point cap, then back up past a partial cluster.
      * 63 is BIRC_TAB_LABEL-1. test-utf8-fit greps this expression; the
@@ -921,7 +950,7 @@ static int birc_str_list(Env e, Term xs, char store[][BIRC_TAB_LABEL],
       memcpy(store[n], s, nlen);
     store[n][nlen] = '\0';
     labs[n] = store[n];
-    free(s);
+    free(owned);
     n++;
   }
   term_sink(e, xs);
@@ -995,15 +1024,26 @@ static int birc_draw_spans(Env e, TimuiFrame *fr, int x, int y, int maxx,
     } else {
       Loc loc = ctr_take(e, sp, 2, f);
       if (cid == CID_VIEW_LNK) {
-        u64 ulen = 0;
-        char *url = io_cstr(e, f[0], &ulen);
+        const char *url = "";
+        size_t ulen = 0;
+        char *uowned = NULL;
+        /* D70: decoded URL staged here because the text decode below reuses
+         * the same paint_buf scratch. birc_put_link declines oversize URLs
+         * without reading them, so the scratch pointer stays valid there. */
+        char urlbuf[BIRC_URL_CAP];
         const char *text = "";
         size_t tlen = 0;
         char *owned = NULL;
         BircUi *bu = (fr && fr->ui) ? birc_state(fr->ui) : NULL;
+        (void)birc_draw_str(e, f[0], bu, &url, &ulen, &uowned);
+        if (ulen < sizeof urlbuf) {
+          memcpy(urlbuf, url, ulen);
+          urlbuf[ulen] = '\0';
+          url = urlbuf;
+        }
         (void)birc_draw_str(e, f[1], bu, &text, &tlen, &owned);
-        x = birc_put_link(fr, x, y, maxx, url, (size_t)ulen, text, tlen, fg);
-        free(url);
+        x = birc_put_link(fr, x, y, maxx, url, ulen, text, tlen, fg);
+        free(uowned);
         free(owned);
       } else if (cid == CID_VIEW_SPN) {
         const char *text = "";
@@ -1153,7 +1193,8 @@ static void birc_draw_op(Env e, TimuiFrame *fr, Term op, BircLay *ly) {
     r.y = (int)(uint32_t)f[1];
     r.w = (int)(uint32_t)f[2];
     r.h = 1;
-    ntabs = birc_str_list(e, f[4], store, labs, BIRC_TAB_SLOTS);
+    ntabs = birc_str_list(e, (ly && ly->bu) ? ly->bu : NULL, f[4], store, labs,
+                            BIRC_TAB_SLOTS);
     nalerts = birc_u32_list(e, f[5], alerts, BIRC_TAB_SLOTS);
     orig = (int)(uint32_t)f[3];
     sel = orig < 0 ? 0 : orig;
@@ -1631,12 +1672,17 @@ static int draw_composer(TimuiFrame *fr, int x, int y, int width,
   /* Unmodified Right moves the cursor unless it is already at the end.
    * Only an at-end unmodified Right is reported, so Bend can accept the
    * ghost suffix. Shift+Right (tab switch) must still reach Bend. */
-  at_end = stt->st.cursor >= strlen(stt->composer);
+  n = strlen(stt->composer);
+  at_end = stt->st.cursor >= n;
   res = timui_text_area_mut(fr, id, r, &stt->st, TIMUI_TEXT_AREA_ENTER_SUBMITS);
   if (!at_end && fr->ui && fr->ui->key_pressed == TIMUI_KEY_RIGHT &&
       fr->ui->key_mods == TIMUI_MOD_NONE)
     fr->ui->key_pressed = TIMUI_KEY_UNKNOWN;
-  n = strlen(stt->composer);
+  /* The widget mutates the composer only when it reports changed; every
+   * text edit (insert, erase, newline) sets it. Reuse the hoisted length
+   * otherwise so steady frames walk the composer once. */
+  if (res.changed)
+    n = strlen(stt->composer);
   *tlen = n;
   return res.submitted ? 1 : 0;
 }

@@ -475,6 +475,11 @@ uint32_t birc_upload_run(const char *path, char **url, uint32_t *http_status) {
   char reply[BIRC_UP_MAX_RESPONSE + 8u];
   char checked[BIRC_UP_MAX_RESPONSE + 8u];
   size_t prefix_n, footer_n, hdr_n = 0, reply_n = 0, left;
+  /* D254: hoisted out of the Content-Length block (want) and off the three
+   * strlen(checked) call sites (checked_n). Behavior identical: want is only
+   * read when clen[0] is set, which implies the block above parsed it. */
+  unsigned long reply_want = 0;
+  size_t checked_n = 0;
   *url = NULL;
   if (http_status)
     *http_status = 0;
@@ -639,7 +644,6 @@ uint32_t birc_upload_run(const char *path, char **url, uint32_t *http_status) {
     if (birc_up_header(line_end + 2, "Content-Length", clen, sizeof clen)) {
       size_t i;
       char *end = NULL;
-      unsigned long want;
       if (!clen[0] || strlen(clen) > 10u)
         goto reply_fail;
       for (i = 0; clen[i]; i++) {
@@ -647,8 +651,8 @@ uint32_t birc_upload_run(const char *path, char **url, uint32_t *http_status) {
           goto reply_fail;
       }
       errno = 0;
-      want = strtoul(clen, &end, 10);
-      if (errno || !end || *end || want > BIRC_UP_MAX_RESPONSE)
+      reply_want = strtoul(clen, &end, 10);
+      if (errno || !end || *end || reply_want > BIRC_UP_MAX_RESPONSE)
         goto reply_fail;
     }
     if (hdr_n > preface) {
@@ -669,16 +673,17 @@ uint32_t birc_upload_run(const char *path, char **url, uint32_t *http_status) {
     }
     if (reply_n > BIRC_UP_MAX_RESPONSE)
       goto reply_fail;
-    if (clen[0] && reply_n != strtoul(clen, NULL, 10))
+    if (clen[0] && reply_n != reply_want)
       goto reply_fail;
     if (!birc_upload_checked_url(reply, reply_n, checked, sizeof checked))
       goto reply_fail;
-    *url = (char *)malloc(strlen(checked) + 1u);
+    checked_n = strlen(checked);
+    *url = (char *)malloc(checked_n + 1u);
     if (!*url) {
       code = BIRC_UP_IO;
       goto done;
     }
-    memcpy(*url, checked, strlen(checked) + 1u);
+    memcpy(*url, checked, checked_n + 1u);
     code = 0;
     goto done;
   reply_fail:

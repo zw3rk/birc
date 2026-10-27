@@ -33,6 +33,9 @@ typedef struct {
   BircMedia slots[BIRC_MEDIA_CAP];
   uint32_t next_token;
   unsigned next_slot;
+  /* Mutation generation. birc_media_prune skips its per-frame finds while
+   * this matches the last generation it retired. */
+  unsigned seq;
 } BircMediaCache;
 
 static uint32_t birc_media_u32(const unsigned char *p) {
@@ -163,6 +166,7 @@ static uint32_t birc_media_add(BircMediaCache *cache, const char *text, size_t l
     return 0;
   }
   media.token = ++cache->next_token;
+  cache->seq++;
   free(cache->slots[cache->next_slot].bytes);
   cache->slots[cache->next_slot] = media;
   cache->next_slot = (cache->next_slot + 1) % BIRC_MEDIA_CAP;
@@ -187,6 +191,8 @@ static inline void birc_media_retain(BircMediaCache *cache, const uint32_t *toke
   unsigned i;
   size_t j;
   if (!cache || count > BIRC_MEDIA_CAP || (count && !tokens)) return;
+  /* Retain can release payloads, so readers re-scan even on a no-op. */
+  cache->seq++;
   for (i = 0; i < BIRC_MEDIA_CAP; i++) {
     for (j = 0; j < count; j++)
       if (cache->slots[i].token == tokens[j]) break;
@@ -200,6 +206,7 @@ static inline void birc_media_retain(BircMediaCache *cache, const uint32_t *toke
 static void birc_media_clear(BircMediaCache *cache) {
   unsigned i;
   if (!cache) return;
+  cache->seq++;
   for (i = 0; i < BIRC_MEDIA_CAP; i++) {
     free(cache->slots[i].bytes);
     memset(&cache->slots[i], 0, sizeof cache->slots[i]);

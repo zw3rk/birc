@@ -188,6 +188,10 @@ static void __attribute__((constructor)) history_append_private_use(void) {
 #define BIRC_HIST_KEEP_MAX 1024u
 #define BIRC_HIST_ALIVE_MAX 14u
 
+/* D121: spans stay 12 bytes (off/len/seq) instead of memoizing the seven
+ * field boundaries ingest already split (40 bytes/ring entry). Pack therefore
+ * re-runs one linear tab-scan per kept row; bounded by KEEP_MAX x slots and
+ * one-shot per load, so the narrower ring is the deliberate trade-off. */
 typedef struct {
   uint32_t off;
   uint32_t len;
@@ -282,10 +286,19 @@ static int birc_hist_kind(const unsigned char *s, uint32_t n) {
   static const char *const kinds[] = {
     "MSG", "SELF", "SYS", "ACT", "NOT", "ERR", "HL", "PRS", "NCK"
   };
+  /* D253: kind lengths are process-constant; measure once instead of paying
+   * strlen per ingested candidate line. First-use init mirrors the crc32
+   * table below; the table is read-only after that. */
+  static size_t lens[9];
+  static int lens_ready = 0;
   uint32_t i;
+  if (!lens_ready) {
+    for (i = 0; i < 9u; i++)
+      lens[i] = strlen(kinds[i]);
+    lens_ready = 1;
+  }
   for (i = 0; i < 9u; i++) {
-    size_t kn = strlen(kinds[i]);
-    if ((size_t)n == kn && memcmp(s, kinds[i], kn) == 0)
+    if ((size_t)n == lens[i] && memcmp(s, kinds[i], lens[i]) == 0)
       return 1;
   }
   return 0;

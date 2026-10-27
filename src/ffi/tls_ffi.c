@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <poll.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -382,13 +383,17 @@ static BircTlsRead *birc_tls_read_new(BircTls *handle, uint32_t max,
     *error = birc_tls_error((uint32_t)EBUSY, "tls-read");
     return NULL;
   }
-  in = (BircTlsRead *)BIRC_TLS_ALLOC(1u, sizeof *in);
+  /* D122: size the allocation to the clamped read instead of zeroing a full
+   * 64 KiB struct per read. All accesses stay within in->size, and free is
+   * unsized, so readers observe identical bytes. */
+  size_t need = max > sizeof in->bytes ? sizeof in->bytes : (size_t)max;
+  in = (BircTlsRead *)BIRC_TLS_ALLOC(1u, offsetof(BircTlsRead, bytes) + need);
   if (in == NULL) {
     *error = birc_tls_error((uint32_t)ENOMEM, "tls-read");
     return NULL;
   }
   in->handle = handle;
-  in->size = max > sizeof in->bytes ? sizeof in->bytes : (size_t)max;
+  in->size = need;
   handle->state->reader = in;
   *error = birc_tls_error(0u, NULL);
   return in;

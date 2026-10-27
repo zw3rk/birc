@@ -677,33 +677,89 @@ static ssize_t birc_mf_read(int fd, SSL *ssl, void *buf, size_t n, uint64_t dead
   return recv(fd, buf, n, 0);
 }
 
-static int birc_mf_header(const char *headers, const char *name, char *out, size_t n) {
+/* D69: one header walk fills every field the fetch needs; the old code ran
+ * birc_mf_header once per lookup (up to five full walks per hop). First
+ * occurrence wins and an overlong value reads as absent, exactly like the
+ * old per-field scan. Values keep leading blank-stripping only, no
+ * trailing trim; callers post-process as before. */
+typedef struct {
+  int has_location;
+  int has_encoding;
+  int has_transfer;
+  int has_ctype;
+  int has_clen;
+  char location[BIRC_MF_MAX_URL + 1u];
+  char encoding[64];
+  char transfer[64];
+  char ctype[128];
+  char clen[32];
+} BircMfHeaders;
+
+static void birc_mf_scan_headers(const char *headers, BircMfHeaders *out) {
   const char *p = headers;
-  size_t nlen = strlen(name);
+  /* First name-match wins even when overlong: the old per-field walk
+   * returned absent at the first match without consulting later lines. */
+  int seen_location = 0;
+  int seen_encoding = 0;
+  int seen_transfer = 0;
+  int seen_ctype = 0;
+  int seen_clen = 0;
+  memset(out, 0, sizeof *out);
   while (*p) {
     const char *eol = strstr(p, "\r\n");
-    size_t line = eol ? (size_t)(eol - p) : strlen(p);
-    if (line >= nlen + 1u && strncasecmp(p, name, nlen) == 0 && p[nlen] == ':') {
-      const char *v = p + nlen + 1;
-      while (v < p + line && (*v == ' ' || *v == '\t'))
-        v++;
-      if ((size_t)(p + line - v) >= n)
-        return 0;
-      memcpy(out, v, (size_t)(p + line - v));
-      out[p + line - v] = 0;
-      return 1;
-    }
+    const char *colon = strchr(p, ':');
+    const char *v;
+    size_t vlen;
+    char *dst = NULL;
+    size_t cap = 0;
+    int *has = NULL;
+    int *seen = NULL;
     if (!eol)
-      break;
-    p = eol + 2;
+      eol = p + strlen(p);
+    if (colon == NULL || colon > eol) {
+      p = *eol ? eol + 2 : eol;
+      continue;
+    }
+    if (((size_t)(colon - p) == 8 && strncasecmp(p, "location", 8) == 0)) {
+      dst = out->location; cap = sizeof out->location; has = &out->has_location;
+      seen = &seen_location;
+    } else if (((size_t)(colon - p) == 16 && strncasecmp(p, "content-encoding", 16) == 0)) {
+      dst = out->encoding; cap = sizeof out->encoding; has = &out->has_encoding;
+      seen = &seen_encoding;
+    } else if (((size_t)(colon - p) == 17 && strncasecmp(p, "transfer-encoding", 17) == 0)) {
+      dst = out->transfer; cap = sizeof out->transfer; has = &out->has_transfer;
+      seen = &seen_transfer;
+    } else if (((size_t)(colon - p) == 12 && strncasecmp(p, "content-type", 12) == 0)) {
+      dst = out->ctype; cap = sizeof out->ctype; has = &out->has_ctype;
+      seen = &seen_ctype;
+    } else if (((size_t)(colon - p) == 14 && strncasecmp(p, "content-length", 14) == 0)) {
+      dst = out->clen; cap = sizeof out->clen; has = &out->has_clen;
+      seen = &seen_clen;
+    }
+    v = colon + 1;
+    while (v < eol && (*v == ' ' || *v == '\t'))
+      v++;
+    vlen = (size_t)(eol - v);
+    if (dst != NULL && !*seen) {
+      *seen = 1;
+      if (vlen < cap) {
+        memcpy(dst, v, vlen);
+        dst[vlen] = 0;
+        *has = 1;
+      }
+    }
+    p = *eol ? eol + 2 : eol;
   }
-  return 0;
 }
 
 static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
                          unsigned char **body, size_t *body_n, char *final, size_t final_n) {
   char current[BIRC_MF_MAX_URL + 1u];
   unsigned redirect;
+  /* D118: one TLS context for all hops. Verification stays per-connection
+   * (SNI/hostname ride the per-hop SSL*), so reuse only skips the rebuild
+   * and the trust reload. Lazily created: plain-http fetches never pay it. */
+  SSL_CTX *ctx = NULL;
   if (!url || strlen(url) >= sizeof current)
     return 0;
   memcpy(current, url, strlen(url) + 1u);
@@ -712,29 +768,25 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
     struct addrinfo hints;
     struct addrinfo *list = NULL;
     int fd = -1;
-    SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     char req[BIRC_MF_MAX_PATH + 512u];
     char hdr[65536];
     size_t hdr_n = 0;
     int status = 0;
-    char location[BIRC_MF_MAX_URL + 1u];
-    char encoding[64];
-    char ctype[128];
-    char clen[32];
+    BircMfHeaders hd;
     unsigned char *data = NULL;
     size_t data_n = 0;
     size_t maxb = cards ? BIRC_MF_MAX_HTML : BIRC_MF_MAX_DOWNLOAD;
     int ok = 0;
     if (birc_mf_now_ms() >= deadline)
-      return 0;
+      goto hop_fail;
     if (!birc_media_parse_url(current, cards, &parts))
-      return 0;
+      goto hop_fail;
     memset(&hints, 0, sizeof hints);
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
     if (getaddrinfo(parts.host, NULL, &hints, &list) != 0 || !list)
-      return 0;
+      goto hop_fail;
     {
       struct addrinfo *it;
       for (it = list; it; it = it->ai_next) {
@@ -747,17 +799,19 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
     fd = birc_mf_connect(list, deadline);
     freeaddrinfo(list);
     if (fd < 0)
-      return 0;
+      goto hop_fail;
     if (strcmp(parts.scheme, "https") == 0) {
       int ip = 0;
       unsigned char addr[16];
-      ctx = SSL_CTX_new(TLS_client_method());
-      if (!ctx)
-        goto hop_fail;
-      SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-      if (SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) != 1 || !birc_mf_trust(ctx))
-        goto hop_fail;
-      (void)SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
+      if (!ctx) {
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx)
+          goto hop_fail;
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+        if (SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) != 1 || !birc_mf_trust(ctx))
+          goto hop_fail;
+        (void)SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
+      }
       ssl = SSL_new(ctx);
       if (!ssl)
         goto hop_fail;
@@ -792,12 +846,15 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
     if (birc_mf_write(fd, ssl, req, strlen(req), deadline) != 0)
       goto hop_fail;
     while (hdr_n + 1u < sizeof hdr) {
+      /* D69: a terminator ending at or before the previous length would
+       * have matched last round; only the overlap can complete it now. */
+      size_t base = hdr_n > 3u ? hdr_n - 3u : 0u;
       ssize_t got = birc_mf_read(fd, ssl, hdr + hdr_n, sizeof hdr - 1u - hdr_n, deadline);
       if (got <= 0)
         goto hop_fail;
       hdr_n += (size_t)got;
       hdr[hdr_n] = 0;
-      if (strstr(hdr, "\r\n\r\n"))
+      if (strstr(hdr + base, "\r\n\r\n"))
         break;
     }
     {
@@ -809,6 +866,7 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
       line_end = strstr(hdr, "\r\n");
       if (!line_end)
         goto hop_fail;
+      birc_mf_scan_headers(line_end + 2, &hd);
       preface = (size_t)(sep + 4 - hdr);
       data_n = hdr_n - preface;
       data = (unsigned char *)malloc(maxb + 1u);
@@ -817,8 +875,8 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
       if (data_n)
         memcpy(data, hdr + preface, data_n);
       if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
-        if (redirect == BIRC_MF_REDIRECTS || !birc_mf_header(line_end + 2, "Location", location, sizeof location)
-            || !birc_mf_urljoin(current, location, cards, current, sizeof current))
+        if (redirect == BIRC_MF_REDIRECTS || !hd.has_location
+            || !birc_mf_urljoin(current, hd.location, cards, current, sizeof current))
           goto hop_fail;
         if (cards && strncmp(current, "https://", 8) != 0)
           goto hop_fail;
@@ -827,45 +885,38 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
         free(data);
         if (ssl)
           SSL_free(ssl);
-        if (ctx)
-          SSL_CTX_free(ctx);
         (void)close(fd);
         continue;
       }
       if (status != 200)
         goto hop_fail;
-      encoding[0] = 0;
-      if (birc_mf_header(line_end + 2, "Content-Encoding", encoding, sizeof encoding)
-          && strcasecmp(encoding, "identity") != 0)
+      if (hd.has_encoding && strcasecmp(hd.encoding, "identity") != 0)
         goto hop_fail;
-      if (birc_mf_header(line_end + 2, "Transfer-Encoding", encoding, sizeof encoding)
-          && encoding[0] && strcasecmp(encoding, "identity") != 0)
+      if (hd.has_transfer && hd.transfer[0] && strcasecmp(hd.transfer, "identity") != 0)
         goto hop_fail;
       if (cards) {
-        ctype[0] = 0;
-        if (birc_mf_header(line_end + 2, "Content-Type", ctype, sizeof ctype)) {
-          char *semi = strchr(ctype, ';');
+        if (hd.has_ctype) {
+          char *semi = strchr(hd.ctype, ';');
           if (semi)
             *semi = 0;
-          while (semi != ctype && ctype[0] && (ctype[strlen(ctype) - 1] == ' ' || ctype[strlen(ctype) - 1] == '\t'))
-            ctype[strlen(ctype) - 1] = 0;
-          if (strcasecmp(ctype, "text/html") != 0)
+          while (semi != hd.ctype && hd.ctype[0] && (hd.ctype[strlen(hd.ctype) - 1] == ' ' || hd.ctype[strlen(hd.ctype) - 1] == '\t'))
+            hd.ctype[strlen(hd.ctype) - 1] = 0;
+          if (strcasecmp(hd.ctype, "text/html") != 0)
             goto hop_fail;
         }
       }
-      clen[0] = 0;
-      if (birc_mf_header(line_end + 2, "Content-Length", clen, sizeof clen)) {
+      if (hd.has_clen) {
         char *end = NULL;
         unsigned long want;
         size_t i;
-        if (!clen[0])
+        if (!hd.clen[0])
           goto hop_fail;
-        for (i = 0; clen[i]; i++) {
-          if (!isdigit((unsigned char)clen[i]))
+        for (i = 0; hd.clen[i]; i++) {
+          if (!isdigit((unsigned char)hd.clen[i]))
             goto hop_fail;
         }
         errno = 0;
-        want = strtoul(clen, &end, 10);
+        want = strtoul(hd.clen, &end, 10);
         if (errno || !end || *end || want > maxb)
           goto hop_fail;
       }
@@ -879,7 +930,7 @@ static int birc_mf_fetch(const char *url, int cards, uint64_t deadline,
       }
       if (data_n > maxb)
         goto hop_fail;
-      if (clen[0] && data_n != strtoul(clen, NULL, 10))
+      if (hd.has_clen && hd.clen[0] && data_n != strtoul(hd.clen, NULL, 10))
         goto hop_fail;
       if (final && !birc_mf_url_text(&parts, final, final_n))
         goto hop_fail;
@@ -899,6 +950,8 @@ hop_fail:
     ERR_clear_error();
     return ok;
   }
+  if (ctx)
+    SSL_CTX_free(ctx);
   return 0;
 }
 
@@ -1340,32 +1393,59 @@ static unsigned char *birc_mf_read_regular(const char *path, size_t limit, size_
   return data;
 }
 
-static uint32_t birc_mf_crc32(const unsigned char *p, size_t n) {
-  static uint32_t table[256];
-  static int ready;
-  uint32_t c = 0xffffffffu;
-  size_t i;
-  if (!ready) {
+/* D71: split init/update/final so a chunk CRC covers type+data without a
+ * combined heap copy (the IDAT copy was ~410 KiB per encode). The table is
+ * file-scope so update shares the lazily built init. */
+static uint32_t birc_mf_crc32_tab[256];
+static int birc_mf_crc32_ready;
+
+static void birc_mf_crc32_table(void) {
+  if (!birc_mf_crc32_ready) {
     uint32_t k, b;
     for (k = 0; k < 256u; k++) {
       uint32_t v = k;
       for (b = 0; b < 8u; b++)
         v = (v & 1u) ? (0xedb88320u ^ (v >> 1)) : (v >> 1);
-      table[k] = v;
+      birc_mf_crc32_tab[k] = v;
     }
-    ready = 1;
+    birc_mf_crc32_ready = 1;
   }
+}
+
+static uint32_t birc_mf_crc32_begin(void) {
+  birc_mf_crc32_table();
+  return 0xffffffffu;
+}
+
+static uint32_t birc_mf_crc32_update(uint32_t c, const unsigned char *p, size_t n) {
+  size_t i;
+  birc_mf_crc32_table();
   for (i = 0; i < n; i++)
-    c = table[(c ^ p[i]) & 255u] ^ (c >> 8);
+    c = birc_mf_crc32_tab[(c ^ p[i]) & 255u] ^ (c >> 8);
+  return c;
+}
+
+static uint32_t birc_mf_crc32_end(uint32_t c) {
   return c ^ 0xffffffffu;
 }
 
+/* D71: deferred modulo. 5552 is the largest block with the running sums
+ * still below 2^32 (zlib's NMAX bound), so one block costs two divisions
+ * instead of two per byte, with a bit-identical result. */
 static uint32_t birc_mf_adler(const unsigned char *p, size_t n) {
   uint32_t s1 = 1, s2 = 0;
-  size_t i;
-  for (i = 0; i < n; i++) {
-    s1 = (s1 + p[i]) % 65521u;
-    s2 = (s2 + s1) % 65521u;
+  size_t i = 0;
+  while (n > 0) {
+    size_t block = n > 5552u ? 5552u : n;
+    size_t j;
+    for (j = 0; j < block; j++) {
+      s1 += p[i + j];
+      s2 += s1;
+    }
+    s1 %= 65521u;
+    s2 %= 65521u;
+    i += block;
+    n -= block;
   }
   return (s2 << 16) | s1;
 }
@@ -1381,7 +1461,6 @@ static int birc_mf_png_chunk(unsigned char **cur, unsigned char *end, const char
                              const unsigned char *data, uint32_t n) {
   unsigned char head[8];
   unsigned char crcbuf[8];
-  unsigned char *crc_src;
   uint32_t crc;
   if (*cur + 12u + n > end)
     return 0;
@@ -1393,14 +1472,11 @@ static int birc_mf_png_chunk(unsigned char **cur, unsigned char *end, const char
     memcpy(*cur, data, n);
     *cur += n;
   }
-  crc_src = (unsigned char *)malloc(4u + n);
-  if (!crc_src)
-    return 0;
-  memcpy(crc_src, type, 4);
+  /* D71: CRC the type+data pieces in place; no combined heap copy. */
+  crc = birc_mf_crc32_update(birc_mf_crc32_begin(), (const unsigned char *)type, 4);
   if (n)
-    memcpy(crc_src + 4, data, n);
-  crc = birc_mf_crc32(crc_src, 4u + n);
-  free(crc_src);
+    crc = birc_mf_crc32_update(crc, data, n);
+  crc = birc_mf_crc32_end(crc);
   birc_mf_be32(crcbuf, crc);
   memcpy(*cur, crcbuf, 4);
   *cur += 4;
@@ -1482,14 +1558,26 @@ static int birc_mf_write_png(const unsigned char *rgba, uint32_t w, uint32_t h,
 static void birc_mf_thumb(const unsigned char *src, int sw, int sh,
                           unsigned char *dst, int dw, int dh) {
   int y, x;
+  /* D71: one division per column instead of one per pixel. The map is
+   * advisory: OOM falls back to the original per-pixel quotient, so output
+   * is unchanged either way. */
+  int *xmap = NULL;
+  if (dw > 0) {
+    xmap = (int *)malloc((size_t)dw * sizeof *xmap);
+    if (xmap) {
+      for (x = 0; x < dw; x++)
+        xmap[x] = (int)(((int64_t)x * sw) / dw);
+    }
+  }
   for (y = 0; y < dh; y++) {
     int sy = (int)(((int64_t)y * sh) / dh);
     for (x = 0; x < dw; x++) {
-      int sx = (int)(((int64_t)x * sw) / dw);
+      int sx = xmap ? xmap[x] : (int)(((int64_t)x * sw) / dw);
       memcpy(dst + ((size_t)y * (size_t)dw + (size_t)x) * 4u,
              src + ((size_t)sy * (size_t)sw + (size_t)sx) * 4u, 4);
     }
   }
+  free(xmap);
 }
 
 static size_t birc_mf_b64(const unsigned char *in, size_t n, char *out, size_t out_n) {
@@ -1554,6 +1642,12 @@ uint32_t birc_media_encode(const unsigned char *data, size_t n, char **out, size
   }
   if (!birc_mf_write_png(scaled, dw, dh, &png, &png_n))
     goto done;
+  if (rgba) {
+    /* D119: the full-size source is dead after the PNG step; the payload
+     * below copies scaled, so release rgba before the payload/b64 builds. */
+    stbi_image_free(rgba);
+    rgba = NULL;
+  }
   rgba_n = (size_t)dw * dh * 4u;
   payload_n = 32u + rgba_n + 8u + png_n;
   if (payload_n > BIRC_MF_MAX_PAYLOAD)
@@ -1572,6 +1666,14 @@ uint32_t birc_media_encode(const unsigned char *data, size_t n, char **out, size
   birc_mf_be32(payload + 32 + rgba_n, 100);
   birc_mf_be32(payload + 36 + rgba_n, (uint32_t)png_n);
   memcpy(payload + 40 + rgba_n, png, png_n);
+  /* D119: payload now owns its copies; release png/scaled before the
+   * base64 build so at most payload+b64 coexist. */
+  free(png);
+  png = NULL;
+  if (scaled && scaled != rgba) {
+    free(scaled);
+    scaled = NULL;
+  }
   b64 = (char *)malloc(((payload_n + 2u) / 3u) * 4u + 2u);
   if (!b64)
     goto done;
@@ -1687,34 +1789,71 @@ static void birc_mf_clean(const char *in, size_t limit, char *out, size_t out_n)
   birc_mf_utf8_take(unesc, limit, out, out_n);
 }
 
-static int birc_mf_attr(const char *tag, const char *key, char *out, size_t n) {
+/* D120: one attribute walk per tag extracts property/name/content together
+ * instead of up to three birc_mf_attr walks. First occurrence wins per key
+ * (a later same-key attribute is skipped, never re-examined), an
+ * unparseable first occurrence reads as absent without consulting later
+ * ones, and the value rule (quoted, fits, else absent) is unchanged. */
+static void birc_mf_card_attrs(const char *tag, char *prop, size_t pn, int *prop_hit,
+                               char *cname, size_t nn, int *name_hit,
+                               char *content, size_t cn) {
   const char *p = tag;
-  size_t klen = strlen(key);
+  int prop_done = 0;
+  int name_done = 0;
+  int content_done = 0;
+  prop[0] = 0;
+  cname[0] = 0;
+  content[0] = 0;
+  *prop_hit = 0;
+  *name_hit = 0;
   while (*p) {
+    char *out = NULL;
+    size_t n = 0;
+    size_t klen = 0;
+    int *hit = NULL;
     while (*p && !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == ':' || *p == '-')))
       p++;
     if (!*p)
-      return 0;
-    if (strncasecmp(p, key, klen) == 0 && (p[klen] == '=' || p[klen] == ' ' || p[klen] == '\t')) {
+      return;
+    if (!prop_done && strncasecmp(p, "property", 8) == 0 && (p[8] == '=' || p[8] == ' ' || p[8] == '\t')) {
+      out = prop;
+      n = pn;
+      klen = 8;
+      hit = prop_hit;
+      prop_done = 1;
+    } else if (!name_done && strncasecmp(p, "name", 4) == 0 && (p[4] == '=' || p[4] == ' ' || p[4] == '\t')) {
+      out = cname;
+      n = nn;
+      klen = 4;
+      hit = name_hit;
+      name_done = 1;
+    } else if (!content_done && strncasecmp(p, "content", 7) == 0 && (p[7] == '=' || p[7] == ' ' || p[7] == '\t')) {
+      out = content;
+      n = cn;
+      klen = 7;
+      content_done = 1;
+    }
+    if (out != NULL) {
       const char *eq = strchr(p + klen, '=');
       char q;
       const char *v;
       size_t i = 0;
-      if (!eq)
-        return 0;
-      v = eq + 1;
-      while (*v == ' ' || *v == '\t')
-        v++;
-      if (*v != '"' && *v != '\'')
-        return 0;
-      q = *v++;
-      while (v[i] && v[i] != q && i + 1 < n)
-        i++;
-      if (v[i] != q)
-        return 0;
-      memcpy(out, v, i);
-      out[i] = 0;
-      return 1;
+      if (eq != NULL) {
+        v = eq + 1;
+        while (*v == ' ' || *v == '\t')
+          v++;
+        if (*v == '"' || *v == '\'') {
+          q = *v++;
+          while (v[i] && v[i] != q && i + 1 < n)
+            i++;
+          if (v[i] == q) {
+            memcpy(out, v, i);
+            out[i] = 0;
+            if (hit != NULL)
+              *hit = 1;
+          }
+        }
+      }
     }
     while (*p && *p != '=' && *p != ' ' && *p != '>')
       p++;
@@ -1731,7 +1870,6 @@ static int birc_mf_attr(const char *tag, const char *key, char *out, size_t n) {
       }
     }
   }
-  return 0;
 }
 
 static void birc_mf_lower(char *s) {
@@ -1824,10 +1962,21 @@ uint32_t birc_cards_parse(const unsigned char *data, size_t n, const char *base,
     memcpy(tag, p, tlen);
     tag[tlen] = 0;
     metas++;
-    key[0] = content[0] = 0;
-    if (!birc_mf_attr(tag, "property", key, sizeof key))
-      (void)birc_mf_attr(tag, "name", key, sizeof key);
-    (void)birc_mf_attr(tag, "content", content, sizeof content);
+    {
+      /* D120: one attribute pass per tag; property wins, name is the
+       * fallback, exactly like the old sequential attr calls. */
+      char prop[80], cname[80];
+      int prop_hit = 0, name_hit = 0;
+      birc_mf_card_attrs(tag, prop, sizeof prop, &prop_hit,
+                         cname, sizeof cname, &name_hit,
+                         content, sizeof content);
+      if (prop_hit)
+        memcpy(key, prop, strlen(prop) + 1u);
+      else if (name_hit)
+        memcpy(key, cname, strlen(cname) + 1u);
+      else
+        key[0] = 0;
+    }
     birc_mf_lower(key);
     if (strcmp(key, "og:title") == 0 && !og_title[0])
       memcpy(og_title, content, strlen(content) + 1u);
