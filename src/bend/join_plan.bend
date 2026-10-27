@@ -74,12 +74,59 @@ def remember.allowed_cm(allowed: Bool, state: State, +name: String, +key: String
       match state:
         case State{desired, welcome, sent, barrier, held, revision, motd_done}: State{put_cm(desired, name, key, replace, cm), welcome, sent, barrier, held, revision, motd_done}
 
+# Fail-fast membership (D103): a resident channel skips the length walk; only
+# a new name pays the capacity scan. Admission still gates both arms.
+# Single membership pass (D103): one walk rebuilds the list, reports whether
+# the name was already resident, and counts the post-insert length. The old
+# shape paid a has_cm scan, a second List.length walk on the miss path, and
+# a third walk inside put_cm. Capacity compares against the post-insert
+# length (n <= MAX), which equals length-before < MAX on a miss and holds
+# trivially on a hit. Admission still gates both arms.
+type Inserted is Data:
+  Inserted{rev: List<&2, Channel>, known: Bool, count: Nat}
+
+# Single membership pass (D103): one forward walk rebuilds the list reversed
+# while folding the resident flag and the length. The Bool.pick arms take
+# only strings (no walks), matching put_cm's choice. The caller reverses
+# once and appends only on a miss, so a hit never duplicates.
+def insert_rev.go(xs: List<&2, Channel>, +name: String, +key: String, +replace: Bool, +cm: String, +rev: List<&2, Channel>, found: Bool, +n: Nat) -> Inserted:
+  match xs:
+    case Nil{}:
+      Inserted{rev, found, n}
+    case Con{Channel{+stored, +old_key}, +rest}:
+      +eq = Cl.buf_eq_cm(cm, stored, name)
+      insert_rev.go(rest, name, key, replace, cm, Channel{stored, Bool.pick(String, replace && eq, key, old_key)} <> rev, found || eq, 1n+n)
+
+def insert_rev(+xs: List<&2, Channel>, +name: String, +key: String, +replace: Bool, +cm: String) -> Inserted:
+  insert_rev.go(xs, name, key, replace, cm, Nil{}, False{}, 0n)
+
+def remember_iso.admit(ok: Bool, +state: State, +cand: List<&2, Channel>, welcome: Bool, sent: Bool, barrier: Barrier, held: Bool, revision: Nat, motd_done: Bool) -> State:
+  match ok:
+    case True{}:
+      State{cand, welcome, sent, barrier, held, revision, motd_done}
+    case False{}:
+      state
+
+def remember_iso.found(known: Bool, +rev: List<&2, Channel>, +n: Nat, +state: State, +name: String, +key: String, +iso: Isupport.State) -> State:
+  match known:
+    case True{}:
+      match state:
+        case State{_, welcome, sent, barrier, held, revision, motd_done}:
+          remember_iso.admit(Isupport.join_admit(iso, name, key), state, List.reverse(&2, Channel, rev), welcome, sent, barrier, held, revision, motd_done)
+    case False{}:
+      match state:
+        case State{_, welcome, sent, barrier, held, revision, motd_done}:
+          remember_iso.admit(Isupport.join_admit(iso, name, key) && Nat.is_lt(n, MAX_CHANNELS()), state, List.reverse(&2, Channel, Channel{name, key} <> rev), welcome, sent, barrier, held, revision, motd_done)
+
+def remember_iso.single(got: Inserted, +state: State, +name: String, +key: String, +iso: Isupport.State) -> State:
+  match got:
+    case Inserted{+rev, +known, +n}:
+      remember_iso.found(known, rev, n, state, name, key, iso)
+
 def remember_iso(+state: State, +name: String, +key: String, replace: Bool, +iso: Isupport.State) -> State:
   match state:
     case State{+desired, _, _, _, _, _, _}:
-      +cm = Isupport.casemapping(iso)
-      remember.allowed_cm(Isupport.join_admit(iso, name, key)
-        && (has_cm(desired, name, cm) || Nat.is_lt(List.length(&2, Channel, desired), MAX_CHANNELS())), state, name, key, replace, cm)
+      remember_iso.single(insert_rev(desired, name, key, replace, Isupport.casemapping(iso)), state, name, key, iso)
 
 # Proof/legacy entry: same core as remember_iso with fixed defaults.
 def remember(+state: State, +name: String, +key: String, replace: Bool) -> State:
@@ -233,11 +280,50 @@ def seed_candidate.valid(+name: String, +key: String) -> Bool:
     case SNil{}: False{}
     case SCon{+h, +tail}: seed_candidate.head(h, tail, name, key)
 
+# Single seed pass (D162): one walk rebuilds the desired list with exact
+# matching, reports prior residency, and counts the post-insert length. The
+# old shape paid a has_exact scan, a second List.length walk on the miss
+# path, and a third walk inside put_exact. The per-name prior-key lookup in
+# seed_channels_iso stays: prior is a different list (snapshot keys, not
+# membership), so it cannot fold into this walk.
+def seed_rev.go(xs: List<&2, Channel>, +name: String, +key: String, +rev: List<&2, Channel>, found: Bool, +n: Nat) -> Inserted:
+  match xs:
+    case Nil{}:
+      Inserted{rev, found, n}
+    case Con{Channel{+stored, +old_key}, +rest}:
+      +eq = String.eq(stored, name)
+      seed_rev.go(rest, name, key, Channel{stored, Bool.pick(String, eq, key, old_key)} <> rev, found || eq, 1n+n)
+
+def seed_rev(+xs: List<&2, Channel>, +name: String, +key: String) -> Inserted:
+  seed_rev.go(xs, name, key, Nil{}, False{}, 0n)
+
+def seed_candidate.admit(ok: Bool, +state: State, +cand: List<&2, Channel>, welcome: Bool, sent: Bool, barrier: Barrier, held: Bool, revision: Nat, motd_done: Bool) -> State:
+  match ok:
+    case True{}:
+      State{cand, welcome, sent, barrier, held, revision, motd_done}
+    case False{}:
+      state
+
+def seed_candidate.found(known: Bool, +rev: List<&2, Channel>, +n: Nat, +state: State, +name: String, +key: String) -> State:
+  match known:
+    case True{}:
+      match state:
+        case State{_, welcome, sent, barrier, held, revision, motd_done}:
+          seed_candidate.admit(seed_candidate.valid(name, key), state, List.reverse(&2, Channel, rev), welcome, sent, barrier, held, revision, motd_done)
+    case False{}:
+      match state:
+        case State{_, welcome, sent, barrier, held, revision, motd_done}:
+          seed_candidate.admit(seed_candidate.valid(name, key) && Nat.is_lt(n, MAX_CHANNELS()), state, List.reverse(&2, Channel, Channel{name, key} <> rev), welcome, sent, barrier, held, revision, motd_done)
+
+def seed_candidate.single(got: Inserted, +state: State, +name: String, +key: String) -> State:
+  match got:
+    case Inserted{+rev, +known, +n}:
+      seed_candidate.found(known, rev, n, state, name, key)
+
 def seed_candidate(+state: State, +name: String, +key: String) -> State:
   match state:
     case State{+desired, _, _, _, _, _, _}:
-      seed_candidate.allowed((has_exact(desired, name) || Nat.is_lt(List.length(&2, Channel, desired), MAX_CHANNELS()))
-        && seed_candidate.valid(name, key), state, name, key)
+      seed_candidate.single(seed_rev(desired, name, key), state, name, key)
 
 def seed_channels_iso(names: List<&2, String>, +prior: List<&2, Channel>, state: State, +iso: Isupport.State) -> State:
   match names:
@@ -459,6 +545,90 @@ def outbound_iso(state: State, outs: List<&2, String>, +iso: Isupport.State) -> 
 # Private outbound.*/outbound_join/join_targets twins remain for now.
 def outbound(state: State, outs: List<&2, String>) -> State & List<&2, String>:
   outbound_iso(state, outs, Isupport.defaults())
+
+# Fused single-parse batch (D101): capacity preflight and outbound admission
+# each parsed every line, and the session admit between them parses a third
+# time. This entry parses once per line and threads the message through the
+# same capacity_line_iso gate and outbound.parsed_iso stage, so the verdict
+# and the admitted batch match capacity_ok_iso/outbound_iso exactly. The
+# session-side admit between them still parses on its own path; adopting this
+# entry there is session-lane work. Recursion lives only in checked_cap.go;
+# the gate helpers take continuations, mirroring capacity_line_iso.
+type StoredLine is Data:
+  StoredLine{line: String, parsed: Maybe<&2, Irc.Message>}
+
+def checked_emit.pair(pair: StoredLine, +state: State, reversed: List<&2, String>, +iso: Isupport.State, k: OutAcc -> OutAcc) -> OutAcc:
+  match pair:
+    case StoredLine{+line, +parsed}:
+      k(outbound.parsed_iso(state, reversed, line, parsed, iso))
+
+def checked_emit.go(stored: List<&2, StoredLine>, acc: OutAcc, +iso: Isupport.State) -> OutAcc:
+  match stored:
+    case Nil{}:
+      acc
+    case Con{pair, rest}:
+      match acc:
+        case OutAcc{state, reversed}:
+          checked_emit.pair(pair, state, reversed, iso, oa => checked_emit.go(rest, oa, iso))
+
+type CheckedOut is Data:
+  BatchReject{}
+  BatchDone{state: State, outs: List<&2, String>}
+
+def checked_cap.done(pair: State & List<&2, String>) -> CheckedOut:
+  match pair:
+    case (+st, +outs):
+      BatchDone{st, outs}
+
+def checked_cap.step(allowed: Bool, +m: Irc.Message, +line: String, +state: State, +iso: Isupport.State, rev: List<&2, StoredLine>, k: State -> List<&2, StoredLine> -> CheckedOut) -> CheckedOut:
+  match allowed:
+    case False{}:
+      BatchReject{}
+    case True{}:
+      k(capacity_command_iso(state, m, Irc.classify(m), iso))(StoredLine{line, Some{m}} <> rev)
+
+def checked_cap.line(parsed: Maybe<&2, Irc.Message>, +line: String, +state: State, +iso: Isupport.State, rev: List<&2, StoredLine>, k: State -> List<&2, StoredLine> -> CheckedOut) -> CheckedOut:
+  match parsed:
+    case None{}:
+      k(state)(StoredLine{line, None{}} <> rev)
+    case Some{+m}:
+      checked_cap.step(Bool.not(Irc.ieq(Irc.msg_command(m), "JOIN")) || join_capacity_iso(state, m, iso), m, line, state, iso, rev, k)
+
+def checked_cap.go(+outs: List<&2, String>, +cap_st: State, +orig_st: State, +iso: Isupport.State, rev: List<&2, StoredLine>) -> CheckedOut:
+  match outs:
+    case Nil{}:
+      checked_cap.done(outbound.finish(checked_emit.go(List.reverse(&2, StoredLine, rev), OutAcc{orig_st, Nil{}}, iso)))
+    case Con{+line, rest}:
+      checked_cap.line(Irc.parse(line), line, cap_st, iso, rev, cs2 => rv2 => checked_cap.go(rest, cs2, orig_st, iso, rv2))
+
+def checked_outbound_iso(+outs: List<&2, String>, +state: State, +iso: Isupport.State) -> CheckedOut:
+  checked_cap.go(outs, state, state, iso, Nil{})
+
+# Equivalence pins: the fused entry agrees with the two-pass pipeline on the
+# verdict, the emitted batch, and the resulting desired membership.
+def checked_equiv.check(ok: Bool, +outs1: List<&2, String>, +st1: State, pair2: State & List<&2, String>, +outs: List<&2, String>, +state: State, +iso: Isupport.State) -> Bool:
+  match pair2:
+    case (+st2, +outs2):
+      ok
+        && String.eq(String.concat(outs1), String.concat(outs2))
+        && String.eq(String.concat(desired_names(st1)), String.concat(desired_names(st2)))
+
+def checked_equiv.got(fused: CheckedOut, +outs: List<&2, String>, +state: State, +iso: Isupport.State) -> Bool:
+  match fused:
+    case BatchReject{}:
+      Bool.not(capacity_ok_iso(outs, state, iso))
+    case BatchDone{+st1, +outs1}:
+      checked_equiv.check(capacity_ok_iso(outs, state, iso), outs1, st1, outbound_iso(state, outs, iso), outs, state, iso)
+
+def checked_equiv(+outs: List<&2, String>, +state: State, +iso: Isupport.State) -> Bool:
+  checked_equiv.got(checked_outbound_iso(outs, state, iso), outs, state, iso)
+
+def checked_outbound_ok() -> Bool:
+  +iso = Isupport.defaults()
+  checked_equiv("JOIN #a" <> Nil{}, initial("#x"), iso)
+    && checked_equiv("JOIN #a" <> "PART #x" <> Nil{}, initial("#x"), iso)
+    && checked_equiv("JOIN 0" <> Nil{}, initial("#x"), iso)
+    && checked_equiv("PRIVMSG #x :hi" <> Nil{}, initial("#x"), iso)
 
 def forget_present.on(present: Bool, state: State, name: String) -> State:
   match present:

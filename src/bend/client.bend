@@ -84,9 +84,22 @@ def action_text.fin(+rest: String, rev: String) -> String:
     case SNil{}:
       SNil{}
 
+# Single-strip ACTION text (D233): the body after the 8-char "\x01ACTION "
+# prefix keeps everything except one trailing SOH. The old path paid a
+# drop plus a full reverse, then reversed the tail a second time in the
+# SOH arm; this walk checks the last character once and takes the head
+# without any reversal.
+def action_text.stripped(soh: Bool, +rest: String, +n: Nat) -> String:
+  match soh:
+    case True{}: String.take(rest, Nat.sub(n, 1n))
+    case False{}: rest
+
+def action_text.last(+rest: String, +n: Nat) -> String:
+  action_text.stripped(String.eq(String.drop(rest, Nat.sub(n, 1n)), SCon{Chr{1}, ""}), rest, n)
+
 def action_text(+body: String) -> String:
   +rest = String.drop(body, 8n)
-  action_text.fin(rest, String.reverse(rest))
+  action_text.last(rest, String.length(rest))
 
 # ---- feed arms ----------------------------------------------------------
 
@@ -237,9 +250,17 @@ def feed_priv.to_server.on(empty: Bool, broadcast: Bool) -> Bool:
     case False{}:
       broadcast
 
+# Notice-first gate: the ieq scans and casemap double-folds evaluate only
+# when notice is set; notices-off messages skip them.
+def feed_priv.to_server_notice(notice: Bool, +cm: String, +cl: Cl.Client, +from: String, +target: String) -> Bool:
+  match notice:
+    case False{}: feed_priv.to_server.on(String.is_empty(from), False{})
+    case True{}:
+      feed_priv.to_server.on(String.is_empty(from), Irc.ieq(target, "*")
+        || (Irc.ieq(target, "AUTH") && Bool.not(Cl.buf_eq_cm(cm, target, Cl.nick_of(cl)) || Cl.buf_eq_cm(cm, Irc.proto_atom(from), Cl.nick_of(cl)))))
+
 def feed_priv.to_server_with(+cm: String, +cl: Cl.Client, +from: String, +target: String, notice: Bool) -> Bool:
-  feed_priv.to_server.on(String.is_empty(from), notice && (Irc.ieq(target, "*")
-    || (Irc.ieq(target, "AUTH") && Bool.not(Cl.buf_eq_cm(cm, target, Cl.nick_of(cl)) || Cl.buf_eq_cm(cm, Irc.proto_atom(from), Cl.nick_of(cl))))))
+  feed_priv.to_server_notice(notice, cm, cl, from, target)
 
 def feed_priv.nonchan_with(
   +cl: Cl.Client,
@@ -546,6 +567,68 @@ def feed_nick_with.map(+isc: Cl.Iso, xs: List<&2, Cl.Buffer>, from: String, to: 
     case Nil{}: Nil{}
     case Con{server, t}: server <> feed_nick_with.map.go(isc, t, from, to, ts)
 
+# Fused roster+stamp map (D235): per-buffer roster renames log their Nick
+# row with the event id assigned inline while threading the Client
+# sequence, so the rename path no longer pays a second full stamp_bufs
+# re-fold afterwards. Row content, id order, and cutoff semantics match
+# stamp_logs on this path: only the newly logged rows carry fresh ids in
+# buffer order, and diagnostic_fresh still replays with the entry cutoff.
+def feed_nick_with.one_seq.has(+isc: Cl.Iso, +b: Cl.Buffer, +from: String, +to: String, +ts: String, +seq: Nat, has: Bool) -> Cl.Buffer & Nat:
+  match has:
+    case True{}:
+      Cl.buf_log_ts_seq(Cl.nick_rename_cm(b, Cl.iso_cm(isc), Cl.iso_strip(isc), from, to), Cl.Nick{}, ts, fmt_nick_chg(from, to), seq)
+    case False{}:
+      (b, seq)
+
+def feed_nick_with.one_seq(+isc: Cl.Iso, +b: Cl.Buffer, +from: String, +to: String, +ts: String, +seq: Nat) -> Cl.Buffer & Nat:
+  feed_nick_with.one_seq.has(isc, b, from, to, ts, seq, Cl.nick_has_cm(b, Cl.iso_cm(isc), from))
+
+def feed_nick_with.query_seq.hit(+isc: Cl.Iso, +name: String, +ch: Bool, +topic: String, +lines: List<&2, Cl.Line>, +nicks: List<&2, String>, +scroll: Cl.Scroll, +from: String, +to: String, +ts: String, +seq: Nat, hit: Bool) -> Cl.Buffer & Nat:
+  match hit:
+    case True{}:
+      Cl.buf_log_ts_seq(Cl.nick_rename_cm(Cl.set_buf_name(Cl.buf_indexed(name, ch, topic, lines, nicks, scroll), to), Cl.iso_cm(isc), Cl.iso_strip(isc), from, to), Cl.Nick{}, ts, fmt_nick_chg(from, to), seq)
+    case False{}:
+      (Cl.buf_indexed(name, ch, topic, lines, nicks, scroll), seq)
+
+def feed_nick_with.query_seq(+isc: Cl.Iso, +h: Cl.Buffer, +from: String, +to: String, +ts: String, +seq: Nat) -> Cl.Buffer & Nat:
+  match h:
+    case Cl.Buffer{+name, +ch, +topic, +lines, +nicks, +scroll, _, _}:
+      feed_nick_with.query_seq.hit(isc, name, ch, topic, lines, nicks, scroll, from, to, ts, seq, Cl.buf_eq_cm(Cl.iso_cm(isc), name, from) && Cl.is_query_name(name))
+
+def feed_nick_with.apply_seq.on(+isc: Cl.Iso, +h: Cl.Buffer, +from: String, +to: String, +ts: String, +seq: Nat, ch: Bool) -> Cl.Buffer & Nat:
+  match ch:
+    case True{}:
+      feed_nick_with.one_seq(isc, h, from, to, ts, seq)
+    case False{}:
+      feed_nick_with.query_seq(isc, h, from, to, ts, seq)
+
+def feed_nick_with.apply_seq(+isc: Cl.Iso, +h: Cl.Buffer, +from: String, +to: String, +ts: String, +seq: Nat) -> Cl.Buffer & Nat:
+  feed_nick_with.apply_seq.on(isc, h, from, to, ts, seq, is_channel_buf(h))
+
+def feed_nick_with.map_seq.tail(pair: List<&2, Cl.Buffer> & Nat, +nh: Cl.Buffer) -> List<&2, Cl.Buffer> & Nat:
+  match pair:
+    case (+nt, +seq): (nh <> nt, seq)
+
+def feed_nick_with.map_seq.cons(pair: Cl.Buffer & Nat, +isc: Cl.Iso, +t: List<&2, Cl.Buffer>, +from: String, +to: String, +ts: String, next: Nat -> List<&2, Cl.Buffer> & Nat) -> List<&2, Cl.Buffer> & Nat:
+  match pair:
+    case (+nh, +seq2): feed_nick_with.map_seq.tail(next(seq2), nh)
+
+def feed_nick_with.map_seq.go(+isc: Cl.Iso, xs: List<&2, Cl.Buffer>, +from: String, +to: String, +ts: String, +seq: Nat) -> List<&2, Cl.Buffer> & Nat:
+  match xs:
+    case Nil{}: (Nil{}, seq)
+    case Con{h, +t}:
+      feed_nick_with.map_seq.cons(feed_nick_with.apply_seq(isc, h, from, to, ts, seq), isc, t, from, to, ts, s => feed_nick_with.map_seq.go(isc, t, from, to, ts, s))
+
+def feed_nick_with.map_seq.head(pair: List<&2, Cl.Buffer> & Nat, +server: Cl.Buffer) -> List<&2, Cl.Buffer> & Nat:
+  match pair:
+    case (+t, +seq): (server <> t, seq)
+
+def feed_nick_with.map_seq(+isc: Cl.Iso, xs: List<&2, Cl.Buffer>, +from: String, +to: String, +ts: String, +seq: Nat) -> List<&2, Cl.Buffer> & Nat:
+  match xs:
+    case Nil{}: (Nil{}, seq)
+    case Con{server, t}:
+      feed_nick_with.map_seq.head(feed_nick_with.map_seq.go(isc, t, from, to, ts, seq), server)
+
 def feed_nick_with.focus_control(+cm: String, control: Bool, +cl: Cl.Client, name: String, +to: String, self: Bool) -> Cl.Client:
   match control:
     case True{}: feed_nick.fin(Cl.set_active(cl, 0n), to, self)
@@ -558,10 +641,15 @@ def feed_nick_with.coalesced(+cm: String, +cl: Cl.Client, +from: String, +to: St
   +name = Bool.pick(String, Cl.buf_eq_cm(cm, focus, from) && Cl.is_query_name(focus), to, focus)
   feed_nick_with.focus_control(cm, control, merged, name, to, self)
 
+def feed_nick_with.with.stamped(pair: List<&2, Cl.Buffer> & Nat, +isc: Cl.Iso, +nick: String, +server: String, +active: Nat, +now: String, +stg: Cl.Settings, +auth: Cl.AuthPhase, +old: Nat, welcomed: Bool, +from: String, +to: String, self: Bool, +focus: String) -> Cl.Client:
+  match pair:
+    case (+bufs2, +seq2):
+      feed_nick_with.coalesced(Cl.iso_cm(isc), Cl.diagnostic_fresh(Cl.Client{nick, server, bufs2, active, now, stg, auth, seq2, welcomed}, old), from, to, focus, self, Nat.is_eq(active, 0n))
+
 def feed_nick_with.with.valid(+isc: Cl.Iso, +cl: Cl.Client, +from: String, +to: String, self: Bool) -> Cl.Client:
   match cl:
     case Cl.Client{+nick, +server, +bufs, +active, +now, +stg, +auth, +log_seq, welcomed}:
-      feed_nick_with.coalesced(Cl.iso_cm(isc), Cl.stamp_logs(Cl.Client{nick, server, feed_nick_with.map(isc, bufs, from, to, now), active, now, stg, auth, log_seq, welcomed}), from, to, Cl.active_buf_name(cl), self, Nat.is_eq(active, 0n))
+      feed_nick_with.with.stamped(feed_nick_with.map_seq(isc, bufs, from, to, now, log_seq), isc, nick, server, active, now, stg, auth, log_seq, welcomed, from, to, self, Cl.active_buf_name.on(Cl.nth_buf(bufs, active)))
 
 def feed_nick_with.with.on(+isc: Cl.Iso, allowed: Bool, cl: Cl.Client, from: String, to: String, self: Bool) -> Cl.Client:
   match allowed:
@@ -834,15 +922,24 @@ def feed_mode.params(key: Bool, +m: Irc.Message) -> List<&2, String>:
     case False{}: Irc.msg_params(m)
     case True{}: feed_mode.collapsed(m, has_hidden(m))
 
+# Residency-first MODE: the key/redaction walks and the hidden-marker join
+# run only when the target buffer exists; misses return unchanged.
+def feed_mode.resident(+cl: Cl.Client, +nick: String, +m: Irc.Message, found: Maybe<&2, Nat>) -> Cl.Client:
+  match found:
+    case None{}:
+      cl
+    case Some{+bi}:
+      feed_mode.got(cl, nick, feed_mode.params(Commands.mode_has_key(m), m), Some{bi})
+
 def feed_mode(+cl: Cl.Client, +m: Irc.Message) -> Cl.Client:
   match m:
     case Irc.Message{_, +nick, _, _, +ps}:
-      feed_mode.got(cl, nick, feed_mode.params(Commands.mode_has_key(m), m), wire_find(cl, first_param(ps)))
+      feed_mode.resident(cl, nick, m, wire_find(cl, first_param(ps)))
 
 def feed_mode_with(+cl: Cl.Client, +isc: Cl.Iso, +m: Irc.Message) -> Cl.Client:
   match m:
     case Irc.Message{_, +nick, _, _, +ps}:
-      feed_mode.got(cl, nick, feed_mode.params(Commands.mode_has_key(m), m), wire_find_with(cl, Cl.iso_cm(isc), first_param(ps)))
+      feed_mode.resident(cl, nick, m, wire_find_with(cl, Cl.iso_cm(isc), first_param(ps)))
 
 def feed_unk(+cl: Cl.Client, +m: Irc.Message) -> Cl.Client:
   match m:
@@ -890,18 +987,43 @@ def feed_ack(+cl: Cl.Client, +prefix: String, +m: Irc.Message, label: Maybe<&2, 
 
 # IRCv3 standard replies: FAIL/WARN/NOTE render on the server log; anything
 # malformed or peer-forged falls through to the unknown-command path.
-def feed_stdreply.text(+m: Irc.Message, +label: Maybe<&2, String>, +verb: String) -> String:
-  Irc.stdreply_text_verb(verb, Irc.msg_param(m, 0n), Irc.msg_param(m, 1n), Irc.stdreply_context(m), Irc.msg_last(m), label)
+# Shares the single (count, last) walk with the gate instead of paying a
+# second length walk plus a second tail walk for the same params.
+def feed_stdreply.text_parts(got: Nat & String, +m: Irc.Message, +label: Maybe<&2, String>, +verb: String) -> String:
+  match got:
+    case (+n, +last):
+      match m:
+        case Irc.Message{_, _, _, _, +ps}:
+          Irc.stdreply_text_verb(verb, Irc.msg_param(m, 0n), Irc.msg_param(m, 1n), Irc.stdreply_context.parts((n, last), ps), last, label)
 
-def feed_stdreply.gated(+cl: Cl.Client, +m: Irc.Message, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, ok: Bool) -> Cl.Client:
+def feed_stdreply.text(+m: Irc.Message, +label: Maybe<&2, String>, +verb: String) -> String:
+  match m:
+    case Irc.Message{_, _, _, _, +ps}:
+      feed_stdreply.text_parts(Irc.stdreply_parts.go(ps, 0n, ""), m, label, verb)
+
+def feed_stdreply.gated(+cl: Cl.Client, +m: Irc.Message, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, ok: Bool, got: Nat & String) -> Cl.Client:
   match ok:
     case True{}:
-      Cl.client_log(cl, 0n, kind, feed_stdreply.text(m, label, verb))
+      Cl.client_log(cl, 0n, kind, feed_stdreply.text_parts(got, m, label, verb))
     case False{}:
       feed_unk(cl, m)
 
+# Shared parts walk (D177): the (count, last) walk runs once per event and
+# both the gate and the text path read it, instead of the gate paying a
+# length walk plus a tail walk and the text paying a second pair. The pair
+# destructures once into scalars; both readers share the scalars.
+def feed_stdreply.counted(got: Nat & String, +cl: Cl.Client, +prefix: String, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, +m: Irc.Message, +ps: List<&2, String>) -> Cl.Client:
+  match got:
+    case (+n, +last):
+      feed_stdreply.gated(cl, m, label, verb, kind, CapNotify.server_source(prefix) && Irc.stdreply_ok.parts((n, last), ps), (n, last))
+
+def feed_stdreply.go(+cl: Cl.Client, +prefix: String, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, +m: Irc.Message, +ps: List<&2, String>) -> Cl.Client:
+  feed_stdreply.counted(Irc.stdreply_parts.go(ps, 0n, ""), cl, prefix, label, verb, kind, m, ps)
+
 def feed_stdreply(+cl: Cl.Client, +prefix: String, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, +m: Irc.Message) -> Cl.Client:
-  feed_stdreply.gated(cl, m, label, verb, kind, CapNotify.server_source(prefix) && Irc.stdreply_ok(m))
+  match m:
+    case Irc.Message{_, _, _, _, +ps}:
+      feed_stdreply.go(cl, prefix, label, verb, kind, m, ps)
 
 def feed_stdreply_with(+cl: Cl.Client, +isc: Cl.Iso, +prefix: String, +label: Maybe<&2, String>, +verb: String, kind: Cl.LineKind, +m: Irc.Message) -> Cl.Client:
   feed_stdreply(cl, prefix, label, verb, kind, m)
@@ -977,18 +1099,35 @@ def feed_with.server_notice.on(server_notice: Bool, +cl: Cl.Client, +isc: Cl.Iso
     case True{}:
       feed_priv.write.notice(cl, 0n, msg_nick(m), Irc.msg_param(m, 1n), Irc.msg_time(m))
 
+# Command-first gate: the full server-notice validation (spine probe, two
+# casemap folds, server-source and mute-ledger walks) runs only on NOTICE
+# lines; every other command routes straight to the message feed.
+def feed_with.server_notice.cmd(notice: Bool, +cl: Cl.Client, +isc: Cl.Iso, +prefix: String, +m: Irc.Message, label: Maybe<&2, String>) -> Cl.Client:
+  match notice:
+    case False{}: feed_msg_with(cl, isc, prefix, m, label)
+    case True{}:
+      +from = msg_nick(m)
+      +target = Cl.message_key_with(cl, isc, Irc.msg_param(m, 0n))
+      feed_with.server_notice.on(Irc.ieq(Irc.msg_command(m), "NOTICE")
+        && Cl.buf_eq_cm(Cl.iso_cm(isc), target, Cl.nick_of(cl)) && Irc.source_is_server(prefix, Cl.server_of(cl))
+        && wire_name(from) && Bool.not(Cl.is_muted_client_cm(Cl.iso_cm(isc), cl, from, target)), cl, isc, prefix, m, label)
+
 def feed_with.server_notice(+cl: Cl.Client, +isc: Cl.Iso, +prefix: String, m: Maybe<&2, Irc.Message>, label: Maybe<&2, String>) -> Cl.Client:
   match m:
     case None{}: cl
     case Some{+msg}:
-      +from = msg_nick(msg)
-      +target = Cl.message_key_with(cl, isc, Irc.msg_param(msg, 0n))
-      feed_with.server_notice.on(Irc.ieq(Irc.msg_command(msg), "NOTICE")
-        && Cl.buf_eq_cm(Cl.iso_cm(isc), target, Cl.nick_of(cl)) && Irc.source_is_server(prefix, Cl.server_of(cl))
-        && wire_name(from) && Bool.not(Cl.is_muted_client_cm(Cl.iso_cm(isc), cl, from, target)), cl, isc, prefix, msg, label)
+      feed_with.server_notice.cmd(Irc.ieq(Irc.msg_command(msg), "NOTICE"), cl, isc, prefix, msg, label)
+
+# Admission-first feed: prefix/tags/label scans run only when the parse
+# admits the line; rejects skip them instead of discarding built results.
+def feed_with.parsed(+cl: Cl.Client, +isc: Cl.Iso, +line: String, m: Maybe<&2, Irc.Message>) -> Cl.Client:
+  match m:
+    case None{}: Cl.stamp_logs(cl)
+    case Some{+msg}:
+      Cl.stamp_logs(feed_with.server_notice(cl, isc, Irc.source_prefix(line), Some{msg}, Irc.label_tag(Irc.raw_tags(line))))
 
 def feed_with(+cl: Cl.Client, +isc: Cl.Iso, +line: String) -> Cl.Client:
-  Cl.stamp_logs(feed_with.server_notice(cl, isc, Irc.source_prefix(line), Irc.parse(line), Irc.label_tag(Irc.raw_tags(line))))
+  feed_with.parsed(cl, isc, line, Irc.parse(line))
 
 def feed(+cl: Cl.Client, +line: String) -> Cl.Client:
   feed_with(cl, Cl.Iso.defaults(), line)
@@ -1004,11 +1143,17 @@ def feed_at.message(m: Maybe<&2, Irc.Message>, +stamp: String) -> Maybe<&2, Irc.
         case Irc.Message{_, nick, command, numeric, params}:
           Some{Irc.Message{stamp, nick, command, numeric, params}}
 
+def feed_at_with.stamped_parsed(+clc: Cl.Client, +isc: Cl.Iso, +line: String, +use: String, +now: String, m: Maybe<&2, Irc.Message>) -> Cl.Client:
+  match m:
+    case None{}: Cl.set_now(Cl.stamp_logs(clc), now)
+    case Some{+msg}:
+      Cl.set_now(Cl.stamp_logs(feed_with.server_notice(clc, isc, Irc.source_prefix(line), Some{msg}, Irc.label_tag(Irc.raw_tags(line)))), now)
+
 def feed_at_with.stamped(+cl: Cl.Client, +isc: Cl.Iso, +line: String, +stamp: String) -> Cl.Client:
   match cl:
     case Cl.Client{_, _, _, _, +now, _, _, _, _}:
       +use = Cl.stamp_combine(now, stamp)
-      Cl.set_now(Cl.stamp_logs(feed_with.server_notice(Cl.set_now(cl, use), isc, Irc.source_prefix(line), feed_at.message(Irc.parse(line), use), Irc.label_tag(Irc.raw_tags(line)))), now)
+      feed_at_with.stamped_parsed(Cl.set_now(cl, use), isc, line, use, now, feed_at.message(Irc.parse(line), use))
 
 def feed_at_with(+cl: Cl.Client, +isc: Cl.Iso, +line: String, stamp: Maybe<&2, String>) -> Cl.Client:
   match stamp:
@@ -1218,3 +1363,57 @@ def search_and_open.got(pair: Cl.Client & Maybe<&2, Nat>, +q: String) -> Cl.Clie
 
 def search_and_open(+cl: Cl.Client, +q: String) -> Cl.Client:
   search_and_open.got(Cl.buf_get(cl, "*search*", False{}, True{}), q)
+
+# Lane-C law checks (D177/D233/D235): each fixed behavior asserts here
+# beside the module it covers.
+def client_lane_c.texts(+lines: List<&2, Cl.Line>) -> String:
+  match lines:
+    case Nil{}: ""
+    case Con{+h, t}:
+      match h:
+        case Cl.Line{_, _, +text, _, _}: text ++ "|" ++ client_lane_c.texts(t)
+
+def client_lane_c.server_lines(got: Maybe<&2, Cl.Buffer>) -> String:
+  match got:
+    case None{}: "!"
+    case Some{b}:
+      match b:
+        case Cl.Buffer{_, _, _, +lines, _, _, _, _}: client_lane_c.texts(lines)
+
+def client_lane_c.server_text(+cl: Cl.Client) -> String:
+  match cl:
+    case Cl.Client{_, _, +bufs, _, _, _, _, _, _}:
+      client_lane_c.server_lines(Cl.nth_buf(bufs, 0n))
+
+def client_lane_c.action_ok() -> Bool:
+  +soh: String = SCon{Chr{1}, ""}
+  String.eq(action_text(soh ++ "ACTION waves" ++ soh), "waves")
+    && String.eq(action_text(soh ++ "ACTION waves"), "waves")
+    && String.eq(action_text(soh ++ "ACTION " ++ soh), "")
+    && String.eq(action_text("hi"), "")
+    && String.eq(action_text(""), "")
+
+def client_lane_c.stdreply_ok() -> Bool:
+  +four = feed(Cl.init("me", "s"), ":s FAIL PRIVMSG BAD #c :gone")
+  +arity2 = feed(Cl.init("me", "s"), ":s FAIL PRIVMSG :oops")
+  +forge = feed(Cl.init("me", "s"), ":alice!u@h FAIL PRIVMSG BAD :Nope")
+  String.eq(client_lane_c.server_text(four), "FAIL PRIVMSG [BAD] (#c): gone|")
+    && String.contains(client_lane_c.server_text(arity2), "FAIL PRIVMSG")
+    && Bool.not(String.contains(client_lane_c.server_text(arity2), "["))
+    && Bool.not(String.contains(client_lane_c.server_text(forge), "[BAD]"))
+
+def client_lane_c.has_buf(found: Maybe<&2, Nat>) -> Bool:
+  match found:
+    case Some{_}: True{}
+    case None{}: False{}
+
+def client_lane_c.rename_ok() -> Bool:
+  +cl0 = feed(Cl.init("me", "s"), ":alice!a@h PRIVMSG me :hi")
+  +cl = feed_with(cl0, Cl.Iso.defaults(), ":alice!a@h NICK bob")
+  client_lane_c.has_buf(Cl.buf_find(cl, "bob"))
+    && Bool.not(client_lane_c.has_buf(Cl.buf_find(cl, "alice")))
+    && Nat.is_eq(Cl.buf_count(Cl.client_bufs(cl)), 2n)
+    && Nat.is_eq(Cl.log_seq_of(cl), 2n)
+
+def client_lane_c_laws_ok() -> Bool:
+  client_lane_c.action_ok() && client_lane_c.stdreply_ok() && client_lane_c.rename_ok()

@@ -276,18 +276,46 @@ def cap_unavailable(phase: Cl.AuthPhase, mode: Cl.AuthMode, +cl: Cl.Client, +pre
     case Cl.AuthCap{}: cap_unavailable.mode(mode, cl, prefix, m)
     case _: False{}
 
+# D160: prefix-trust gate before the SASL decode. Every trusted arm of
+# sasl_trusted needs an empty prefix or a server source (Plus) or strictly a
+# server source (Ack/Nak/wildcard via server_control; Other is never
+# trusted), so a non-empty non-server prefix discards the decode result and
+# returns unchanged directly. Empty prefixes still decode (Plus trusts them).
+def step_for.sasl.trusted(ok: Bool, phase: Cl.AuthPhase, mode: Cl.AuthMode, event: Irc.SaslEvent, +cl: Cl.Client) -> Reply:
+  match ok:
+    case False{}: unchanged(phase)
+    case True{}: sasl_mode(phase, mode, event, cl)
+
+def step_for.sasl.decoded(+cl: Cl.Client, +prefix: String, +m: Irc.Message, phase: Cl.AuthPhase, mode: Cl.AuthMode) -> Reply:
+  +event = Irc.sasl_event(m)
+  step_for.sasl.trusted(sasl_trusted(event, cl, prefix, m), phase, mode, event, cl)
+
+def step_for.sasl.sourced(server: Bool, phase: Cl.AuthPhase, mode: Cl.AuthMode, +cl: Cl.Client, +prefix: String, +m: Irc.Message) -> Reply:
+  match server:
+    case True{}: step_for.sasl.decoded(cl, prefix, m, phase, mode)
+    case False{}: unchanged(phase)
+
+def step_for.sasl.empty(empty: Bool, phase: Cl.AuthPhase, mode: Cl.AuthMode, +cl: Cl.Client, +prefix: String, +m: Irc.Message) -> Reply:
+  match empty:
+    case True{}: step_for.sasl.decoded(cl, prefix, m, phase, mode)
+    case False{}: step_for.sasl.sourced(server_source(prefix), phase, mode, cl, prefix, m)
+
 def step_for.sasl(unavailable: Bool, phase: Cl.AuthPhase, mode: Cl.AuthMode, +cl: Cl.Client, +prefix: String, +m: Irc.Message) -> Reply:
   match unavailable:
     case True{}: Reply{Cl.AuthNickWait{}, CapNotify.cap_end_for(Cl.AuthCap{}, Cl.AuthNickWait{}), Fallback{}}
     case False{}:
-      +event = Irc.sasl_event(m)
-      sasl_checked(sasl_trusted(event, cl, prefix, m), phase, mode, event, cl)
+      step_for.sasl.empty(String.is_empty(prefix), phase, mode, cl, prefix, m)
 
 def step_for.phase(+phase: Cl.AuthPhase, +config: Cl.AuthConfig, +mode: Cl.AuthMode, +cl: Cl.Client, +prefix: String, +m: Irc.Message) -> Reply:
   match phase:
     case Cl.AuthNickWait{}: nick_registered(U32.is_eq(Irc.msg_num(m), 1) && server_control(cl, prefix, m), cl)
     case Cl.AuthNickProbe{}: nick_probed(trusted_notice(config, cl, prefix, m), cl)
     case Cl.AuthNickResult{}: nick_confirm(nick_confirm.config(config, cl, prefix, m))
+    # Idle/Profile shortcut (D160): step() is the identity on both (only the
+    # Cap/Challenge/Result/Held phases consume events), so skipping the SASL
+    # decode returns the same unchanged phase without the per-line parse.
+    case Cl.AuthIdle{}: unchanged(Cl.AuthIdle{})
+    case Cl.AuthProfile{p, c, s}: unchanged(Cl.AuthProfile{p, c, s})
     case _: step_for.sasl(cap_unavailable(phase, mode, cl, prefix, m), phase, mode, cl, prefix, m)
 
 def step_for.allowed(ok: Bool, +cl: Cl.Client, config: Cl.AuthConfig, mode: Cl.AuthMode, prefix: String, m: Irc.Message) -> Reply:

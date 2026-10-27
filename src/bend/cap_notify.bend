@@ -231,17 +231,26 @@ type Caps is Data:
 def caps0() -> Caps:
   Caps{False{}, False{}, False{}, False{}, False{}, False{}, False{}, False{}, False{}, False{}, False{}}
 
+# Fold-once entry match (D102): the RFC1459 fold of the advertised name is
+# computed once per entry and shared across the eleven capability arms
+# instead of re-folding the name inside every arm.
+def cap_match.folded(+lo: String, +want: String) -> Bool:
+  +lw = Irc.rfc1459(want)
+  String.eq(lo, lw) || String.starts_with(lo, lw ++ "=")
+
 def caps_enable(+caps: Caps, +name: String) -> Caps:
   match caps:
     case Caps{+st, +mt, +ac, +aw, +sa, +ch, +ec, +ej, +at, +lb, +no}:
-      Caps{st || cap_match.one(name, CAP_SERVER_TIME()), mt || cap_match.one(name, CAP_MESSAGE_TAGS()), ac || cap_match.one(name, CAP_ACCOUNT()), aw || cap_match.one(name, CAP_AWAY()), sa || cap_match.one(name, CAP_SASL()), ch || cap_match.one(name, CAP_CHATHISTORY()), ec || cap_match.one(name, CAP_ECHO()), ej || cap_match.one(name, CAP_EXTJOIN()), at || cap_match.one(name, CAP_ACCTAG()), lb || cap_match.one(name, CAP_LABELED()), no || cap_match.one(name, CAP_NOTIFY())}
+      +lo = Irc.rfc1459(name)
+      Caps{st || cap_match.folded(lo, CAP_SERVER_TIME()), mt || cap_match.folded(lo, CAP_MESSAGE_TAGS()), ac || cap_match.folded(lo, CAP_ACCOUNT()), aw || cap_match.folded(lo, CAP_AWAY()), sa || cap_match.folded(lo, CAP_SASL()), ch || cap_match.folded(lo, CAP_CHATHISTORY()), ec || cap_match.folded(lo, CAP_ECHO()), ej || cap_match.folded(lo, CAP_EXTJOIN()), at || cap_match.folded(lo, CAP_ACCTAG()), lb || cap_match.folded(lo, CAP_LABELED()), no || cap_match.folded(lo, CAP_NOTIFY())}
 
 # G6.2: removal mirrors enable. A DEL line clears every listed cap, and a
 # '-' entry inside an ACK clears that one cap; other caps are untouched.
 def caps_disable(+caps: Caps, +name: String) -> Caps:
   match caps:
     case Caps{+st, +mt, +ac, +aw, +sa, +ch, +ec, +ej, +at, +lb, +no}:
-      Caps{st && Bool.not(cap_match.one(name, CAP_SERVER_TIME())), mt && Bool.not(cap_match.one(name, CAP_MESSAGE_TAGS())), ac && Bool.not(cap_match.one(name, CAP_ACCOUNT())), aw && Bool.not(cap_match.one(name, CAP_AWAY())), sa && Bool.not(cap_match.one(name, CAP_SASL())), ch && Bool.not(cap_match.one(name, CAP_CHATHISTORY())), ec && Bool.not(cap_match.one(name, CAP_ECHO())), ej && Bool.not(cap_match.one(name, CAP_EXTJOIN())), at && Bool.not(cap_match.one(name, CAP_ACCTAG())), lb && Bool.not(cap_match.one(name, CAP_LABELED())), no && Bool.not(cap_match.one(name, CAP_NOTIFY()))}
+      +lo = Irc.rfc1459(name)
+      Caps{st && Bool.not(cap_match.folded(lo, CAP_SERVER_TIME())), mt && Bool.not(cap_match.folded(lo, CAP_MESSAGE_TAGS())), ac && Bool.not(cap_match.folded(lo, CAP_ACCOUNT())), aw && Bool.not(cap_match.folded(lo, CAP_AWAY())), sa && Bool.not(cap_match.folded(lo, CAP_SASL())), ch && Bool.not(cap_match.folded(lo, CAP_CHATHISTORY())), ec && Bool.not(cap_match.folded(lo, CAP_ECHO())), ej && Bool.not(cap_match.folded(lo, CAP_EXTJOIN())), at && Bool.not(cap_match.folded(lo, CAP_ACCTAG())), lb && Bool.not(cap_match.folded(lo, CAP_LABELED())), no && Bool.not(cap_match.folded(lo, CAP_NOTIFY()))}
 
 def cap_negated(+name: String) -> Bool:
   String.starts_with(name, "-")
@@ -289,6 +298,14 @@ def caps_apply_line.parsed(+caps: Caps, +server: String, +nick: String, +line: S
 
 def caps_apply_line(+caps: Caps, +server: String, +nick: String, +line: String, registered: Bool) -> Caps:
   caps_apply_line.parsed(caps, server, nick, line, Irc.parse(line), registered)
+
+# Parsed-line twin (D159): when the caller already holds the fold's parse and
+# prefix for this same line, reuse them instead of re-parsing and
+# re-prefixing. Adoption belongs to the session lane (session.bend live arms).
+def caps_apply.parsed(+caps: Caps, +server: String, +nick: String, +prefix: String, m: Maybe<&2, Irc.Message>, registered: Bool) -> Caps:
+  match m:
+    case None{}: caps
+    case Some{+msg}: caps_apply(caps, cap_event(server, nick, prefix, msg, registered))
 
 def tags_ok(+caps: Caps) -> Bool:
   match caps:
@@ -397,14 +414,35 @@ def notify_event.cmd(+nick: String, +m: Irc.Message, account: Bool) -> NotifyEve
 def notify_prefix_ok(+prefix: String, +server: String) -> Bool:
   Bool.not(server_source(prefix))
 
-def notify_event.checked(+m: Irc.Message, +nick: String, ok: Bool) -> NotifyEvent:
+# Command-first dispatch (D158): test ACCOUNT/AWAY before extracting the nick
+# and validating the prefix, so ordinary messages skip both validations.
+def notify_event.account_checked(+nick: String, +m: Irc.Message, ok: Bool) -> NotifyEvent:
   match ok:
-    case True{}: notify_event.cmd(nick, m, Irc.ieq(Irc.msg_command(m), "ACCOUNT"))
+    case True{}: account_event(nick, m)
     case False{}: NotifyOther{}
 
+def notify_event.unvalidated(ok: Bool, +nick: String, +m: Irc.Message) -> NotifyEvent:
+  match ok:
+    case True{}: notify_event.cmd(nick, m, False{})
+    case False{}: NotifyOther{}
+
+def notify_event.validated(+nick: String, +m: Irc.Message, +prefix: String, +server: String, account: Bool) -> NotifyEvent:
+  match account:
+    case True{}: notify_event.account_checked(nick, m, notify_nick_ok(nick) && notify_prefix_ok(prefix, server))
+    case False{}: notify_event.unvalidated(notify_nick_ok(nick) && notify_prefix_ok(prefix, server), nick, m)
+
+def notify_event.ungated(+server: String, +prefix: String, +m: Irc.Message, away: Bool) -> NotifyEvent:
+  match away:
+    case True{}: notify_event.validated(notify_nick(m), m, prefix, server, False{})
+    case False{}: NotifyOther{}
+
+def notify_event.gated(+server: String, +prefix: String, +m: Irc.Message, account: Bool) -> NotifyEvent:
+  match account:
+    case True{}: notify_event.validated(notify_nick(m), m, prefix, server, True{})
+    case False{}: notify_event.ungated(server, prefix, m, Irc.ieq(Irc.msg_command(m), "AWAY"))
+
 def notify_event(+server: String, +prefix: String, +m: Irc.Message) -> NotifyEvent:
-  +nick = notify_nick(m)
-  notify_event.checked(m, nick, notify_nick_ok(nick) && notify_prefix_ok(prefix, server))
+  notify_event.gated(server, prefix, m, Irc.ieq(Irc.msg_command(m), "ACCOUNT"))
 
 def is_notify.event(e: NotifyEvent) -> Bool:
   match e:
@@ -556,6 +594,13 @@ def step_out.fresh_cm(+cm: String, +cur: String, +live: Bool, +sent_ms: U32, +no
 def step_out.fresh(+cur: String, +live: Bool, +sent_ms: U32, +now_ms: U32, valid: Bool, +target: String, composing: Bool, stale: Bool) -> OutState & List<&2, String>:
   step_out.fresh_cm(Cl.dflt_cm(), cur, live, sent_ms, now_ms, valid, target, composing, stale)
 
+# Pre-validated step twin (D104): when the caller already evaluated
+# out_target_ok, thread that verdict instead of rebuilding the tag line twice.
+def step_out_valid(+cm: String, +st: OutState, +now_ms: U32, online: Bool, tags_ok: Bool, +target: String, composing: Bool, valid: Bool) -> OutState & List<&2, String>:
+  match st:
+    case Out{+cur, +live, +sent, +seen}:
+      step_out.fresh_cm(cm, cur, live, sent, now_ms, online && tags_ok && valid, target, composing, step_out.stale(sent, now_ms, seen))
+
 def step_out_cm(+cm: String, +st: OutState, +now_ms: U32, online: Bool, tags_ok: Bool, +target: String, composing: Bool) -> OutState & List<&2, String>:
   match st:
     case Out{+cur, +live, +sent, +seen}:
@@ -578,6 +623,12 @@ def reg0() -> Reg:
 def reg_on_line(+reg: Reg, +server: String, +nick: String, +line: String, registered: Bool) -> Reg:
   match reg:
     case Reg{+caps, +out}: Reg{caps_apply_line(caps, server, nick, line, registered), out}
+
+# Parsed-line twin (D159): same-line reuse of an already-parsed message and
+# its prefix; behavior-identical to reg_on_line by substitution.
+def reg_on_line.parsed(+reg: Reg, +server: String, +nick: String, +prefix: String, m: Maybe<&2, Irc.Message>, registered: Bool) -> Reg:
+  match reg:
+    case Reg{+caps, +out}: Reg{caps_apply.parsed(caps, server, nick, prefix, m, registered), out}
 
 def reg_out.done(+caps: Caps, pair: OutState & List<&2, String>) -> Reg & List<&2, String>:
   match pair:
@@ -612,11 +663,21 @@ def reg_echo_ok(+reg: Reg) -> Bool:
 # Live tick bundle for the Session/Net binding: composing is a nonempty
 # composer on a valid target. The binding stores the returned Reg and sends
 # at most one wire through the bounded actor path.
-def live_composing(+target: String, +draft: String) -> Bool:
-  out_target_ok(target) && Bool.not(String.is_empty(draft))
+# Validated composing twin (D104): skip the draft scan when the target is
+# already known invalid; the True arm preserves the exact gating predicate.
+def live_composing.valid(valid: Bool, +draft: String) -> Bool:
+  match valid:
+    case True{}: Bool.not(String.is_empty(draft))
+    case False{}: False{}
+
+def reg_out_valid(+cm: String, +reg: Reg, +now_ms: U32, online: Bool, +target: String, composing: Bool, valid: Bool) -> Reg & List<&2, String>:
+  match reg:
+    case Reg{+caps, +out}:
+      reg_out.done(caps, step_out_valid(cm, out, now_ms, online, tags_ok(caps), target, composing, valid))
 
 def live_tick_cm(+cm: String, +reg: Reg, +now_ms: U32, online: Bool, +target: String, +draft: String) -> Reg & List<&2, String>:
-  reg_out_cm(cm, reg, now_ms, online, target, live_composing(target, draft))
+  +valid = out_target_ok(target)
+  reg_out_valid(cm, reg, now_ms, online, target, live_composing.valid(valid, draft), valid)
 
 def live_tick(+reg: Reg, +now_ms: U32, online: Bool, +target: String, +draft: String) -> Reg & List<&2, String>:
   live_tick_cm(Cl.dflt_cm(), reg, now_ms, online, target, draft)
