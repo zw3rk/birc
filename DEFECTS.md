@@ -649,3 +649,2260 @@ Method: massively parallel workflows — three-round + five-round + ten-round x3
 - [x] Confirm no ticket filed: twenty-round claim of unclamped history restore (`history.bend:515-547` raw `U32.to_nat(cap)` vs `hist_keep` clamp) was REJECTED by fresh sceptic-S — mechanism present but consequence falsified because live/file callers already clamp (`history.bend:477-478,481,645,712`, `history_io.bend:149`, `history_startup.bend:77-81`) — omitted per corroboration rule.
 - [x] Confirm no ticket filed (accepted bounded cost, not a defect): twenty-round-4 re-report of `buf_push` under-cap O(n) append (`src/bend/buffer.bend:1214`, `List.append` on oldest-first spine) — mechanism CONFIRMED but doc-only resolution ACCEPTED per fresh sceptical adjudicator: worst case is ~1024 cons copies per chat line under `SCROLL_CAP()=1024n` (`buffer.bend:121-122`), a small bounded constant via `buf_append_line` (`:1221-1222`); the comment at `:1204-1206` discloses exactly this; restructuring (rotated/paired lists) would churn the `Buffer` representation pinned by laws (`LAWS.bend:226`, `client_laws.bend:24-26`, `view_laws.bend:281-283`, `buf_indexed` at `:182`). Filed here, not as a defect.
 - [x] Confirm no ticket filed (law simplification, eighty-round scope): R71–R80 law/proof sweep analyzed `LAWS.bend`/`PROOF.bend`/`client_laws`/`view_laws` for redundant or over-specific laws and simplifiable compounds; no merge/split proposal survived sceptical validation, so no law-ID change filed — D55 was the sole CONFIRMED residual, 5 sibling candidates REJECTED.
+
+## Round 2 — 2026-10-26 eighty-round review (10 parallel lanes + sceptical validation)
+
+Method: ten parallel sweep lanes (history, lexer, paint, session, net, auth, media, persist, ffi, laws) with extra-strong perf/DSA focus, each finding independently re-read and CONFIRMED/REJECTED by a fresh-context sceptical validator; synthesis kept only CONFIRMED items deduplicated against D1–D63, the six confirmations, and the non-findings above. Analysis only: no code touched, all items OPEN.
+
+- [x] D64 — `src/bend/preferences_runtime.bend:69-82,368-378` — Low (perf) — per-tick full-snapshot re-serialization for equality
+  - Location: `equal` (`:69-71`) compares `String.eq(P.show(canonical(a)), P.show(canonical(b)))` — two full `show` builds embedding mute/channel `records_text`; `edits` (`:82`) rebuilds both mute texts and both `Theme.show`s; `observe.same` (`:372`) invokes both unconditionally per live tick via `PrefLive.observe` (`preferences_live.bend:91`, caller `net.bend:1806`).
+  - What/why: every tick pays full serialization instead of a structural-compare short-circuit.
+  - Fix direction: compare structurally first (or hash/memoize the canonical text) and only re-render on edit.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences_runtime.bend:127-135
+  - Validated by: eighty-round-2 workflow persist sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: equal snapshots skip re-serialization
+  - [ ] negative test: edited snapshot still re-renders
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D65 — `src/bend/preferences.bend:117` — Low (perf) — new D52-family eager `Bool.pick` in `list_ok`
+  - Location: `list_ok` (`:113-118`) passes `channel_ok(h)` and `text_ok(h, 512)` as the two pick arms, so both validations walk each row; `channel_ok` (`:104`) itself calls `text_ok(s, 505)`, doubling the channel-path text walks. Bounded (<=78 rows). Absent from the D52 confirmed-open list.
+  - What/why: pinned eager-args rule evaluates both arms even on first-match; same class as D1–D9.
+  - Fix direction: match with validation only in the taken arm, or the `alias_step` Unit-> idiom.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences.bend:117-136
+  - Validated by: eighty-round-2 workflow persist sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: valid row resolves without the second walk
+  - [ ] negative test: invalid row still rejected with reason
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D66 — `src/bend/preferences.bend:180,188,244-245` — Low (bounded perf) — snapshot parse pays ~4 passes plus quadratic tail
+  - Location: `parse` (`:244-245`) walks the document with `Irc.utf8_len` (cap `MAX_WIRE=40960`, `:12`) before `String.split`; `parse_records` (`:222`) re-splits every line; mute/channel rows grow via per-record `List.append` (`:180`).
+  - What/why: rare path (startup/read completion) but quadratic assembly plus repeated full-document walks.
+  - Fix direction: single-pass split with pre-sized/one-shot cons assembly instead of per-record append.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences.bend:198-208,292-303
+  - Validated by: eighty-round-2 workflow persist sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: snapshot loads with identical records
+  - [ ] negative test: malformed snapshot still fails closed
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D67 — `src/bend/history_search_io.bend:112-115` — Low (bounded memory) — native search materializes the whole file as one Bend `String`
+  - Location: `scan_native` binds the full `search_scan(path, SCAN_NATIVE_CAP())` triple (`:112`) and `disk_search_bytes` runs `Hs.scan_content` over the held content (`:39`); cap 8 MiB at `:23`. The retained-descriptor chunked `search_loop` (`:176`) has only test callers; production native path is `search_run_native` (`:272`) from the live loop (`net.bend:400`). Fail-closed on oversize.
+  - What/why: up-to-8 MiB spike per native search instead of the existing chunked loop.
+  - Fix direction: route the production native path through the chunked `search_loop` or stream the scan.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): production native path uses chunked search_file_checked; scan_native kept for FFI law only (history_search_io.bend:272-281)
+  - Validated by: eighty-round-2 workflow persist sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: search still finds matches across chunk boundaries
+  - [ ] negative test: oversize file still fails closed
+  - [ ] regression test: existing search suites still pass
+
+- [x] D68 — `src/bend/replay.bend:72-74` — Low (cosmetic perf) — redundant `List.length` per 4 KiB chunk
+  - Location: `read_pace.launch` sizes `more` fuel as `List.length(left)` (`:74`), but `more` terminates on `Nil` independent of fuel (`:61`) and `remaining` is tracked separately — one wasted O(chunk) walk per chunk. Distinct from D15 (`history.bend` read_pace, different module).
+  - What/why: pure waste walk on the replay path.
+  - Fix direction: drop the length call and rely on the existing `Nil` termination + `remaining` accounting.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/replay.bend:78-82
+  - Validated by: eighty-round-2 workflow persist sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: replay still terminates at EOF
+  - [ ] negative test: empty chunk path unchanged
+  - [ ] regression test: existing replay suites still pass
+
+- [x] D69 — `src/ffi/media_fetch_ffi.c:680-701` — Low (bounded perf) — response headers re-walked per field lookup and per recv chunk
+  - Location: `birc_mf_header` line-walk (`:680-701`); per-recv `strstr(hdr,"\r\n\r\n")` (`:794-802`); lookups at `:820` (Location), `:838/841` (Encoding), `:846` (Content-Type), `:857` (Content-Length); `BIRC_MF_REDIRECTS=3` (`:100`); same shape in `upload_ffi.c:599-611` (header fn `:331-335`). Bounded (64 KiB `hdr`, `:718`), worker-thread only.
+  - What/why: ~5 `strncasecmp` walks per redirect hop (up to 4 hops) over a re-scanned buffer.
+  - Fix direction: parse headers once into a small table and answer lookups from it.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/media_fetch_ffi.c:681-698
+  - Validated by: eighty-round-2 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: redirect chain still follows Location
+  - [ ] negative test: malformed headers still fail closed
+  - [ ] regression test: existing media_fetch tests still pass
+
+- [x] D70 — `src/ffi/timui_ffi.c:899-929` — Low (perf) — tab labels and link URLs heap-allocated per frame
+  - Location: `io_cstr` at `:909` + `free` at `:924` per tab label (cap `BIRC_TAB_SLOTS=16`, `:122`; call at `:1156`); LNK-arm `io_cstr` at `:999` + `free` at `:1006`; span text reuses `paint_buf` (`:751-801`) proving the alternative exists.
+  - What/why: hot per-frame allocator traffic where a reused buffer would do.
+  - Fix direction: reuse a persistent label/URL scratch buffer like `paint_buf`, with the same fallback contract (`:751-755`).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/timui_ffi.c:928-955
+  - Validated by: eighty-round-2 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: tabs/links still paint byte-identical
+  - [ ] negative test: oversize label still falls back safely
+  - [ ] regression test: existing timui tests still pass
+
+- [x] D71 — `src/ffi/media_fetch_ffi.c:1380-1408` — Low (bounded perf) — PNG path duplicates its largest buffer, per-pixel divisions
+  - Location: `malloc(4u+n)` + copy + CRC + free at `:1396-1403`; IDAT call at `:1470` (n~=410 KiB for 320x320); per-byte double `% 65521u` at `:1363-1371`; per-pixel 64-bit divisions at `:1482-1493`; side bound `BIRC_MF_MAX_SIDE=320` (`:90`, applied `:1533-1545`). Bounded, worker-thread only.
+  - What/why: full-buffer copy plus division-heavy inner loops on the decode path.
+  - Fix direction: CRC in place over the single buffer; replace divisions with shifts/masks where the divisor is a power of two, else hoist.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/media_fetch_ffi.c:1396-1475
+  - Validated by: eighty-round-2 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: PNG still decodes byte-identical
+  - [ ] negative test: corrupt IDAT still fails closed
+  - [ ] regression test: existing media_fetch tests still pass
+
+- [x] D72 — `src/bend/history_io.bend:197-200,212-215` — Cosmetic (dead code) — dead `Bool` dispatch, both arms byte-identical
+  - Location: `history_load_client.route` True/False arms both call `history_file.load(False{}, ...)`; `history_snapshot_client.route` arms both call `history_file.load(True{}, ...)`; `history_file.plain(cl)` computed only to feed the dead split. Same disease as D2, different file/functions.
+  - What/why: dead branch; confusion only.
+  - Fix direction: delete the dispatch and call `history_file.load` directly.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_io.bend:192-211 (dead .route dispatch gone; pick-gated loads, zero `route` refs)
+  - Validated by: eighty-round-2 workflow history sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: load path unchanged
+  - [ ] negative test: no caller references removed dispatch
+  - [ ] regression test: existing history suites still pass
+
+- [x] D73 — `src/bend/history_startup.bend:163-168,246-248` — Low (bounded perf) — sort comparator recomputes `recent_id` per comparison
+  - Location: `recent` calls `recent_id` on both sides (`:163-168`; `recent_id = H.last_id(archive_lines(lines))` allocating a filtered copy per call, `:75-81`); `List.sort` at `:246-248` multiplies that per comparison; `last_id` is a full O(L) walk (`history.bend:355-359`). Not the D58 sort-once site (different function). Bounded (B<=16, startup-import path only).
+  - What/why: quadratic-ish import cost from recomputed keys.
+  - Fix direction: decorate once (precompute ids) before sorting, as D53/D58 did for the live path.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_startup.bend:163-168,246-248
+  - Validated by: eighty-round-2 workflow history sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: import order byte-identical
+  - [ ] negative test: empty snapshot path unchanged
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D74 — `src/bend/history_search.bend:784-785,1511-1512,1537-1543` + `src/bend/session.bend:4352-4358` — Low (bounded perf) — idle lines pay extra parse + tag scan before Feed
+  - Location: every framed line steps `hist_live_step` (`session.bend:4357`); idle routes run `batch_open_iso` whose `Irc.parse(line)` (`:784-785`) is a strict argument (1 extra full parse per line always); the `None` arm (`:1539`) runs `batch_suppressed` whose `tag_value(line,"batch")` (`:1511`) is strict (1 tag-section scan per line always, `:700-724`); Feed parses again itself (`client.bend:991`). The second `batch_quiet.parsed` parse (`:1512`) also runs per line given strict `||` (lexer-lane runtime proof: operators elaborate to strict calls).
+  - What/why: at least 1 extra parse + 1 tag scan per idle line on top of Feed's own parse.
+  - Fix direction: gate the batch pre-check behind a cheap tag-presence scan, or thread Feed's parse into the batch path.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:784-785,1511-1512,1537-1543
+  - Validated by: eighty-round-2 workflow history sweep + fresh sceptic (CONFIRMED, narrowed quantification) + lexer-lane strict-`||` runtime proof + parent-cited regions.
+  - [ ] positive test: batch lines still route correctly
+  - [ ] negative test: idle line performs no batch parse
+  - [ ] regression test: existing search/session suites still pass
+
+- [x] D75 — `src/bend/buffer.bend:435-436,416-427,499-533` — Low (perf) — mute ledger uncapped, scanned per message and per painted line
+  - Location: `add_mute_list` plain cons with no cap (`:435-436`, add path `:883-886`); contrast nicks capped at 256 (`:124-125`) and buffers at 16 (`:114-115`); `mute_match_cm` runs five `buf_eq_cm` (two full-string `fold_casemap` folds each, `:64-65`) per pattern; per-`PRIVMSG` call (`client.bend:273-276`) and NOTICE path (`:986-988`); per-line-per-pattern filter (`:499-533`); paint skips filtering only when mutes is `Nil` (`view.bend:1362-1365`).
+  - What/why: cost scales with user-controlled unbounded pattern count on both the inbound and paint paths.
+  - Fix direction: cap the ledger like nicks/buffers, or index it instead of linear scan.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:435)
+  - Validated by: eighty-round-2 workflow history sweep + fresh sceptic (CONFIRMED, four→five correction) + parent-cited regions.
+  - [ ] positive test: muted nick still filtered on both paths
+  - [ ] negative test: empty ledger path unchanged
+  - [ ] regression test: existing client/buffer suites still pass
+
+- [x] D76 — `src/bend/history_search.bend:815-819,1070-1078,1128-1131,1240-1253` — Low (bounded perf) — batch import O(ledger) work per element
+  - Location: `batch_collect.full` does `List.length` + `List.append` per admitted message (O(n²) assembly, n<=`BATCH_CAP=100`); `filter_unseen_cap.go` does two `List.contains` (orig<=200, page<=100) plus a `List.take` copy per message; `cursor_fresh`/`import_source_fresh` do one `contains` per id over the seen ledger (caps `:39-45`; union bound already documented at `:1229-1234`, per-element linear cost not). Not the D53/D58 sort-once sites.
+  - What/why: quadratic assembly plus per-element ledger scans on the import path.
+  - Fix direction: difference the ledgers once (sorted merge) instead of per-element `contains`; cons-assemble then reverse once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:815-819,1070-1078,1128-1131,1240-1253
+  - Validated by: eighty-round-2 workflow history sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: import dedupes identically
+  - [ ] negative test: empty ledger path unchanged
+  - [ ] regression test: existing search/startup suites still pass
+
+- [x] D77 — `src/bend/view.bend:739-746` — Low (bounded perf) — `wrap_spans_go` runs ~6–8 walks per wrapped chunk per row per paint
+  - Location: per chunk iteration pre-scans via `spans_length` (`:746` fuel arg), cuts via `take_spans` cluster-take (`:599-603`), `spans_chars(xs)` (`:743`), `spans_chars(tail)` (`:730`), `word_cut.scan` spans_text+length+word_break walk (`:679-683`), `text_width` (`:677`), `spans_split` (`:610-615`), `spans_drop_spaces` (`:652-663`); rewrap-from-source on every paint (`paint_wrap_lines` `:1259-1262`, `paint_body_rows` `:1288`, `window_body` `:2046`, `newer_from` `:2153`, `paint_anchored.go` `:1940`); no per-line wrap cache is deliberate (`:2467-2470`). Bounded by 512B wire cap and viewport rows. Not a D13 dup (D13 narrowed miss-always-rewraps to `*preview*`; this is the per-chunk pass count).
+  - What/why: repeated full-span walks per chunk on the hot paint path.
+  - Fix direction: fuse the length/cut/width scans into one pass per chunk, or cache the wrapped rows subject to the no-wrap-cache invariant.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:767)
+  - Validated by: eighty-round-2 workflow paint sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: wrapped rows paint identically
+  - [ ] negative test: unwrapped path performs no chunk walks
+  - [ ] regression test: existing view suites still pass
+
+- [x] D78 — `src/bend/composer_ui.bend:297-311` — Low (bounded perf) — `split_colon.go` copies both accumulators per character
+  - Location: colon arm `before ++ after ++ ":"` (`:305`), plain arm `after ++ one(held)` (`:306`): O(n²) per parse; double-parse per paint with an active colon (`net.bend:224,260,291` call both `panel_lines` → `emoji_or` → `emoji_lines` → `emoji_prefix` → `split_colon` and `ghost_at` → `emoji_ghost` → `emoji_prefix` → `split_colon`); colon-gated `None` short-circuits (`:491-493`, `:525-527`). Bounded by draft length (D26). Distinct from D18/D62 (table rebuilds) and D40 (`at_boundary`).
+  - What/why: quadratic accumulator copying twice per paint on the composer path.
+  - Fix direction: single pass with one accumulator, or share one parse result between panel and ghost paths.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/composer_ui.bend:301-314
+  - Validated by: eighty-round-2 workflow paint sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: colon completion still resolves
+  - [ ] negative test: colon-free keystroke performs no split walk
+  - [ ] regression test: existing composer suites still pass
+
+- [x] D79 — `src/bend/buffer.bend:1454-1458` — Low (perf nit) — timestamp halves re-split per painted line
+  - Location: `now_day` and `now_hms` each run `String.contains` plus `now_split` (two full walks each); both halves fetched separately for the same line in one paint (`now_hms` per line at `view.bend:1240,1247,1249,1276,560`; `now_day` per line via `line_day` `:1672-1673`, `day_rows` `:1907-1908`). ~21–30-char stamps, so tiny; split-once fix valid. No DEFECTS overlap.
+  - What/why: four walks where one split would serve both halves.
+  - Fix direction: split once per line and share both halves across the paint.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:1482)
+  - Validated by: eighty-round-2 workflow paint sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: day/time headers paint identically
+  - [ ] negative test: dateless line path unchanged
+  - [ ] regression test: existing view/buffer suites still pass
+
+- [x] D80 — `src/bend/view.bend:2505-2530` — Low (bounded perf) — storing a scroll hold walks rows three times
+  - Location: `List.length` for fuel plus `rows_hold.go` find (`:2525`) plus `anchor_end` re-walk from head (`:2520`); one option-index pass could answer both. Runs per scroll navigation (`scroll_hold.of`/`anchored` `:2540-2553`), not per frame (hold reuse via `paint_hold.use` `:2757+`); bounded by window rows. Distinct from D31/D32 (different functions).
+  - What/why: triple walk per scroll-hold store.
+  - Fix direction: single indexed pass returning both the hold and the anchor.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:2687)
+  - Validated by: eighty-round-2 workflow paint sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: scroll hold restores the same anchor
+  - [ ] negative test: live-bottom path performs no hold walk
+  - [ ] regression test: existing view/scroll suites still pass
+
+- [x] D81 — `src/bend/irc.bend:421-432` — Low (bounded perf) — `parse_server_time` folds all tags after first hit
+  - Location: `on_tag` keeps acc unchanged for non-empty (`:423-426`), but `List.foldl` (`:432`) has no early exit and the consumed result forces the whole accumulator chain; first-hit-wins correct; live caller `:637`.
+  - What/why: full tag-list walk after the answer is known.
+  - Fix direction: early-exit fold (match on acc before recursing) or pre-scan for the time tag.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/irc.bend:424-444
+  - Validated by: eighty-round-2 workflow lexer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: server-time still resolves with duplicate tags
+  - [ ] negative test: tagless line path unchanged
+  - [ ] regression test: existing irc suites still pass
+
+- [x] D82 — `src/bend/irc.bend:659-679` — Low (bounded perf) — `source_prefix` re-walks head bytes 4x per call
+  - Location: `drop_spaces` (`:678`) → `take_until_space` (`:674`) → `drop_spaces` (`:670`) → `take_until_space` (`:665`), four fresh walks; correct result, 512B-bounded. Not D59 (which counts parses, explicitly not scans) nor D17.
+  - What/why: quadruple head scan on a hot per-line path.
+  - Fix direction: single pass returning both splits, or thread one walk's remainder into the next.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/irc.bend:671-702 (drop_until_space skip-without-build twin; fused walks)
+  - Validated by: eighty-round-2 workflow lexer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: prefix still splits identically
+  - [ ] negative test: prefix-free line performs one walk
+  - [ ] regression test: existing irc suites still pass
+
+- [x] D83 — `src/bend/frame.bend:277-280` — Low (perf) — `utf8_encode_cp` builds all encoding arms eagerly
+  - Location: three nested `Bool.pick`s with all encode arms (`utf8_encode_two`/`three`/`four` list builds) as strict args, so ASCII scalars also build and discard the 2/3/4-byte lists; correct selection; live via `:283`. Not in D34/D52.
+  - What/why: wasted list builds per scalar on the encode path.
+  - Fix direction: match on the scalar range first with construction only in the taken arm (Unit-> thunk idiom).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/frame.bend:389-405
+  - Validated by: eighty-round-2 workflow lexer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: all scalar widths still encode correctly
+  - [ ] negative test: ASCII scalar builds no wider lists
+  - [ ] regression test: existing frame suites still pass
+
+- [x] D84 — `src/bend/wire_style.bend:236-246` — Low (bounded perf) — `render_runs.go` scans later runs even when unnecessary
+  - Location: `later_has_space(t)` evaluated strictly inside the `+bad` binding (`:245`); operators do not short-circuit per the lexer-lane runtime proof, so every run pays the later-runs text scan even when `next_ok` already allows the link; live via `:254`. Not in D41. 512B-bounded.
+  - What/why: O(runs²) text scanning on styled lines.
+  - Fix direction: match on `next_ok` first with the later-scan only in the undecided arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/wire_style.bend:241
+  - Validated by: eighty-round-2 workflow lexer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: link spacing renders identically
+  - [ ] negative test: already-allowed run skips the later scan
+  - [ ] regression test: existing wire_style suites still pass
+
+- [x] D85 — `src/bend/dns_wire.bend:400-417,609-659` — Low (bounded perf) — `read_name_go` re-drops from packet head per byte
+  - Location: `at_off = rest_drop` per byte with call sites `:609,619,653`; O(n²) in packet length; live via `read_name` (`:661,692,787,843`); bounded by packet size/fuel (`:662-663`); jumps (`RdHop`) inherently need absolute offsets, only sequential advance could thread. Not in D7.
+  - What/why: quadratic name decode per DNS packet.
+  - Fix direction: thread a cursor for the sequential-advance path, keeping absolute offsets only for jumps.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/dns_wire.bend:638)
+  - Validated by: eighty-round-2 workflow lexer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: compressed names still decode identically
+  - [ ] negative test: uncompressed name takes the linear path
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D86 — `src/bend/notify.bend:267-275` — Low (bounded perf) — `sort_insert` drops the lazy tail on head insert
+  - Location: `sort_inserted`'s `rec` arg `h <> sort_insert(ev, t)` (`:275`) is evaluated eagerly before the `lt` match (`:268-270`), so even a head insert (`lt=True`) pays the full tail walk; per-chunk insertion sort is always Θ(n²) cons work plus `ev_lt` string compares. Bounded (mention/DM events since floor). Same class as D52 lows; the `alias_step` Unit-> idiom (two modules over, `media.bend` `targets.keep`) is the fix shape.
+  - What/why: always-quadratic sort on the notify path.
+  - Fix direction: Unit-> thunk for `rec`, evaluated only in the `False` arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:279
+  - Validated by: eighty-round-2 workflow media sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: head insert skips the tail walk
+  - [ ] negative test: miss path still sorts fully
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D87 — `src/bend/media.bend:86-91` — Low (bounded perf) — `targets.go` evaluates a discarded string append per styled run
+  - Location: None-arm `Bool.pick(String, U32.is_eq(attrs,0), previous ++ text, "")` (`:86-91`) evaluates the O(len(previous)) append eagerly and drops it on every styled run; same-file lazy pattern at `:72-77`. Distinct from D52's (fixed) Some-arm `targets.keep` site. Bounded by wire length.
+  - What/why: wasted append per styled run on the media-lex path.
+  - Fix direction: match on the attrs test first with the append only in the taken arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/media.bend:79
+  - Validated by: eighty-round-2 workflow media sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: styled run still yields the URL
+  - [ ] negative test: unattributed run performs no append
+  - [ ] regression test: existing media suites still pass
+
+- [x] D88 — `src/bend/media.bend:597-601` + `src/bend/session.bend:3490-3498` + `src/bend/net.bend:1247-1257` — Low (bounded perf) — `maintain` aliveness scan runs twice per media stage
+  - Location: `gated` runs `M.maintain` (`session.bend:3494`), stores maintained+enqueued state, then `media_stage` runs `M.maintain` again on the observed state (`net.bend:1256-1257`) with unchanged client/gen, so the second pass only re-proves aliveness. Each pass is <=24 items (PENDING_CAP 16 + ready CAP 8) x 16 buffers x <=1024-line spines via `alive → target_in_bufs → lines_have_id` (`media.bend:548-600`, `buffer.bend:114-122`); ~2x worst-case id comparisons per content-change tick (`scan=True` path, `net.bend:1518-1521`). Dropping the second call is behavior-identical (idempotent; caps live in `enqueue`, `:376-394`).
+  - What/why: double aliveness scan per content tick.
+  - Fix direction: run `maintain` once and thread the maintained state into `media_stage`.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/net.bend:1248)
+  - Validated by: eighty-round-2 workflow media sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: aliveness decisions identical with one pass
+  - [ ] negative test: content tick performs one scan
+  - [ ] regression test: existing media/net suites still pass
+
+- [x] D89 — `src/bend/upload.bend:354-357` — Low (perf nit) — `finish.hit` validates the URL even on the disallowed path
+  - Location: True-arm `Bool.pick(Maybe, allowed, response(output), None{})` evaluates the full `response` validation (framing check, `https://0x0.st/` prefix, 1024 length bound, `ascii_path` scan, `split`+`segments_valid`, `:320-332`) even when `allowed=False`, then discards it. Same eager-`Bool.pick` class as D1–D9/D52; rare path, tiny input.
+  - What/why: wasted validation on the disallowed path.
+  - Fix direction: match on `allowed` first with `response` only in the `True` arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload.bend:454
+  - Validated by: eighty-round-2 workflow media sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: allowed upload still validates
+  - [ ] negative test: disallowed path performs no validation
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D90 — `src/bend/dns.bend:335-340` — Low (bounded perf) — TCP-fallback reassembly is quadratic in chunk count
+  - Location: `tcp_chunk` does `+all = List.append(acc, h<>t)` (recopies the whole accumulator per chunk) then `Wire.tcp_packet(all)` (full-list re-scan per chunk, `dns_wire.bend:355-360`); chunks arrive up to 4096 B (`recv_nb(sock, 4096)`, `dns.bend:357`); total bounded by the u16 length prefix. A trickling peer pays O(total²/chunk) copy+scan before the 3 s monotonic deadline (`dns.bend:360-368`) fires. Not in D7 (only `ipv4_go`) nor D59/D60 (parses, not reassembly); the in-code comment documents the deadline, not the copy cost.
+  - What/why: quadratic reassembly on the truncation-fallback path.
+  - Fix direction: difference-list/cons accumulation with one reverse, or incremental parse over the accumulator tail.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/dns.bend:321)
+  - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: fragmented response still reassembles
+  - [ ] negative test: single-chunk path performs one scan
+  - [ ] regression test: existing dns suites still pass
+
+- [ ] D91 — `src/bend/net.bend:916-920` + `src/bend/wsnet.bend:335-339` — Low (resilience) — reconnect is a flat 2 s sleep with no backoff, cap, or DNS caching
+  - Location: `reconnect_watch`/`redial_watch` sleep a fixed 2000 ms and re-post; each failure respawns one (`emit_fail_cmd`, `net.bend:922-935`; dial failure → `writer_admit_failed` → `writer_fail` NetFail, `actor.bend:880-883` → `on_fail` → `session_autoreconnect` → new watch, closing the loop while `autoreconn` holds, default on). Each cycle re-runs full resolution (`WAIT()=80n` polls, `dns.bend:24`; 3 s TCP fallback, `dns.bend:27-28`; lazy AAAA-then-A, `:727-730`), a 1 s-capped dial (`Dns.dial_dual`, `actor.bend:1160,1255`), and a 5 s TLS handshake (`transport.bend:22`). No attempt counter, backoff, or cached NS/answer anywhere (grep for backoff/retry/redial counters: clean). D45 covers only the lost dial-flush notice, not retry policy.
+  - What/why: unbounded fixed-interval redial storm against a dead endpoint, re-resolving every cycle.
+  - Fix direction: exponential backoff with a cap, plus cache the last good resolution across redials.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — needs backoff counter + DNS cache in Session shapes.
+  - Status 2026-10-28: OPEN — backoff count + DNS cache need Session shapes; static delay contradicts pinned 2s notice.
+  - Status 2026-10-28: CONFIRMED — Reconnect/Intent/Dial payloads have zero spare fields for a backoff count; dns ns dies per dial_dual call (dns.bend:823-830), single-dial double-read already fixed by D156 threading.
+  - Status 2026-10-28: CONFIRMED — no consecutive-failure counter exists anywhere and success resets nothing (on_up only reconnects+repaints, net.bend:903); the writer is equally blind to Up. Backoff count needs the same missing cross-event store as D149.
+  - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: reconnect still recovers a flapping endpoint
+  - [ ] negative test: dead endpoint backs off instead of hot-looping
+  - [ ] regression test: existing net/wsnet suites still pass
+
+- [x] D92 — `src/bend/actor.bend:719-725,815-825` — Low (bounded perf) — in-flight-dial admit drain keeps an ever-appended `dials` list
+  - Location: `admit_dial` appends every Dial via `List.append` over all prior dials (O(D) per Dial); `kept` is cleared but `dials` is never truncated within a drain; `writer_admit_scope` re-walks the full list with `List.length` fuel at ~9 decision points (`actor.bend:974,976,985,1063,1073,1111,1119,1129`). Bound is 32 rounds x 65 cmds ≈ 2080 (`:799-813`), so worst case ≈ 4 M cons steps, and the drain must finish before `register` (`after_conn`, `:1092`). D37 is a different dead-code item.
+  - What/why: quadratic drain before registration on the dial path.
+  - Fix direction: truncate `dials` alongside `kept`, or index decisions instead of re-walking the list.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/actor.bend:737,833-840
+  - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: multi-dial admit still drains correctly
+  - [ ] negative test: single dial performs no re-walk
+  - [ ] regression test: existing actor suites still pass
+
+- [x] D93 — `src/bend/actor.bend:616-620,639-643` — Low (notice spam) — every over-cap Cont spawns its own overflow notice, no dedup
+  - Location: `writer_queue_notice` spawns one `writer_fail` task per call with `dropped>0`, invoked from `writer_queue` on every `Cont` (`actor.bend:642` via `writer_command`, `:1397-1402`); each `NetFail` is appended by `session_fail` with no coalescing (`session.bend:2337-2344`). The 5 s heartbeat emits `Cont` unconditionally while cmd sends succeed (`net.bend:2196-2206`), so a stalled-but-live socket re-emits the identical notice per heartbeat plus per user Cont. D24 covers the bound and the notice's existence, not the per-Cont duplication. Each notice also runs the full `on_fail` → autoreconnect path, so blast radius may exceed notice spam (follow-up read advised).
+  - What/why: unbounded duplicate failure notices plus redundant reconnect-path evaluations.
+  - Fix direction: coalesce/dedup identical pending notices (generation + count key) instead of spawning per Cont.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/actor.bend:618)
+  - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: first overflow still notifies with the count
+  - [ ] negative test: repeated Conts coalesce to one notice
+  - [ ] regression test: existing actor suites still pass
+
+- [x] D94 — `src/bend/session.bend:1168` — Low (perf) — `match_slash.go` eager tail walk, unlisted D52 shape
+  - Location: `+rest = match_slash.go(t, word)` (`:1168`) is a strict binding evaluated before `match_slash.keep` matches `hit` (`:1169`), so a prefix hit still walks all 43 rows. Corroborated twice: `slash_rows()` rebuilds all 43 cons cells per call (`:1590-1634`; "Catalog length is 43" in-code at `submit.bend:1636`), and `slash_starts` refolds `to_upper(word)` per row (`:1649-1650`). The lazy idiom exists next door (`slash_lookup`, `submit.bend:1652-1654` comment). Reached per Tab-cycle (`:1212-1215`). Exact D52 shape, unlisted in D52.
+  - What/why: full 43-row walk plus per-row case-fold on every slash-prefix hit.
+  - Fix direction: Unit-> thunk for `rest`, or match on `slash_starts` before recursing.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:1162-1176
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions and spot-read.
+  - [ ] positive test: prefix hit resolves without the tail walk
+  - [ ] negative test: miss still walks to Nil
+  - [ ] regression test: existing session/submit suites still pass
+
+- [x] D95 — `src/bend/session.bend:1209` — Low (perf) — `match_nicks_iso.go` eager roster walk plus per-row casemap fold
+  - Location: same strict-`+rest` shape at `:1209` before `match_nicks.keep` (`:1117-1122`); plus `nick_match_iso` (`:1201-1202`) recomputes `Isupport.cm_fold(iso, word)` per row though `word` is constant (`cm_fold` = `Irc.fold_casemap` per row, `isupport.bend:525-527`). Roster-bounded, unlisted in D52/D59.
+  - What/why: full roster walk plus redundant fold per row on every nick-prefix hit.
+  - Fix direction: hoist the `cm_fold` out of the row loop; thunk the tail walk.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:1193-1208
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: roster hit resolves without the tail walk
+  - [ ] negative test: miss still walks to Nil
+  - [ ] regression test: existing session suites still pass
+
+- [x] D96 — `src/bend/session.bend:4022` — Low (perf) — `upload_blocked.r1` rebuilds a full Session on every modal-pending frame
+  - Location: `Bool.pick(Session, enter, session_upload_draft(st, ...), enter)` (`:4022`) passes the full 24-field destructure/rebuild (`:2682-2685`) as an eager arg, discarded when `enter=False`. D51's fix is the *other* site (`frame_result.restore.go`, `net.bend:599-602` with in-code D51 comment) — this modal-pending site at `:4090` (`upload_blocked(step_keys.ordinary(...), enter)`) is still open and unlisted.
+  - What/why: full Session rebuild per frame while a modal is pending.
+  - Fix direction: the `restore.go` helper shape from D51: branch on `enter` first, build only in the `True` arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:4053-4065
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: Enter path still rebuilds identically
+  - [ ] negative test: non-Enter frame performs no rebuild
+  - [ ] regression test: existing session suites still pass
+
+- [x] D97 — `src/bend/drafts.bend:191` — Low (bounded perf) — per-keystroke Drafts multi-walk stash
+  - Location: `find_entry_cm.go` binds `+cont` strictly at `:191` before `find_entry.rest` matches hit (`:177-182`) — no early exit; same strict-recursion shape in `replace_entry_cm.go` (`:274`) and `count_server.go` (`:305`). Per keystroke via `stayed_type` (`session_drafts.bend:301-306`) → `set_cm` (`drafts.bend:348-349`): fits byte-walk + admit scan(s) + replace walk. ENTRY_CAP=16 (`drafts.bend:53-54`). The "three walks" count holds exactly on the admit-miss path; on a hit path it is two walks + byte walk if `||` short-circuits — same defect shape either way. Distinct from D22 (Workspace/Session rebuild) and D52.
+  - What/why: multiple Drafts-spine walks per keystroke.
+  - Fix direction: early-exit match with Unit-> continuations, as D52 prescribes.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/drafts.bend:177-190
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: keystroke still shelves/restores the draft
+  - [ ] negative test: bottom-row path performs no stash walk
+  - [ ] regression test: existing drafts suites still pass
+
+- [x] D98 — `src/bend/session_keys.bend:223` — Low (perf nit) — Up/Down double length computation
+  - Location: `menu_movable` (`:136`) uses `Bool.or(...)` with both `menu_len` and `emoji_len` as strict args — `emoji_len` rebuilds the alias table per call (`composer_ui.bend:430-435`) — then `finish_keys.pick` (`:224`) recomputes `pick_len` (`:148-149`), re-running one of the two. Three evals where two suffice, per Up/Down frame via `finish_keys.dir` (`:233-236`). Unlisted in D18/D52/D62.
+  - What/why: redundant menu/emoji length builds on navigation frames.
+  - Fix direction: compute both lengths once and thread them into pick.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session_keys.bend:241)
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: picker still enables/disables identically
+  - [ ] negative test: closed menu performs no length build
+  - [ ] regression test: existing session_keys suites still pass
+
+- [x] D99 — `src/bend/session_drafts.bend:161` — Low (bounded perf) — Enter-time O(all-lines) error-echo scan
+  - Location: `last_sig.go` (`:161-164`) walks each buffer's full line list to keep one tail pair; `new_error.go` (`:193-200`) runs it per after-buffer plus a `find_sig.go` fan-out over before-buffers (`:179-184`, each with its own `last_sig`), with strict `+tail` at `:199`. Enter-only via `moved_enter` (`:257-261`) and `cont_empty` True arm (`:290-292`). Bounded by MAX_BUFFERS=16 / SCROLL_CAP=1024 (`buffer.bend:114-122`). Distinct path from D53/D55 (history scans) and D59 (parse dup).
+  - What/why: full-history walk on every Enter to detect a rejection echo.
+  - Fix direction: track the tail pair incrementally at append time instead of re-walking on Enter.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — incremental tail-sig needs Buffer shape changes (superseded: fix landed after this line).
+  - Status 2026-10-28: FIXED (tickoff): O(1) newest-head fast path + lines fallback + cell gates (in-code marker session_drafts.bend:169-178; find_sig.cell/new_error.cell thunks at :180-183,:200-203); test-session-drafts green fresh (session_drafts_demo=ok).
+  - Validated by: eighty-round-2 workflow session sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: rejection echo still detected
+  - [ ] negative test: clean Enter performs no history walk
+  - [ ] regression test: existing session_drafts suites still pass
+
+- [x] D100 — `src/bend/submit.bend:230-242,291-335` — Low (bounded perf) — per-send body re-scanned ~8–10x through strict args
+  - Location: `send_text_gated` (`:330-335`) binds `clean`/`name`/`overhead`, then passes `text_valid(target,body,notice)` (`:306-309`, re-strips + `has_no_nul` + `message_wire` rebuild), `text_reason(...)` (`:318-319`, second `has_no_nul` even when valid is True), `message_sensitive(...)` (`:237-242`, third `strip_ctl` + third `message_wire` + `Chunks.split` at `:233`) all as strict args into `valid`, which calls `message_parts` (`:325`) → second `Chunks.split` at `:294` for non-private. `strip_ctl` (`:720-725`), `message_wire` (`:186-187`, itself `Bool.pick` building both arms), `Chunks.split` (`message_chunks.bend:43-45`) are all full-body walks. Novel — D59's submit residual covers only the inbound `credential_echo` gate (`:184`), not send planning. Bounded by draft/wire caps; per-Enter cost.
+  - What/why: ~8–10 full-body walks per send.
+  - Fix direction: validate once into a shared record (cleaned body + flags) instead of re-deriving per predicate.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/submit.bend:370)
+  - Validated by: eighty-round-2 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: valid send still emits byte-identical wire
+  - [ ] negative test: invalid send fails on the first walk
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D101 — `src/bend/join_plan.bend:380-386,444-456` — Low (bounded perf) — accepted JOIN/PART batch lines parsed 3x, not 2x
+  - Location: `step_keys.plan` (`session.bend:3745`) runs `capacity_ok_iso` (parse #1 at `join_plan.bend:383`) on the batch; True arm runs `session_outs_admitted` (parse #2 at `session.bend:1530`) as a strict arg; its True arm runs `outbound_iso` (parse #3 at `join_plan.bend:448`) on the same `outs` (`session.bend:3718,3727`). `outbound.parsed_iso` already takes `Maybe<Message>`, so threading is plausible. Novel — D17/D59 cover inbound lines only. Bounded: tiny user-initiated batches.
+  - What/why: triple parse of the same outbound batch.
+  - Fix direction: thread one parse through capacity/admit/outbound (the D17 threading pattern).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/join_plan.bend:549)
+  - Validated by: eighty-round-2 workflow auth sweep + fresh sceptic (CONFIRMED, claim strengthened 2x→3x) + parent-cited regions.
+  - [ ] positive test: batch still admits identically
+  - [ ] negative test: over-capacity batch parses once
+  - [ ] regression test: existing join_plan suites still pass
+
+- [x] D102 — `src/bend/cap_notify.bend:217-218,234-244` — Low (bounded perf) — `caps_enable`/`caps_disable` evaluate 11 `cap_match.one` per entry
+  - Location: struct construction is strict so all 11 arms run; each `cap_match.one` = `Irc.ieq` (2 folds per `irc.bend:193-194`, `rfc1459` at `:190-191`) plus on miss 2 more folds + 1 `++ "="` concat — i.e. 22 guaranteed folds, up to 22 more, up to 11 concats per CAP entry. Novel — no D covers it. Bounded: handshake-time only, short names.
+  - What/why: ~22–44 folds per capability per negotiation.
+  - Fix direction: table-driven match over a capability list instead of 11 disjunct arms.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cap_notify.bend:234
+  - Validated by: eighty-round-2 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: capability set still negotiates identically
+  - [ ] negative test: unknown cap short-circuits the table
+  - [ ] regression test: existing cap_notify suites still pass
+
+- [x] D103 — `src/bend/join_plan.bend:42-48,70-82,614-621` — Low (bounded perf) — membership double-walk per insert + quadratic recovery flush
+  - Location: `remember_iso` (`:81-82`) runs `has_cm` miss-scan (`:42-45`) then `List.length` second walk on the miss path (`||` short-circuits hits only), then `put_cm` (`:60-65`) walks a third time; `admitted.go` (`:614-618`) runs `has_cm(kept,…)` per channel → O(n²) `buf_eq_cm` compares per flush. Bound verified: `MAX_CHANNELS = MAX_BUFFERS − 2 = 14` (`channel_policy.bend:8-9`, `buffer.bend:114-115`), so <=~196 short compares per recovery flush. Novel — no D covers join membership. Bounded: join/reconnect-time only.
+  - What/why: triple walk per insert and quadratic flush on recovery.
+  - Fix direction: single membership pass returning the slot; batch the flush walk.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/join_plan.bend:77)
+  - Validated by: eighty-round-2 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: membership still resolves identically
+  - [ ] negative test: hit path performs one walk
+  - [ ] regression test: existing join_plan suites still pass
+
+- [x] D104 — `src/bend/cap_notify.bend:458-463,559-565,615-622` — Low (cosmetic perf) — `out_target_ok` evaluated 2x per typing tick
+  - Location: `live_tick_cm` (`:618-619`) calls `live_composing` (`:615-616`, eval #1) then `reg_out_cm` → `step_out_cm` (`:559-562`) passes `online && tags_ok && out_target_ok(target)` as a strict arg (eval #2) on the same target; each eval builds `typing_tag_line` (`:458-460`) and runs `word` + `target_wire` + `line_ok` (`:462-463`). Novel — no D covers it. Bounded: 1 Hz tick, ~30-char strings (cosmetic-grade).
+  - What/why: duplicate tag-line build per typing tick.
+  - Fix direction: compute once per tick and thread the boolean.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cap_notify.bend:677-680
+  - Validated by: eighty-round-2 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: typing still gates identically
+  - [ ] negative test: non-typing tick performs no build
+  - [ ] regression test: existing cap_notify suites still pass
+
+- [x] D105 — `src/bend/isupport.bend:807-813` — Low (bounded perf) — `index_of` double walk with fan-out
+  - Location: `index_of` calls `has_char(s, c)` (`:813`; full scan per `:227-230`), then `String.split(s, c)` + `index_first` length-of-head (`:810`) re-walks the same string. Fan-out: `sigil_for`/`mode_for`/`rank_of` each call `index_of` (`:825`, `:833`, `:845`); `mode_class.b/c/d` each pass an eager `has_char` per class string (`:895`, `:900`, `:905`); `walk_flags` runs `mode_class` per flag char via `walk_arg` (`:1002-1003`, `:1022-1025`). Bounded by 32-char class caps (`:319-323`). Not in D-list (D33 is CHANMODES certainty; D59/D54 are parse/scanner sites).
+  - What/why: double walk per lookup, fanned out per mode char.
+  - Fix direction: single-scan index-of returning the position directly.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/isupport.bend:805-820
+  - Validated by: eighty-round-2 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: mode lookup still resolves identically
+  - [ ] negative test: absent char performs one walk
+  - [ ] regression test: existing isupport suites still pass
+
+- [x] D106 — `src/bend/isupport.bend:1041-1042` — Low (bounded perf) — `replace_at` triple walk for one-element redaction
+  - Location: `replace_at` runs `List.take` (to `i`), `List.drop` (past `i+1`), and `List.append` over the prefix — three walks for one-element redaction on the per-MODE-line `redact.known` path (`:1044-1047`). Arg lists tiny. Distinct from D53/D58 (different modules/paths).
+  - What/why: triple walk per redaction.
+  - Fix direction: single-pass split-at rebuilding once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/isupport.bend:1051-1062
+  - Validated by: eighty-round-2 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: redaction still replaces exactly element i
+  - [ ] negative test: out-of-range index path unchanged
+  - [ ] regression test: existing isupport suites still pass
+
+- [x] D107 — `src/bend/view_laws.bend:506-512` — Low (perf) — D52-shaped eager waste, unlisted site
+  - Location: `:512` passes `ys_inc(ys)` as a `Bool.pick` value, evaluated even when `hist_sep(rows)` is `False` (D52 documents pinned eager `Bool.pick`; in-code eager rule at `links.bend:76-77`). Note `:511` already computes `ys_inc(ys_init(ys))` unconditionally, so the `:512` call is a second full-list walk. D52's list covers `view_laws:187` (`has_kind`, since fixed via thunk at `:180-190`) but not this `:512` site. Runs per proof discharge only.
+  - What/why: second full-list walk discarded on the common path.
+  - Fix direction: the D52 Unit-> thunk idiom, or hoist one shared `ys_inc` binding.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view_laws.bend:506-513
+  - Validated by: eighty-round-2 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: proof still discharges
+  - [ ] negative test: non-sep rows perform no second walk
+  - [ ] regression test: existing law suites still pass
+
+- [x] D108 — `src/bend/server_id.bend:52-59` vs `LAWS.bend:932-938` — Low (law gap) — uncovered command/event branches
+  - Location: `routing_ok` (`:174-187`) exercises only `Dial` (via `dial_for`, `:178-180`) and `Search` (via `search_at`, `:181-183`); no `Pump`/`Pong`/`Begin` fixture exists, and the `case _: True{}` catch-all plus `evt_current` (`:68-70`) and `writer_done_current` (`:74-76`) have no predicates at all — `LAWS.bend:932-938` wraps only the three compounds. D28/D29 are client/session_keys gaps; D45's generation-ownership fix has no server-side law pin. D25 pinned only the `valid` gate, not branch coverage.
+  - What/why: generation-gated command/event branches with no proof-facing pin.
+  - Fix direction: add `*_ok` predicates + LAWS/PROOF entries for the uncovered branches, 1:1 discharged.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/server_id.bend:52-59
+  - Validated by: eighty-round-2 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: new branches pinned by law
+  - [ ] negative test: wrong-generation still rejected
+  - [ ] regression test: `make lint-laws-io` green
+
+## Round 2 non-findings (explicitly falsified, not filed)
+
+- Round-2 persist sweep produced no rejections (5/5 confirmed).
+- Round-2 history sweep produced no rejections (5/5 confirmed).
+- Round-2 session sweep produced no rejections (6/6 confirmed).
+- [x] Confirm no ticket filed: `src/ffi/media_fetch_ffi.c:1260-1271` cache-write double-scan — mechanism falsified by fresh sceptic: the two scans cover different directories (`otherfd` vs `dirfd`, `:1193-1208`), so a single scan cannot enumerate both; genuine residue is only a ≤256-entry selection-sort micro-nit, not the filed claim.
+- [x] Confirm no ticket filed: `src/bend/view.bend:1632-1648` rev_tail quadratic — consequence false per fresh sceptic: the sole caller is the `preview=True` branch (`view.bend:2349`), not the live bottom; live bottoms never touch `rev_tail`.
+- [x] Confirm no ticket filed: `src/bend/view.bend:97-101` cluster_spans no-op passes — mechanism false per fresh sceptic: the `False` arm rebuilds only the head cell (`view.bend:48-58`), so the real residual is two passes, not four.
+- [x] Confirm no ticket filed: `src/bend/irc.bend:706-711` has_crlf eager `Bool.or` — consequence false per fresh sceptic: zero live callers (def + self-recursion only); unreachable dead code, not a live-path cost. If it gains a caller, fix with the `strip_ctl` thunk idiom or delete per D11.
+- [x] Confirm no ticket filed: `src/bend/notify.bend:433-441` claimed_filter — premise false per fresh sceptic: `claimed_filter.keep` returns `tail` on both arms (`:428-431`), so no speculative work exists.
+- [x] Confirm no ticket filed: `src/bend/notify.bend:390-395` stage_admitted — premise false per fresh sceptic: the `Req` binding sits inside the `False` arm after the `full` match (`:397-400`), doubly lazy.
+- [x] Confirm no ticket filed: `src/bend/actor.bend:1308-1310,1348-1371,533-554` flush stall — consequence false per fresh sceptic: `send_batch_go` fail-fasts on first failed send (`actor.bend:50-52,60-62`), so worst realistic stall is ~1x250 ms, not 512x250 ms; full-queue flushing is documented deliberate design.
+- [x] Confirm no ticket filed: `src/bend/dns.bend:383` 65 k-cell `to_nat` — rejected as framed per fresh sceptic: the cited comment is not a codebase-wide ban (`to_nat` is the accepted data-size idiom elsewhere); at most a one-line fuel-constant nit on a rare path.
+- [x] Confirm no ticket filed: `src/bend/auth.bend:286-308` per-line credential-config revalidation — duplicate of D20+D60 per fresh sceptic: same mechanism, same predicate chain, residual already documented and accepted.
+- [x] Confirm no ticket filed: `src/bend/server_id.bend:171-203` predicate placement — by-design per fresh sceptic: `_ok`-predicates-in-domain-module is the codebase-wide law pattern (`LAWS.bend:940-952`); compound-only pinning is inherent, not specific to `server_id`.
+- [x] Confirm no ticket filed: `LAWS.bend:360-380` + `view_laws.bend:195-205` law merge — claim false per fresh sceptic: roundtrip does not imply the span-kind law (identity-echo passes roundtrip; in-code comment at `LAWS.bend:363-364`); already adjudicated in the R71–R80 sweep (`:651`).
+
+## Round 4 — 2026-10-26 residual review (10 parallel lanes + sceptical validation)
+
+Method: ten residual lanes (error paths, CLI/config, log formatting, upload/cards, wsnet reconnect, DNS, theme/styles, navigation, notify delivery, IO batching) that first read D1–D162 plus all round-1/2/3 Non-findings and skipped filed/falsified ground; each candidate independently re-read and CONFIRMED/REJECTED by a fresh-context sceptical validator. Analysis only: no code touched, all items OPEN.
+
+- [x] D163 — `src/bend/buffer.bend:596-607` — Low (per-message) — strict-`||` mention scan + per-offset length/drop
+  - Location: `str_mentions` chains `hit(...) || str_mentions(t, ...)` (`:605-606`) and `hit` chains `left_ok && starts_with && mention_right_bound(drop(s, length(needle)))` (`:596-599`); under the established eager-args/strict-operator rule the tail walk runs even on a hit and `length(needle)`+`drop` recompute per offset — O(n·m) to reject. Caller `is_mention_cm` (`:612-619`) runs per non-notice message (`client.bend:188`). Not a D110 dup (D110 cites this cost only as evidence for its cutoff-ordering defect; the internal no-short-circuit + recompute mechanism and fix are unfiled).
+  - What/why: quadratic mention scan on every non-notice message.
+  - Fix direction: short-circuiting matcher with the needle length hoisted out of the offset loop.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:608)
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: mention still detected at any offset
+  - [ ] negative test: no-mention line skips the tail walk
+  - [ ] regression test: existing buffer/client suites still pass
+
+- [x] D164 — `src/bend/client.bend:986-988` — Low (per-line) — server-notice gate validates before dispatch
+  - Location: strict `+from`/`+target` bindings (`:984-985`, `message_key_with` itself scans via `buf_find_cm`, `buffer.bend:1137-1170`) plus the full strict-`&&` condition (`ieq`, `buf_eq_cm`, `source_is_server`, `wire_name`, `is_muted_client_cm` ledger walk) evaluate before `.on` matches (`:974-978`), so every non-NOTICE line pays and discards it. Same disease as D158 but a different function (per-site precedent); D75 cites these lines only as a ledger call site for its cap defect, not ordering.
+  - What/why: full validation before dispatch on every line.
+  - Fix direction: match the command first, validate only on the NOTICE path.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/client.bend:1102-1111
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: server notices still validate identically
+  - [ ] negative test: non-NOTICE line skips validation
+  - [ ] regression test: existing client suites still pass
+
+- [x] D165 — `src/bend/client.bend:990-991` — Low (per-line) — reject path pays full prefix/parse/tags/label
+  - Location: all four args evaluate eagerly before the `None{}` arm discards them (`:980-982`): `source_prefix` multi-walks, `parse` = `parse_body(strip_cr(line))` with a whole-line `reverse`, `raw_tags` runs a second whole-line `reverse`, `label_tag` splits on `';'` and walks tags. Not D59 (which counts admitted-line re-parses and explicitly excludes scans); the `None`-arm discard is unfiled.
+  - What/why: wasted full parse stack on the reject path.
+  - Fix direction: gate the parse on the admission test first.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/client.bend:1122-1126
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: admitted lines still parse identically
+  - [ ] negative test: rejected line performs no parse
+  - [ ] regression test: existing client suites still pass
+
+- [x] D166 — `src/bend/submit.bend:361-372` — Low (bounded) — no short-circuit on `/join` validation
+  - Location: `join_channel(h) && join_channels(t)` (`:364`) and `Is.join_admit(...) && join_channels_iso(...)` (`:371-372`) evaluate the tail after rejection is decided (strict-`&&` premise). Narrowing: the "full admission" cost (CHANTYPES head + `Channels.valid` + `join_len` + advertised swap) applies to the `iso` path; the non-iso path pays only the cheap head/non-empty check in the same no-short-circuit shape. Unfiled (D101 = triple-parse, D145 = law gap). The "validate before staging" comment (`:353-355`) justifies atomicity, which short-circuit preserves.
+  - What/why: tail validation after rejection is decided.
+  - Fix direction: match rejection first; stage only on success.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/submit.bend:432
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: valid joins still stage identically
+  - [ ] negative test: invalid first channel skips the tail
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D167 — `src/bend/history_io.bend:306-309` — Low (bounded) — byte-seeded fuel consumed per 64 KiB chunk
+  - Location: `read_loop.mode` burns one fuel per `read_loop.read.mode` step (`:293-298`), each reading `clamp_nat(remaining, hist_read_chunk()=65536)` (`:236-237`, `:287`), but `read_size.mode` seeds `1n+U32.to_nat(size)` bytes (`:309`) — ~64K× over-provision, unary-Nat cost at load; `U32.to_nat(size)` also computed twice in the one expression. Same disease as D117, different module (per-site precedent); D112 covers cap conversions, not file-size fuel.
+  - What/why: ~64K× fuel over-provision per chunked read.
+  - Fix direction: seed fuel in chunk units, compute the conversion once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_io.bend:285-306 (shared U32.to_nat + byte-unit fuel, same fix shape as D212)
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: reads still terminate at EOF
+  - [ ] negative test: empty file performs no conversion
+  - [ ] regression test: existing history suites still pass
+
+- [x] D168 — `src/bend/frame.bend:247-258` — Low (bounded) — length-seeded decode fuel + double walk on reject
+  - Location: `utf8_decode` seeds `1n+List.length(xs)` (`:248`), then `line_from_octets.on` re-walks `xs` via `octets_to_string` (`:14-19`) on the `None` arm (`:250-258`) — invalid lines pay length walk + decode-to-`None` + full fallback walk. Third site of the D68/D148 disease (per-site precedent); the reject double-walk is new.
+  - What/why: wasted walks on the invalid-input path.
+  - Fix direction: structural termination (drop the fuel), share one decode pass.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/frame.bend:250)
+  - Validated by: eighty-round-4 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: invalid input still fails closed identically
+  - [ ] negative test: valid input performs no fallback walk
+  - [ ] regression test: existing frame suites still pass
+
+- [x] D169 — `src/bend/args.bend:275-278` — Low (startup, per-occurrence) — nested `Bool.pick` over three `String.eq` in `auth_mode`
+  - Location: three nested `Bool.pick`s over `String.eq(value,"sasl"/"nickserv"/"sasl-nickserv")`; eager-args rule forces all three walks plus all `Some` constructions per `--auth` occurrence (reached via `args_auth.options`, line 289). Absent from the D52 confirmed-open list (D52 covers `flag_of`, not this site).
+  - What/why: always-evaluate nested picks on arg parsing.
+  - Fix direction: match on the value first with one construction per arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/args.bend:275-288
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: auth modes still parse identically
+  - [ ] negative test: first-match mode skips the other walks
+  - [ ] regression test: existing args suites still pass
+
+- [x] D170 — `src/bend/preferences_runtime.bend:107-111` — Low (per-tick) — `R.mark` pays double `mask_text` serialization every live tick
+  - Location: `mark` strictly binds `next = mark.names(names, mask)` then `mark.changed(Bool.not(String.eq(mask_text(mask), mask_text(next))), …)` — both 11-char serializations built unconditionally; `mark.field` holds eleven `String.eq(name,…)` arms evaluated strictly per recorded name. Runs per tick inside `PrefLive.observe.ready` via `preferences_stage`; session edits list is append-only (deduped but never cleared). D64 pins `equal`/`edits`/`observe.same`, not `mark`.
+  - What/why: redundant serialization per tick on the observe path.
+  - Fix direction: compare structurally first, serialize only on change.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences_runtime.bend:183-189
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: edits still detected identically
+  - [ ] negative test: unchanged tick performs no serialization
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D171 — `src/bend/preferences.bend:208-215` — Low (bounded) — snapshot-import mute/channel arms re-validate per record
+  - Location: mute arm gates on `text_ok(value,512)` (two walks) `&& length<64 && !has`; channel arm adds `channel_ok` (length + `text_ok` + head/char walks). O(n²) over ≤64/≤14. D65 covers only the `valid()`-path `list_ok`; D66 covers only the re-split and append — neither covers these per-record import-path validation scans.
+  - What/why: repeated validation scans per imported record.
+  - Fix direction: validate once per record into a shared verdict.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences.bend:232-261
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: imports validate identically
+  - [ ] negative test: valid record performs one validation
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D172 — `src/bend/endpoint.bend:58-65` + `src/bend/isupport.bend:248-254` — Low (perf nit) — `port` double-walks, fanned out to ISUPPORT numerics
+  - Location: `port(text)` → `port.valid(text, decimal(text))`; valid arm runs `port.read(U32.read(text))`, with `decimal` a full character walk; `read_bounded.checked(val, … && Ep.decimal(val), …)` → `read_bounded.num(U32.read(val),…)` repeats the shape. D157 covered only the hostname, not ports.
+  - What/why: validate-then-reparse on every port string.
+  - Fix direction: single validating read returning the number directly.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/endpoint.bend:129)
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: ports still parse identically
+  - [ ] negative test: invalid port fails on the first walk
+  - [ ] regression test: existing endpoint/isupport suites still pass
+
+- [x] D173 — `src/bend/preferences_io.bend:39-44,110-113,148-154` + `helper_io.bend:31-36,48-50` — Low (per-job) — every preference job re-resolves process-constant env
+  - Location: `resolve_prefs_path` reads three env vars per call; `program()` reads one more; `load` and `save.serialized` each resolve the helper name, then `save.native` re-resolves the path; `H.run` resolves the helper name a second time. Queue admits ≤16 jobs. No D-entry covers env resolution.
+  - What/why: 3–4 `get_env` calls per queued job for process-constant values.
+  - Fix direction: resolve once at startup and thread the paths through.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/preferences_io.bend:33)
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: jobs still resolve identical paths
+  - [ ] negative test: queued job performs no env read
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D174 — `src/bend/preferences.bend:56-59,67-82` × `preferences_runtime.bend:368-377` + `:31-33` — Low (per-tick, uncapped) — `records_text` left-nested `++` fanned ~8× per tick over a D75-uncapped ledger
+  - Location: `records_text` prepends `kind++"\t"++h++"\n"` ahead of the recursive tail per row; `show` embeds it twice; `edits` embeds two more mute-list builds; `observe.same` runs `equal` (2× `show` = 4 builds) plus two `edits` calls (4 builds) unconditionally per tick. `capture_themed` pulls `settings_mutes` straight from the D75-uncapped ledger with no `valid()` 64-cap on this path — so unlike D64's bounded snapshot, per-tick cost scales with a user-controlled unbounded list. D64 counts frequency only; assembly complexity, the 8× count, and the uncapped-input scaling are unlisted.
+  - What/why: quadratic assembly per tick over an unbounded user-controlled list.
+  - Fix direction: difference lists for assembly; cap or memoize the ledger read on this path.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/preferences_runtime.bend:72,440-446
+  - Validated by: eighty-round-4 workflow cli sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: per-tick output identical
+  - [ ] negative test: unchanged tick skips the rebuilds
+  - [ ] regression test: existing preferences suites still pass
+
+- [x] D175 — `src/bend/diagnostic.bend:50-67` — Low (per-row, 128×512-bounded) — per-character rebuilds over every `*log*` row
+  - Location: `token` re-runs `String.take(s, 8n)` + `to_lower` + `Links.is_url_prefix` (two `starts_with`) per character via the strict arg; `secret_skip` runs two secret `starts_with` scans per character; `text` pays three `sanitize_in` walks (each a `length` walk plus full traversal) plus a final take. Live per-row caller at `buffer.bend:1349` (`diagnostic_line.at`). Qualification: `to_lower`/prefix operate on the ≤8-char window, not the full string — still per-character rebuilds as claimed. No D-entry covers `Diagnostic.text`.
+  - What/why: repeated per-character rebuilds on the log path.
+  - Fix direction: tokenize once per row and reuse the token stream.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/diagnostic.bend:50-67
+  - Validated by: eighty-round-4 workflow logfmt sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: log rows render identically
+  - [ ] negative test: plain row skips the token rebuilds
+  - [ ] regression test: existing diagnostic suites still pass
+
+- [x] D176 — `src/bend/buffer.bend:1473-1486` via `client.bend:1010` — Low (per stamped line) — feed-time re-split of the stamp
+  - Location: `stamp_combine.empty` splits `stamp` via `now_day(stamp)`; `dated` splits `now` via `now_day(now)` and `day` re-splits `stamp` via `now_hms(stamp)` — 2 splits + 4 walks of `stamp` per stamped line. Distinct from D79 (same `now_day`/`now_hms` defs, paint-time call path; this is the feed-time `stamp_combine` path).
+  - What/why: repeated stamp splitting per fed line.
+  - Fix direction: split once and thread both halves into combine.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:1520)
+  - Validated by: eighty-round-4 workflow logfmt sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: stamps still combine identically
+  - [ ] negative test: unstamped line performs no split
+  - [ ] regression test: existing buffer/client suites still pass
+
+- [x] D177 — `src/bend/client.bend:893-894` + `src/bend/irc.bend:1064-1112` — Low (tiny) — per-FAIL/WARN/NOTE-event re-walks
+  - Location: gate `stdreply_ok` walks `stdreply_len` (full `List.length`) + `msg_param`×2 (index walks) + `msg_last` (full tail walk); then `feed_stdreply.text` repeats `msg_param`×2 + `stdreply_context` (second `len` walk) + `msg_last` — ~8 walks over a ≤4-param list per event. No D-entry covers stdreply formatting (D47 is the adjacent ACK-gating fix; D59 counts parses, D82 `source_prefix` scans — both explicitly exclude this).
+  - What/why: duplicated walks per stdreply event.
+  - Fix direction: share one parsed parameter view between gate and text.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/client.bend:1011)
+  - Validated by: eighty-round-4 workflow logfmt sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: FAIL/WARN/NOTE still render identically
+  - [ ] negative test: non-stdrely line performs no walk
+  - [ ] regression test: existing client/irc suites still pass
+
+- [x] D178 — `src/bend/buffer.bend:1741-1751,1003-1013,1732-1735` — Low (cosmetic) — double index walk per logged row
+  - Location: `client_log_author_ts.noted` classifies via `destination(nth_buf(bufs, i))` (`List.get` walk) at `:1791`, then `original` re-walks to the same index via `buf_modify` at `:1741-1745` — two head-to-`i` walks per logged row. No D-entry covers it (D12 is the inner append cost). Bound: ≤16 buffers, so ≤32 steps/row.
+  - What/why: duplicate indexed access per logged row.
+  - Fix direction: single index returning both the classification and the slot.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:1817)
+  - Validated by: eighty-round-4 workflow logfmt sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: logged rows classify identically
+  - [ ] negative test: single-buffer path performs one walk
+  - [ ] regression test: existing buffer suites still pass
+
+- [x] D179 — `src/bend/session.bend:1967-1968,2730-2732,4125-4127` — Low (per-frame + per-event) — idle `session_upload_maintain` rebuilds the full Session
+  - Location: unconditionally calls `session_set_upload`, which destructures/rebuilds the 24-field `Session` plus `JoinPlan.sent` and `comp_ordinary` roundtrip, even when `Up.retain` is identity (`Idle→Idle`). Fires per frame via `session_frame_key_admit` strict arg, per keystroke via `step_keys`, a third time on the ordinary path via `upload_restore`, plus per event via `upload_stage`. Distinct from D96 (`upload_blocked.r1`) and D51 (`frame_result.restore`). (Claim says 2×; actual ordinary path is 3× — conservative.)
+  - What/why: full Session rebuild per frame/event while idle.
+  - Fix direction: gate on `Up.retain` identity; skip the rebuild when nothing changed.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:1991)
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: upload state still transitions identically
+  - [ ] negative test: idle frame performs no rebuild
+  - [ ] regression test: existing session suites still pass
+
+- [x] D180 — `src/bend/session.bend:4046-4056` + `src/bend/upload.bend:96-104,212-223` — Low (per-Enter) — every ordinary chat Enter pays two full lexer scans
+  - Location: `PlainInput` runs `Up.parse_paths(raw, True{})` (printable + `utf8_len` + `lex_go` walks); ordinary prose fails `path_valid`'s `/`-prefix into the `None{}` arm, which runs the second full `looks_local_drop` lex. No `/`-presence pre-gate. Distinct from D100 (submit send-planning).
+  - What/why: double lexing per ordinary chat Enter.
+  - Fix direction: `/`-prefix pre-check before the first lex.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:4119)
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: ordinary chat still sends identically
+  - [ ] negative test: prose Enter performs one lex
+  - [ ] regression test: existing session/upload suites still pass
+
+- [x] D181 — `src/bend/session.bend:4033-4036` — Low (per-invocation) — explicit `/upload` path always pays the `looks_local_drop` lex
+  - Location: `upload_input.paths` evaluates `explicit || Up.looks_local_drop(raw)` as strict `Bool.pick` args even when `explicit=True{}`. Unlisted D52-family site; distinct from candidate D180's `PlainInput` arm.
+  - What/why: wasted lex on the explicit path.
+  - Fix direction: match `explicit` first, lex only otherwise.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:4077-4080
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: explicit upload still resolves identically
+  - [ ] negative test: explicit path performs no lex
+  - [ ] regression test: existing session suites still pass
+
+- [x] D182 — `src/bend/upload.bend:330-343` + `session.bend:2754-2755` + `net.bend:1329,1339-1340` — Low (nit, per-completion) — completed URL and eligibility validated twice on success
+  - Location: `Up.finish` runs `retain` + `eligible` + `response→response_url`; `on_upload` then re-runs `Up.eligible` on the same request/scope/online and `Up.wire_fits→response_url` over the already-accepted URL. Beyond D89 (disallowed-path waste); this is success-path double acceptance. Per-completion, tiny input.
+  - What/why: duplicate acceptance on the success path.
+  - Fix direction: thread the first acceptance verdict into `on_upload`.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/net.bend:1360)
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: completion still accepted identically
+  - [ ] negative test: single acceptance per completion
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D183 — `src/bend/net.bend:1330-1333` — Low (nit, rare path) — failure arm eagerly builds both messages
+  - Location: nested `Bool.pick` evaluates the inner pick including `UploadIO.error_text` (`U32.show` builds) even when `allowed=False{}` discards it, and evaluates `error_text` even when `error=0` selects the literal. Pinned eager-`Bool.pick` rule; unlisted in D52/D94/D95/D98/D128. Rare path, tiny input.
+  - What/why: wasted message builds on the failure path.
+  - Fix direction: match first, build only the selected message.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/net.bend:1342)
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: failure still reports correctly
+  - [ ] negative test: discarded arm builds nothing
+  - [ ] regression test: existing net suites still pass
+
+- [x] D184 — `src/bend/session.bend:2697-2702` via `net.bend:349,361` — Low (bounded, per-paint) — hint re-splits the path every paint while pending
+  - Location: `upload_hint` runs `String.split(path, Chr{47})` + `upload_basename` walk + `take(128)` + `List.length(remaining)` per `paint_session` and cards hot path, each fanning to 9 paint call sites. Gated to `Confirm`/`Armed` (`Idle` returns `""`), path ≤1024, remaining ≤7. Pure recomputation of an unchanged string; D96 covers the same-window Session rebuild, not this assembly.
+  - What/why: per-paint re-split of an unchanged path.
+  - Fix direction: memoize the hint per path, recompute only on change.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — per-path memo needs Up.Confirm/Armed shape change.
+  - Status 2026-10-28: OPEN — hint is f(target,path,count); key costs ≈ hint; Up.Confirm/Armed 2-field pinned.
+  - Status 2026-10-28: CLOSED AS INVALID — `upload_hint` renders `(files=1+len(remaining))` (session.bend:2731-2735), so the same path re-offered at different remaining counts renders different text; per-path memoization would serve stale hints. Premise ("unchanged string") factually wrong.
+  - Validated by: eighty-round-4 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: hint still renders identically
+  - [ ] negative test: idle paint performs no split
+  - [ ] regression test: existing session suites still pass
+
+- [x] D185 — `src/bend/wsnet.bend:2032-2040` via `:1214-1217` — Low (per-frame) — fullscreen-open frames build card candidates then discard them
+  - Location: `staged` binds `+cands = cands_open(open, sized(...paint_entries(kept)...))` (`:2039`); `sized` calls `visible_candidates_cards_iso` (`:2012-2014`) and `paint_entries(kept)` is a strict arg, so both evaluate before `cands_open` matches `True{} → Nil{}` (`:1214-1217`). `spawn_ok` also gates on `Bool.not(open)` (`:1223`) yet `enqueue_candidates(cands, kept)` is still built (`:2040`). Session twin gates first (`session.bend:3490-3493`); this wsnet site does not. Novel vs D109 (anchored rebuild, net/cards path).
+  - What/why: full candidate build discarded on fullscreen-open frames.
+  - Fix direction: gate the build on `open` first (the session-twin shape).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/wsnet.bend:2056-2067
+  - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: candidates identical when overlay open
+  - [ ] negative test: fullscreen frame builds no candidates
+  - [ ] regression test: existing wsnet suites still pass
+
+- [x] D186 — `src/bend/wsnet.bend:1503-1514,1471-1479,1423-1424` — Low (bounded, 64 KiB cap) — queued history bytes re-copied and re-measured per write
+  - Location: `offer.go` same-arm builds `WsPend{bytes ++ data, ...}` (`:1508`), O(pending) copy per `write_mark` call (`:1530`); `write_chan.send/go` each walk `String.length` over the blob (`:1473`,`:1479`); drain-accept `suffix_of` walks both blobs plus a `String.drop` (`:1423-1424`). Cap is 64 KiB (`:1382-1383`). Distinct from D90 (`dns.bend` TCP reassembly).
+  - What/why: per-write copy + re-measure of the queue blob.
+  - Fix direction: length-tagged chunks or a single drop pass.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/wsnet.bend:1423)
+  - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: queued bytes flush identically
+  - [ ] negative test: single write performs one measure
+  - [ ] regression test: existing wsnet suites still pass
+
+- [x] D187 — `src/bend/wsnet.bend:1951-1952` vs `session.bend:3490-3494` — Low (narrowed) — `M.maintain` runs twice when media enabled and overlay closed
+  - Location: `session_observe_visible_media(st)` (`:1951`) runs `M.maintain(media, cl)` in its gated arm (`:3494`), then `:1952` runs `M.maintain(session_media(observed), …)` again on the already-maintained state before `take_job_allowed`. When `allowed=False` or `open=True`, `observed` is unmaintained and the second call is the only one. New wsnet call site; D88 lists only `session.bend:3494` + `net.bend:1256-1257`.
+  - What/why: duplicate maintain pass on the enabled+closed path.
+  - Fix direction: maintain once and share the maintained state.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/wsnet.bend:1973)
+  - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: aliveness identical with one maintain
+  - [ ] negative test: disabled path performs no double pass
+  - [ ] regression test: existing wsnet/media suites still pass
+
+- [x] D188 — `src/bend/clock.bend:166-179` via `wsnet.bend:2243-2248` — Low (per-chunk) — `line_stamps` pays one wasted length walk per inbound chunk
+  - Location: `line_stamps.go` terminates structurally on `Nil{}` (`:167-171`) yet `line_stamps` seeds fuel with `List.length(lines)` (`:179`), evaluated unconditionally per `ws_chunk.framed` call (`:2247`). Same disease as D148 (`actor.bend:121`) and D68 (`replay.bend:74`), new unlisted site; distinct from D147 (`Fr.push_ex` re-frame).
+  - What/why: wasted length walk per inbound chunk.
+  - Fix direction: drop the fuel (structural termination already holds).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/clock.bend:178
+  - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: stamping still terminates identically
+  - [ ] negative test: inbound chunk performs no length walk
+  - [ ] regression test: existing wsnet/clock suites still pass
+
+- [ ] D189 — `src/bend/wsnet.bend:2383-2393` + `workspace.bend:1516-1549` — Low (rare, F7-only) — F7 evaluates `cycle_server` twice, discarding one full cycle
+  - Location: `+ws2 = cycle_ws(cycle_server(sized, typed))` (`:2387`) and `+moved = cycle_moved(cycle_server(sized, typed))` (`:2388`) are two strict bindings, each running `find_part.go`, `Drafts.set_cm`/`focus_admits_cm`/`get_cm`, `session_upload_draft` rebuild, and `replace_part.go` spine walk (`workspace.bend:1516-1549`). F7-only, so rare. Distinct from D22 (per-keystroke rebuild).
+  - What/why: duplicate full cycle per F7 press.
+  - Fix direction: bind once, derive both results from the single cycle.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — unfixable per in-code checker rejection (wsnet.bend:2421-2424: Workspace & Bool pair cannot be named and consumed twice).
+  - Status 2026-10-28: OPEN — CONFIRMED-UNFIXABLE: wsnet.bend:2421-2426 affine rejection reproduced on project toolchain.
+  - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: F7 cycles identically
+  - [ ] negative test: single evaluation per press
+  - [ ] regression test: existing wsnet/workspace suites still pass
+
+- [x] D190 — `src/bend/dns_wire.bend:698,753` — Low (bounded) — O(AN × packet) bounds walk
+  - Location: `read_rr` recomputes `U32.from_nat(List.length(pkt))` per call (`:698`) while `walk_an_go` AwLeft→AwGot arm calls `read_rr(pkt, off)` once per answer RR (`:753`) and `pkt` is passed unchanged through the walk, so the full-packet walk re-derives a constant per record. No D-entry or non-finding covers it (D85 is `read_name_go` re-drop, different function).
+  - What/why: per-record full-packet length walk.
+  - Fix direction: hoist the packet length out of the walk.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/dns_wire.bend:758
+  - Validated by: eighty-round-4 workflow dns sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: answers still parse identically
+  - [ ] negative test: multi-RR packet walks once
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D191 — `src/bend/dns_wire.bend:921-922,293-299,534-542,914-919` — Low (bounded) — ~4 hostname walks per response datagram
+  - Location: `parse_q` strictly binds `name_lo(without_root_dot(host))` (`:921-922`) before `parse_hdr(xs)` is examined; `without_root_dot` = `String.reverse` + reverse-back (`:293-299`), `name_lo` = accumulate + `String.reverse` (`:534-542`), all paid even when the header then fails validation (`parse_q_h`, `:914-919`). Reply qname is already lowercased per byte via `lo_byte` (`:531-532`, `:659`). Distinct from D157 (endpoint `/connect` parse, different module/path).
+  - What/why: redundant case/reversal walks before validation.
+  - Fix direction: validate the header first, normalize only on the accept path.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/dns_wire.bend:1017-1032
+  - Validated by: eighty-round-4 workflow dns sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: responses still parse identically
+  - [ ] negative test: invalid header skips normalization
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D192 — `src/bend/dns_wire.bend:239-240,211-212,279,194-199` — Low (bounded) — quadratic query build in label count
+  - Location: `push_lab` = `List.append(acc, …)` per label (`:239-240`); `append` re-walks the whole accumulated prefix each label, and `String.length(lab)` re-walks a label the encoder already walked (`label_ok` `:211-212`, EOk arm `:279`). D66/D76/D132 appends are different modules/paths.
+  - What/why: quadratic query assembly per label.
+  - Fix direction: cons-assemble then reverse once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/dns_wire.bend:271
+  - Validated by: eighty-round-4 workflow dns sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: queries still encode identically
+  - [ ] negative test: multi-label name builds once
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D193 — `src/bend/dns_wire.bend:898-905` — Low (bounded) — strict-`&&` evaluates `String.eq` on numeric mismatch
+  - Location: `parse_q_qs_ok` receives `U32.is_eq(ty,1) && U32.is_eq(cls,1) && String.eq(qname,host)` as one strict argument (`:905`); under the pinned eager-args rule the full string compare evaluates even when qtype/qclass already mismatch. No D-entry covers this site.
+  - What/why: wasted string compare on numeric mismatch.
+  - Fix direction: match numerics first, compare strings only on match.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/dns_wire.bend:974
+  - Validated by: eighty-round-4 workflow dns sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: matching queries still resolve identically
+  - [ ] negative test: mismatched type skips the compare
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D194 — `src/bend/dns_wire.bend:204-212,279,240,194-199` — Low (bounded) — 3 length walks + ascii walk per label
+  - Location: `label_ok` walks `String.length(lab)` (`:212`), EOk arm walks it again for `n2` (`:279`), `push_lab` walks it a third time (`:240`), plus the `ascii_go` character walk (`:194-199`) — four passes over ≤63 chars per label per query. No overlap (D82 is `source_prefix`, different). Note `label_ok` is the same site family as D192's build path; this entry pins the validation-side walks.
+  - What/why: quadruple label walk per query label.
+  - Fix direction: single validating walk returning length + validity.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/dns_wire.bend:204)
+  - Validated by: eighty-round-4 workflow dns sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: labels still validate identically
+  - [ ] negative test: invalid label fails on the first walk
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D195 — `src/bend/links.bend:83-89` — Low (per-row, ~84 rows) — D52-shaped eager `length`+`drop` per alias row on miss
+  - Location: `alias_step`'s `no` is a lazy `Unit->` thunk (`:78-81`), but `yes` is the strict `Some{Alias{text, String.drop(s, String.length(name))}}` (`:87-88`); on a miss (the common case across ~84 rows) the `length`+`drop` walks are computed then discarded. Unlisted in D52's confirmed-open list; distinct from D21 (per-segment table rebuild, fixed).
+  - What/why: wasted walks per alias row on miss.
+  - Fix direction: the D52 Unit-> idiom for the `yes` arm too.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/links.bend:83-99
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: alias still resolves on hit
+  - [ ] negative test: miss performs no length/drop
+  - [ ] regression test: existing links suites still pass
+
+- [x] D196 — `src/bend/view.bend:2616-2625` + `theme.bend:17-21` — Low (per hold check) — `theme_eq` serializes via `Theme.show`+`String.eq`
+  - Location: `theme_eq` compares via `String.eq(Theme.show…)` (`:2625`; `show` builds `"dark"/"light"/"mono"`, `theme.bend:17-21`) instead of a 3-variant structural match. Runs on every hold check via `box_one` (`:2722`) → `box_same` (`:2733`) → `paint_body_of` (`:2774`). Distinct from D64 (preferences_runtime).
+  - What/why: serialization for a 3-way comparison.
+  - Fix direction: structural match on the theme tag.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view.bend:2809-2827
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: theme equality still resolves identically
+  - [ ] negative test: same-theme check performs no build
+  - [ ] regression test: existing view suites still pass
+
+- [x] D197 — `src/bend/theme.bend:175-177,164-173` via `view.bend:3655` — Low (per header paint) — `status_of` strictly binds all palettes and predicates
+  - Location: strictly binds all four palette U32s and all three net predicates (`starts_with`+2×`eq`), then `status_of.on` (`:164-173`) matches `online` first, discarding the rest. One header/status paint (`paint_header`, `view.bend:3655`) always pays 3 string scans plus discarded palette matches.
+  - What/why: wasted scans and matches on the common online path.
+  - Fix direction: match `online` first, bind palettes/predicates per arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/theme.bend:164-190
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: status still resolves identically
+  - [ ] negative test: online path skips the extra scans
+  - [ ] regression test: existing theme/view suites still pass
+
+- [x] D198 — `src/bend/composer_ui.bend:516-523,461-462,346-347` — Low (per probe) — `emoji_ghost.ms` double `emoji_at` plus per-call fuel rebuild
+  - Location: passes both `emoji_at(ms, idx)` and `emoji_at(ms, pick_clamp(idx, n))` as strict args to `emoji_ghost.drop`; the empty-probe hit (common no-ghost case) discards the second O(idx) walk, and each `emoji_at` re-pays a full `length` for fuel (`:461-462` via `emoji_table_fuel`, `:346-347`). Distinct from D78/D98/D138/D62.
+  - What/why: duplicate probe walks plus fuel rebuild per call.
+  - Fix direction: probe once, share the walk and fuel.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/composer_ui.bend:527-541
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: ghost text still resolves identically
+  - [ ] negative test: no-ghost probe performs one walk
+  - [ ] regression test: existing composer suites still pass
+
+- [x] D199 — `src/bend/view.bend:3752-3760,1136-1137,321-329,342-343` + `buffer.bend:1923-1924` — Low (per nick per paint) — roster pane resolves style per nick per paint
+  - Location: `paint_nick_go` (`:3759`) → `paint_nick` (`:1136-1137`, `opt_theme`+`nick_hash` full-nick walk +16-arm `nick_row`) over `nick_strip`'s fueled sigil walk. R visible nicks × (strip+hash+match) per paint; stops at `max_y` but never cached. Distinct from D137 (tab unread walks).
+  - What/why: per-nick style resolution on every paint.
+  - Fix direction: cache the resolved style per roster entry, invalidate on roster change.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:1263)
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: roster still paints identically
+  - [ ] negative test: unchanged roster performs no resolution
+  - [ ] regression test: existing view suites still pass
+
+- [x] D200 — `src/bend/view.bend:811-823,487-488,472-485,399-404,389-394,372` — Low (per row per paint) — double prefix walk + hash per Msg row
+  - Location: `wrap_metrics` walks the `<nick>` prefix via `line_prefix_w`→`msg_prefix_w`→`take_until_gt` (`:768-774`,`:763-766`), then `wrapped_rows.metrics` (`:820-823`) → `line_spans_for` (`:487-488`) → `line_spans_raw` (`:472-485`) → `parse_nick_msg` (`:399-404`) re-walks the same prefix with `take_until_gt` (`:389-394`) plus a `nick_color` hash (`:372`). Two prefix walks + one hash per Msg/Self/Highlight row per paint. No D covers `line_prefix_w`/`msg_prefix_w`.
+  - What/why: repeated prefix parsing per row per paint.
+  - Fix direction: parse the prefix once and share it between metrics and spans.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:861)
+  - Validated by: eighty-round-4 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: rows still wrap identically
+  - [ ] negative test: single-prefix row parses once
+  - [ ] regression test: existing view suites still pass
+
+- [x] D201 — `src/bend/session.bend:3231,3279-3282` + `view.bend:3611-3613,3621-3622` — Low (per-key-frame) — `as_iso` + `paint_entries` built then discarded on no-scroll path
+  - Location: `nav_after` passes `Isupport.as_iso(iso)` and `C.paint_entries(cards)` as strict args (`:3228-3231`); `finish_keys.keyed` routes every key frame through `nav_after` (`:3279-3282`); `view.bend:3611-3613` (`False` arm returns `(cl, Nil{})`, discarding both); gate is `up/dn>0` (`:3621-3622`), so plain typing discards. `as_iso` = 5 projections; `paint_entries.go` walks `ready` (CAP=8). Eager-args rule corroborated in-code. Not D109, D88, D111/D151/D96, or any Non-finding.
+  - What/why: full nav context built then discarded per keystroke.
+  - Fix direction: gate the build on the scroll predicate first.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:3224-3227
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: scroll still navigates identically
+  - [ ] negative test: plain typing builds no nav context
+  - [ ] regression test: existing session suites still pass
+
+- [x] D202 — `src/bend/session_keys.bend:60-62,89-90,77-78,31-32` + `session.bend:675-676,692-694` — Low (per recall step) — recall step walks the ≤64-entry ring 2–3×
+  - Location: `hist_next` binds `length` then `get`-walks (`:60-62`); `step` adds a second `length` (`:89-90`); `prev.at` adds `length` beside `hist_prev` (`:77-78`); `line_at` = `List.get` walk (`:31-32`). `StepStay` walks nothing — claim correctly scoped to recall steps; ring capped at HIST_CAP=64. Distinct from D97 (Drafts spine), D98 (menu/emoji lengths, different fn), D99 (Enter scan), D44 (recall data-loss correctness), D142/D143 (law-coverage gaps).
+  - What/why: repeated ring walks per recall step.
+  - Fix direction: single index pass returning the entry.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/session_keys.bend:60-62,89-90,77-78,31-32
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: recall still lands identically
+  - [ ] negative test: recall step performs one walk
+  - [ ] regression test: existing session_keys suites still pass
+
+- [x] D203 — `src/bend/buffer.bend:2128-2147,2441-2449,2421-2429` + `session.bend:2591-2596` — Low (per tab/click) — same-index install rebuilds `Client` with no guard
+  - Location: `set_active_cm` unconditionally rebuilds + evaluates `nth_buf` fetch walk (`:2128-2132`); clamp only bounds-checks, no `i==active` guard (`:2137-2147`); 1-buffer `cycle_next.i` returns 0 = active, still rebuilds (`:2421-2429`); cycle paths vs `TabStay` (`:2476-2479`, which correctly returns `cl`); click path funnels into same clamp (`session.bend:2591-2596`). Fix is behavior-safe: active buffer never accrues unreads. Nuance: at index 0 the ledger walk is skipped — fetch walk + rebuild waste remains. Not D22, D161, or D56.
+  - What/why: full rebuild on a no-op install.
+  - Fix direction: `i==active` guard returning `cl` unchanged.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/buffer.bend:2237)
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: tab/click still installs identically
+  - [ ] negative test: same-index install performs no rebuild
+  - [ ] regression test: existing buffer suites still pass
+
+- [x] D204 — `src/bend/session.bend:1237-1246,1181-1194,699-700,1212-1220,3254-3258` — Low (per Tab) — each Tab step rebuilds candidates then adds `length` + `get` walks
+  - Location: active: build + `length` + `comp_pick` (`:1237-1240`); fresh: second build + second `length` (`:1242-1246`); `comp_pick.on` → `str_get` indexed walk (`:1181-1194`, `:699-700`); build = 43 slash rows or roster walk (`:1212-1220`); reached per Tab via `KeyCycle` (`:3254-3258`). Outer-step walks are a distinct layer from D94/D95 (matcher-internals eager tails) and D138 (composer-side table).
+  - What/why: candidate rebuild plus walks per Tab step.
+  - Fix direction: build once per Tab, share across active/fresh arms.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:1254)
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: Tab completion still resolves identically
+  - [ ] negative test: single Tab performs one build
+  - [ ] regression test: existing session suites still pass
+
+- [x] D205 — `src/bend/view.bend:2383-2388,1594-1600,2505-2527,2776-2808` — Low (per scroll step) — parked scroll step pays `length` + `viewport_end` + `row_anchor_at`
+  - Location: `moved_anchor`: own `length` (`:2384`), `viewport_end` (`:2385`), `row_anchor_at` (`:2381` via pick); `viewport_end` re-lengths + parked-only `anchor_end` (`:1594-1600`, D31 fix verified present at `:1589-1592`); `scroll_hold.anchored` adds `scroll_cover` = length-fuel find + second `anchor_end` (`:2505-2527`); reached on real scroll steps (`:2776-2808`). The `:2376-2377` comment documents only pick-laziness, not the duplicate `length`. Distinct from D80 (`scroll_hold.of`), D139 (`shift_anchor`), D31/D32 (fixed other gates).
+  - What/why: triple length/anchor walk per scroll step.
+  - Fix direction: thread one length/anchor computation through the step.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:1757)
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: scroll anchor lands identically
+  - [ ] negative test: single scroll step performs one walk
+  - [ ] regression test: existing view suites still pass
+
+- [x] D206 — `src/bend/split.bend:351-356,342-343,177-178` + `buffer.bend:1102-1121,2128-2132` — Low (per F6 flip) — flip pays find-walk + fetch-walk + unread walk
+  - Location: `toggle_cm` (`:351-356`, `Off` arm walk-free) → `named_idx_cm` spine find-walk (`:342-343` → `:177-178` → `buffer.bend:1102-1121`, ≤16), then `set_active_cm` second `nth_buf` fetch + ledger walk + rebuild (`buffer.bend:2128-2132`). Toggle target necessarily differs from active (panes distinct), so the install itself is load-bearing — the residual is strictly the doubled spine walk, fixable by one index+buffer pass. Distinct from D161 (`follow_active` path).
+  - What/why: doubled spine walk per F6 flip.
+  - Fix direction: single index+buffer pass.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/split.bend:351-356,342-343,177-178
+  - Validated by: eighty-round-4 workflow nav sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: F6 flip installs identically
+  - [ ] negative test: flip performs one spine walk
+  - [ ] regression test: existing split suites still pass
+
+- [x] D207 — `src/bend/notify.bend:485-490` via `session.bend:5000-5009,5103-5108,4937-4938,5075-5080` — Low (per-chunk) — plain steps rebuild the durable claim set ~3×len(stored) per chunk
+  - Location: `session.bend:5004,5107` (`claim_union_floor` unconditional), `:5008-5009` (plain steps pass `Nil{}`), `notify.bend:468-490` (prune walk + `append` rebuild + `take` rebuild; `claim_fresh(Nil,·)` free but the other three stand), plus a second prune at exits (`session.bend:4937-4938,5075,5080`). No D covers `claim_union*`; in-code comment (`:452-459`) documents the cap, not the per-chunk rebuild.
+  - What/why: repeated durable-set rebuild per chunk.
+  - Fix direction: skip the union/prune when the claim set is empty.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:529
+  - Validated by: eighty-round-4 workflow notifyio sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: claims still union identically
+  - [ ] negative test: empty-claim chunk performs no rebuild
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D208 — `src/bend/notify.bend:152-164,402-403` — Low (per admitted event) — `fresh` walks the ≤8-scope mark list twice
+  - Location: `admitted` → `is_known` → `hi_of.go` walk 1 + `room_for` length (`:144-153`); `fresh.ok` True arm calls `hi_of` again on identical scope/st (`:158-164`); invoked per event (`:402-403`). SCOPE_CAP bound (`:44-45`) caps cost but does not document the duplicate walk.
+  - What/why: duplicate scope-list walk per admitted event.
+  - Fix direction: thread the first lookup result into the True arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:163
+  - Validated by: eighty-round-4 workflow notifyio sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: freshness still resolves identically
+  - [ ] negative test: admitted event performs one walk
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D209 — `src/bend/notify.bend:339-361,326-327` — Low (bounded, ≤8) — queue ops walk the ≤8-list 2–3× each
+  - Location: `List.length` fullness test (`:344-347`) + `List.append` re-walk (`:339-342`); `drain_all` → `queue_len` length walk + `List.drop` + `List.take` (`:360-361`, `:352-355`). Bounded by `QUEUE_CAP` (`:326-327`), correct — redundant passes only.
+  - What/why: repeated short-list walks per queue op.
+  - Fix direction: single pass returning fullness + the updated queue.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:359,388
+  - Validated by: eighty-round-4 workflow notifyio sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: queue behavior identical
+  - [ ] negative test: single op performs one walk
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D210 — `src/bend/notify.bend:410-411,397-403,277-280` + `notify_io.bend:140-141,128-138` — Low (per-chunk) — disabled notify still pays full sort; `run_jobs` wastes a length walk
+  - Location: `sort_events(events)` is a strict fold arg (`:410-411`) even though `stage_send` False arm discards it (`:397-403`) and `stage_step.ev` checks `enabled` per event but after sort (`notify.bend:277-280` insertion sort); both `deliver` arms stage unconditionally (`session.bend:4987-4994`, `5108-5109`); only gate is helper-deliverability (`notify_io.bend:219`). Separately, `run_jobs.go` matches `Nil{}` first (`notify_io.bend:128-138`) yet fuel = `List.length(jobs)` (`:140-141`) — pure waste (jobs ≤ `QUEUE_CAP` 8). Not D86 (per-insert tail) or D110 (collect cutoff). Independently confirmed by both the notifyio and iobatch lanes.
+  - What/why: full sort + fuel walk on paths that discard the result.
+  - Fix direction: gate the sort on `enabled` first; drop the fuel walk.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:442
+  - Validated by: eighty-round-4 workflow notifyio sweep + fresh sceptic (CONFIRMED) + independently confirmed by iobatch lane + parent-cited regions.
+  - [ ] positive test: enabled notify still sorts identically
+  - [ ] negative test: disabled chunk performs no sort
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D211 — `src/bend/notify_io.bend:47-48,79-83,136,165-176` + `notify_io.bend:41-42,36-39` — Cosmetic (≤8 jobs) — helper basename re-split N+1 times per handoff
+  - Location: `known_helper` → `base_of` split #1 (`:47-48`); gate calls it (`:165-176`); `args_for` per job (`:136`) → `args_for.base` → `base_of` re-split per job (`:79-83`); `base_of` = `split` + `base_last.go` (`:41-42`, `:36-39`). Same short string, ≤8 jobs. Independently confirmed by both the notifyio and iobatch lanes (bound correction: the queue cap is `QUEUE_CAP()=8n`, same value as `SCOPE_CAP`).
+  - What/why: repeated basename derivation per handoff.
+  - Fix direction: resolve once per handoff and thread it through.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify_io.bend:132
+  - Validated by: eighty-round-4 workflow notifyio sweep + fresh sceptic (CONFIRMED) + independently confirmed by iobatch lane + parent-cited regions.
+  - [ ] positive test: helper resolution identical
+  - [ ] negative test: handoff performs one split
+  - [ ] regression test: existing notify_io suites still pass
+
+- [x] D212 — `src/bend/history_io.bend:309,293-298,236-237` — Low (bounded) — double `U32.to_nat(size)` + ~64K× fuel over-provision
+  - Location: `read_loop.mode(1n+U32.to_nat(size), …, U32.to_nat(size))` builds two strict-arg unary Nats; `read_loop.mode` (`:293-298`) consumes one fuel per `hist_read_chunk()=65536n` read (`:236-237`). Distinct from D112 (cap value, other sites) and D117 (replay file).
+  - What/why: doubled conversion plus ~64K× fuel over-provision.
+  - Fix direction: convert once, seed fuel in chunk units.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_io.bend:293-306 (single U32.to_nat shared by fuel+remaining)
+  - Validated by: eighty-round-4 workflow iobatch sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: reads still terminate at EOF
+  - [ ] negative test: conversion happens once
+  - [ ] regression test: existing history suites still pass
+
+- [x] D213 — `src/bend/history_search_io.bend:195,189,36-37,173` — Low (bounded) — double `U32.to_nat(size)` + ~4K× fuel over-provision
+  - Location: `search_size.over(Nat.is_gt(cursor, U32.to_nat(size)), f, U32.to_nat(size), …)` evaluates two strict conversions (`:195`); `:189` seeds `search_loop(1n+size, …)` consuming one fuel per `SCAN_CHUNK()=4096n` read (`history_search.bend:36-37`, `:173`). Distinct from D67 (whole-String materialization) and D130 (pure-module scan fuel). Precision note: only the second Nat is retained across the scan; the `is_gt` one is transient — core waste stands.
+  - What/why: doubled conversion plus ~4K× fuel over-provision.
+  - Fix direction: convert once, seed fuel in chunk units.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_search_io.bend:192-201 (search_size.sized shares one U32.to_nat)
+  - Validated by: eighty-round-4 workflow iobatch sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: search still scans the full range
+  - [ ] negative test: conversion happens once
+  - [ ] regression test: existing search suites still pass
+
+- [x] D214 — `src/bend/history_io.bend:257-277` + `history.bend:627-633` — Low (per 64 KiB chunk) — 3 walks per chunk
+  - Location: `:277` emptiness `List.length`, `:272` drop-sizing `List.length`, `:260` `List.length(rest)` inside `spent`; `scan_chunk`-independent overhead before the per-byte `read_walk` (`history.bend:627-633`). Distinct module/callsite from D68.
+  - What/why: triple walk per chunk before the byte scan.
+  - Fix direction: single emptiness/size computation per chunk.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/history_io.bend:254)
+  - Validated by: eighty-round-4 workflow iobatch sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: chunks still scan identically
+  - [ ] negative test: empty chunk performs no walk
+  - [ ] regression test: existing history suites still pass
+
+- [x] D215 — `src/bend/history_search_io.bend:156-166` + `history_search.bend:299-302` — Low (per 4 KiB chunk) — 2 walks + unary `Nat.sub` per chunk
+  - Location: `:166` emptiness length, `:160` `Nat.sub(remaining, List.length(bytes))`; `scan_chunk` is structural-`Nil`-terminated (`history_search.bend:299-302`), so no walk is needed. Distinct site from D68/D148.
+  - What/why: wasted walks per chunk on a structurally-terminating loop.
+  - Fix direction: drop both walks.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_search_io.bend:156-166 (bounded per-chunk loop with fuel+remaining accounting)
+  - Validated by: eighty-round-4 workflow iobatch sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: chunks still scan identically
+  - [ ] negative test: empty chunk performs no walk
+  - [ ] regression test: existing search suites still pass
+
+- [x] D216 — `src/bend/upload_io.bend:23-33,9` + `helper_io.bend:6-7` — Low (bounded, stderr ≤2048) — eager envelope build on every error path
+  - Location: `String.eq(stderr, HTTP_PREFIX() ++ U32.show(status) ++ ")\n")` is a strict `&&`/`Bool.pick` arg (`:27-28`), evaluated even when `U32.is_eq(code, 5)` is false per the pinned eager rule (`links.bend:76-77`); stderr bounded by `out_cap=2048` (`spec()` `:9`, `helper_io.bend:6-7`). Unlisted in D52; distinct file from D89 (`upload.bend`).
+  - What/why: envelope built even when the comparison discards it.
+  - Fix direction: match the code first, build the envelope only on the path that needs it.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload_io.bend:23
+  - Validated by: eighty-round-4 workflow iobatch sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: error output identical
+  - [ ] negative test: non-matching code builds no envelope
+  - [ ] regression test: existing upload_io suites still pass
+
+- [x] D217 — `src/bend/history_io.bend:309` — note: same site as D212, filed once
+  - Filed once as D212 above; the errors-lane C5 and iobatch-lane C1 independently confirmed the identical mechanism at the identical lines, so this number is intentionally left as a pointer, not a second entry. (Numbering reserves D217 to keep the D163+ sequence gap-free for tooling that counts headers.)
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_io.bend:298-300 (single U32.to_nat shared by fuel+remaining; same site as D212)
+
+## Round 4 non-findings (explicitly falsified, not filed)
+
+- [x] Confirm no ticket filed: `src/bend/buffer.bend:1787-1791` per-row `log_id` scan — duplicate of D10 per fresh sceptic: exact fold, same lines, same 16×2×1024 bound, already resolved VERIFIED/documented-accepted with in-code documentation at `buffer.bend:1774-1775`; the "seq already dominates" premise is falsified by the documented rewind case at `buffer.bend:1752-1753`, and the restore path uses `noted` WITH the scan (`history.bend:452`), not `1n+seq`.
+- [x] Confirm no ticket filed: `src/bend/view.bend:2839-2844` roster `status_of.buf` rebuild — consequence false on the common path per fresh sceptic: the sole src caller is the split path (`view.bend:4050`); single-pane paint never builds it. The genuinely per-frame piece (`user_host_label`, `view.bend:224-226`) is a short concat with no roster walk. D137 already covers the per-paint tab double-scan.
+- [x] Confirm no ticket filed: `src/bend/dns_wire.bend:584-588` eager `rnd2` — consequence false per fresh sceptic: production dials never execute `resolve_ns_go` (`actor.bend:1160,1255` → `dial_dual`), whose `Done` arm is the only discarder; the sole production RNG consumers are single per lookup. The location is simply not live (test/demo callers only).
+
+## Round 5 — 2026-10-26 residual review (10 parallel lanes + sceptical validation)
+
+Method: ten residual lanes (cards pipeline, typing state, framer, feed paths, message chunks, theme, upload, native FFI, failure paths, startup) that first read D1–D217 plus all round-1–4 Non-findings and skipped filed/falsified ground; each candidate independently re-read and CONFIRMED/REJECTED by a fresh-context sceptical validator. Analysis only: no code touched, all items OPEN.
+
+- [x] D218 — `src/bend/cards.bend:68` — Low (per styled run) — eager `previous ++ text` built then discarded
+  - Location: `targets_go` `None{}` arm passes `Bool.pick(String, U32.is_eq(attrs,0), previous ++ text, "")` as a strict arg (`:62-68`). Same D87 disease, unlisted cards-file site (D87 pins only `media.bend:86-91`; D52 list has no cards site).
+  - What/why: wasted append per styled run on the miss path.
+  - Fix direction: the D52 Unit-> idiom for the discard arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cards.bend:62
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: styled run still yields the URL
+  - [ ] negative test: unattributed run performs no append
+  - [ ] regression test: existing cards suites still pass
+
+- [x] D219 — `src/bend/cards.bend:548-552` — Low (per scan tick) — `visible_rows` appends head ahead of the recursively built tail
+  - Location: `List.append(&2, Candidate, visible_line(...), visible_rows(tail))` — O(V²) assembly per scan tick. Distinct from D140 (`view.bend` `visible_bottom`, different function/path).
+  - What/why: quadratic candidate assembly.
+  - Fix direction: cons-assemble then reverse once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cards.bend:616
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: visible rows identical
+  - [ ] negative test: empty set performs no append
+  - [ ] regression test: existing cards suites still pass
+
+- [x] D220 — `src/bend/cards.bend:279-289` — Low (bounded, CAP=8) — `newest` sorts all candidates then quadratic `dedup` before `take`
+  - Location: `candidate_has` per-element full scan (`:272`), `dedup.keep` (:274-284), `List.take(..., dedup(List.sort(...), ...), CAP())` (`:289`; `CAP()=8n` at `:13-14`). No D-entry covers cards `newest` (D53/D58/D76/D132 are other modules).
+  - What/why: sort everything then quadratic dedup for 8 survivors.
+  - Fix direction: bounded top-K selection with dedup during insertion.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cards.bend:323-327
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: newest set identical
+  - [ ] negative test: under-cap set skips the sort
+  - [ ] regression test: existing cards suites still pass
+
+- [x] D221 — `src/bend/cards_net.bend:131-133` × `src/bend/session.bend:3550-3552` — Low — `C.maintain` runs twice per cards stage on the same just-maintained state
+  - Location: `gated` `False{}` arm binds a maintain pass, then `cards_net` runs `C.maintain` again on the same state before `take_job_allowed`; idempotent second pass over (P+R≤16)×(B≤16)×(L≤1024). Distinct from D88 (media pair), D187 (wsnet media), D109 (anchored rebuild + `maintain_full`).
+  - What/why: duplicate aliveness pass per cards stage.
+  - Fix direction: maintain once and share the maintained state.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/cards_net.bend:130)
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: aliveness identical with one pass
+  - [ ] negative test: unchanged stage performs no second pass
+  - [ ] regression test: existing cards/net suites still pass
+
+- [x] D222 — `src/bend/view.bend:1203-1217` fed by `src/bend/cards.bend:518-520` + `src/bend/net.bend:175` — Low (per paint) — `paint_entries` rebuilt from scratch per paint, then per-row walk
+  - Location: `paint_card_go` cons-case appends `paint_card_hit(...)` + recursion; `paint_cards_for.on` zero-gate; `paint_entries.go` over `ready`; per-paint `C.paint_entries(cards)`; per-row `paint_append_cards`. No D-entry covers the card paint scan (D201 is the nav-path discard, different site).
+  - What/why: full rebuild plus per-row walk per paint.
+  - Fix direction: memoize the paint list per ready-set, share across rows.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:1346)
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: cards still paint identically
+  - [ ] negative test: unchanged ready set performs no rebuild
+  - [ ] regression test: existing view/cards suites still pass
+
+- [x] D223 — `src/bend/cards.bend:229-230` + `:238-240` — Low (bounded) — `enqueue.on` builds `ready_without` discarded for manual targets; `eligible` evaluates walks even at cap
+  - Location: `Bool.pick(..., manual(target), ready_without(ready,...), ready)` at `:230` (strict, discarded for manual); strict `&&` chain at `:238-240` over `length`/`active_has`/`request_has`/`ready_has` walks (`:188-191`,`:207-210`). Bounded (`CAP()=8n`). Unlisted D52-family site (D89 is the upload module).
+  - What/why: discarded build plus walks past a full cap.
+  - Fix direction: match manual/cap first, skip the builds.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cards.bend:233
+  - Validated by: eighty-round-5 workflow cards sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: enqueue still admits identically
+  - [ ] negative test: manual target skips the build
+  - [ ] regression test: existing cards suites still pass
+
+- [x] D224 — `src/bend/session.bend:219-230` — Low (dead code) — `fold_typing_step` trio has zero callers
+  - Location: defs plus internal self-uses (`.line`→`.fed` at :225, base→`.line` at :230); zero callers in `src/`, `tests/`, `LAWS.bend`, `PROOF.bend`. Live path threads typing directly via `live_step.registered[_with]`. No DEFECTS entry covers it (D150 is `hold_cmd`, different function). Dead surface only.
+  - What/why: dead code; confusion only.
+  - Fix direction: delete the trio.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend (zero fold_typing_step references repo-wide; trio deleted)
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: typing still flows identically
+  - [ ] negative test: no caller references removed defs
+  - [ ] regression test: existing session suites still pass
+
+- [x] D225 — `src/bend/session.bend:2896-2899` — Cosmetic (dead split) — `drop_changed` both arms return `True{}`
+  - Location: both arms return `True{}`; `restored` routes the `True` arm through it and the `False` arm around it; net effect `tchanged || reaped`. Same disease as D2/D72/D134/D136, unlisted site.
+  - What/why: dead dispatch; confusion only.
+  - Fix direction: delete the dispatch.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend (zero drop_changed references repo-wide; dead split deleted)
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: restore behavior unchanged
+  - [ ] negative test: no caller references removed dispatch
+  - [ ] regression test: existing session suites still pass
+
+- [x] D226 — `src/bend/typing.bend:127-135` — Low (bounded, MAX_TYPERS=32) — `upsert`/`upsert_cm` pay a redundant second scan on miss
+  - Location: `+existed = has_entries(...)` (walk 1) and `+rest = remove_one(...)` (walk 2) are strict bindings, so both always run; on miss `remove_one` provably removes nothing yet returns a rebuilt equal list, followed by `List.length` + `List.append`. Unlisted in D52; D103/D162 are `join_plan`.
+  - What/why: duplicate walk on the miss path.
+  - Fix direction: match on existence first, single walk per arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/typing.bend:141
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: upsert still inserts identically
+  - [ ] negative test: miss performs one walk
+  - [ ] regression test: existing typing suites still pass
+
+- [x] D227 — `src/bend/typing.bend:39-51` — Low — `has_entries[_cm]` defeat their own early exit
+  - Location: `entry_is(h,…) || has_entries(t,…)` — under the pinned strict-operator rule the tail evaluates even on a head hit. Per-step cost: `entry_is` = two `Irc.ieq` (each `to_upper` + full rewalk). Unlisted D52 shape; no `typing.bend` site on the confirmed-open list.
+  - What/why: defeated early exit plus folds per step.
+  - Fix direction: short-circuit match with lazy tail.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/typing.bend:39
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: membership still resolves identically
+  - [ ] negative test: head hit skips the tail walk
+  - [ ] regression test: existing typing suites still pass
+
+- [x] D228 — `src/bend/session.bend:4163,4174,4498` via `typing.bend:381-386` + `buffer.bend:1102-1121,64-65` — Low (per admitted line) — `retain_client_cm` runs per admitted line plus once more per chunk
+  - Location: `live_step.flushed[_with]` runs `Ty.retain_client_cm` per fed line; `registered[_with]` runs it per unclaimed line; `step_chunk_got` runs it again per chunk. Per pass: full T-entry walk (`:381-386`) × `buf_find_cm` (≤16 buffers) × `buf_eq_cm` double `fold_casemap`. D59 counts parses only and explicitly excludes scans; D74 covers only the batch pre-check; D154 covers strip/re-splits, not this fan-out.
+  - What/why: repeated buffer fan-out per line plus per chunk.
+  - Fix direction: retain once per flush, share the result with the chunk pass.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:4239)
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: retention identical with one pass
+  - [ ] negative test: unclaimed line performs no extra pass
+  - [ ] regression test: existing session suites still pass
+
+- [x] D229 — `src/bend/session.bend:3147-3149` + `src/bend/net.bend:671-674` — Low (per Cont frame) — D104's double build fires per Cont frame, not just per 1 Hz tick
+  - Location: double-eval re-verified (`live_composing` evals `out_target_ok`; `step_out_cm` passes `online && tags_ok && out_target_ok(target)` strictly). Frequency escalated: `frame_tick_typing` `Cont` arm unconditionally steps `session_tick_typing` (`:3147-3149`, with strict `active_buf` arg), and `frame_result.halt` reads the clock and steps on every non-halt frame (`net.bend:671-674`). Distinct from D104 (the 2×-eval itself) and D151 (the per-frame `merge_typing_outs` append).
+  - What/why: per-frame double build on top of the per-tick one.
+  - Fix direction: gate the Cont-frame evaluation on actual typing activity.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — OUT-OF-SCOPE: needs session.bend/chunk shapes.
+  - Status 2026-10-28: OPEN — typing gate freezes sent_ms, breaks G6.5/G6.6; append already Nil-gated via D151.
+  - Status 2026-10-28: CONFIRMED — step_out.idle stamps now_ms every call (cap_notify.bend:534-537); gating the Cont tick freezes sent_ms on idle/invalid-scope frames, emitting extra 3s active-refresh wires on reachable composing+live spans and breaking G6.5/G6.6 seen-bit semantics.
+  - Status 2026-10-28: CLOSED AS INVALID — the stamp/send split is vacuous: every idle/invalid-scope path in the step_out family already emits Nil (cap_notify.bend:534-537,564-567,589-592), and every remaining idle-tick wire is law-pinned (done-on-clear LAWS.bend:1107-1109, done-to-old, 3s refresh g6_live_tick_cm_throttle_ok session.bend:5361, frame-merge g6_live_merge_owner LAWS.bend:1139-1141, G6.5/G6.6 LAWS.bend:1112-1115,1580-1583). There is no unpinned wire to skip and the residual step cost is required computation.
+  - Validated by: eighty-round-5 workflow typing sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: typing still builds identically when active
+  - [ ] negative test: idle Cont frame skips the build
+  - [ ] regression test: existing session/net suites still pass
+
+- [x] D230 — `src/bend/frame.bend:412` + `:347-358` — Low (per input byte) — unary limit check on the hot path
+  - Location: `step_mode`'s Normal arm passes `Nat.is_ge(n, LINE_OCTET_MAX())` as a strict argument on every input byte, before `step_normal` consumes `over` only in its arm. Each byte re-walks the unary counter against the 510-cell limit — ~130k unary steps per full octet line. Not in D34 (fixed thunks), D83 (encode arms), D168 (decode fallback), D147 (double frame pass).
+  - What/why: per-byte unary comparison on the hot path.
+  - Fix direction: gate the limit check on the overlong arm only.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/frame.bend:528-543
+  - Validated by: eighty-round-5 workflow framer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: overlong lines still rejected identically
+  - [ ] negative test: in-limit byte performs no limit walk
+  - [ ] regression test: existing frame suites still pass
+
+- [x] D231 — `src/bend/frame.bend:423-424` × `:461-462` — Low (per chunk boundary) — triple walk of `rem` with zero progress
+  - Location: `finish.out` reverses `rem` to forward order on every `push_ex` return; the next chunk's `reopen_keep` reverses it back and re-walks it (`reverse` + `payload_n` = `List.length`). Three full passes over the ≤511-octet remainder per boundary with no progress. Distinct from D168 (decode fallback) and D116 (replay batching).
+  - What/why: repeated forward/backward walks of the same remainder.
+  - Fix direction: keep one orientation across the boundary.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — orientation pinned by forward goldens + frame.bend:603-605 pin.
+  - Status 2026-10-28: CLOSED AS INVALID (tickoff): forward rem orientation is specified behavior — frame.bend:566 finish.out emits forward rem, :603-605 pin comment keeps it, :613-619 reopen_keep uses a single reverse-and-count pass; goldens push (rem=112,97,114,116,105,97,108 forward) + hold_cr (rem=97,98,13 forward) at tests/bend/frame_demo.bend:62,81; LAWS.bend:346 framer_roundtrip + PROOF.bend:320 counterpart; consumers actor.bend:168 reader_frame_answer, session.bend:4710 frame_chunk, replay.bend:32 all take forward rem; test-frame green fresh.
+  - Validated by: eighty-round-5 workflow framer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: chunk boundaries frame identically
+  - [ ] negative test: boundary performs no redundant walk
+  - [ ] regression test: existing frame suites still pass
+
+- [x] D232 — `src/bend/frame.bend:295-296` — Low (per emitted line) — full sanitize pass at frame time
+  - Location: sanitize pass runs per emitted line at frame time rather than once at ingest. Unlisted site (D34/D83/D168 cover other frame paths).
+  - What/why: repeated sanitize on already-clean lines.
+  - Fix direction: sanitize once at ingest, trust downstream.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — sanitize-at-emit must stay; removal changes wire dispatch.
+  - Status 2026-10-28: CLOSED AS INVALID (tickoff): emit sanitize is load-bearing — frame.bend:420-421 emit_line wraps line_from_octets in Irc.sanitize_keep_style; irc.bend:447-449 is_c0_drop (drop C0 except SOH, drop DEL), :762 sanitize_keep_style, :1427-1441 pong_for/parse PING pre-dispatch, :746-750 strip_ctl; c0 goldens c0_us + c0_hostile_stripped at tests/bend/frame_demo.bend:105-113; test-frame green fresh.
+  - Validated by: eighty-round-5 workflow framer sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: emitted lines identical
+  - [ ] negative test: clean line performs no sanitize pass
+  - [ ] regression test: existing frame suites still pass
+
+- [x] D233 — `src/bend/client.bend:87-89` + `:151-156` — Low (per ACTION) — strip pays drop plus two full-body reverses
+  - Location: `action_text.fin` reverses `rest`, then reverses the tail again in the SOH arm, on top of the 8-char `is_action` prefix check; `write.msg` calls it on the `act` arm. No D-entry covers `action_text` (D163 covers only the `is_mentions` matcher internals).
+  - What/why: repeated full-body reversals per ACTION message.
+  - Fix direction: single strip without re-reversal.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/client.bend:87)
+  - Validated by: eighty-round-5 workflow feed sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: ACTION text still strips identically
+  - [ ] negative test: non-ACTION path unchanged
+  - [ ] regression test: existing client suites still pass
+
+- [x] D234 — `src/bend/client.bend:842-845` via `:809-812` + `irc_commands.bend:237-240` — Low (per non-resident MODE) — strict args evaluated before the `None{}` discard
+  - Location: `feed_mode.params(...)` and `wire_find_with(...)` are strict args evaluated before `feed_mode.got` matches; the `None{}` arm discards the `mode_has_key` walk, the `has_hidden` join+contains, and the full `buf_find_cm` spine scan. Residency-first gating is valid. Distinct from D164/D158/D177/D47.
+  - What/why: full walks discarded on the miss path.
+  - Fix direction: match residency first, walk only on hit.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/client.bend:927-935
+  - Validated by: eighty-round-5 workflow feed sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: resident MODE still resolves identically
+  - [ ] negative test: miss performs no walk
+  - [ ] regression test: existing client suites still pass
+
+- [x] D235 — `src/bend/client.bend:561-564` + `buffer.bend:1577-1578,2282-2293` — Low (per nick rename) — one rename pays three full spine passes
+  - Location: `feed_nick_with.map` per-buffer roster scan+log; `stamp_logs`/`stamp_bufs` full re-fold; `coalesce_bufs` re-walk with `List.sort`; plus `rename_unreads` and `buf_find_cm` focus probe. D12/D56/D57 pin only inner primitives, not this composition.
+  - What/why: repeated full passes per rename.
+  - Fix direction: single fold producing roster, stamps, and coalescing together.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/client.bend:570)
+  - Validated by: eighty-round-5 workflow feed sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: rename still applies identically
+  - [ ] negative test: single-buffer rename performs one pass
+  - [ ] regression test: existing client suites still pass
+
+- [x] D236 — `src/bend/client.bend:240-242` — Low (per message, notices off) — strict `&&` evaluates scans discarded by the outer check
+  - Location: `notice && (ieq... || (ieq... && ...))` is passed as a strict arg to `to_server.on`, so with `notice=False` the two `ieq` scans (~4 walks each) and two `buf_eq_cm` double-folds evaluate and are discarded. Distinct from D158 (the `notify_event` double-eval).
+  - What/why: wasted scans on the common notices-off path.
+  - Fix direction: match `notice` first, evaluate the conjunction only when true.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/client.bend:253-263
+  - Validated by: eighty-round-5 workflow feed sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: notice path still classifies identically
+  - [ ] negative test: notices-off message performs no scan
+  - [ ] regression test: existing client suites still pass
+
+- [x] D237 — `src/bend/drafts.bend:561-562` + `session.bend:3788-3789,3816-3820` + `submit.bend:230-233,291-294,324-325` + `drafts.bend:601-606,728-737` — Low (per multiline Enter) — same text split 3×, each line probe-chunked up to ~5×
+  - Location: three whole-text `split_lines` on identical `typed` along the RouteMulti path (`Drafts.route`, `hist_after_typed`, `multiline_quad_echo.gated`); per-line probes then stack: history gate `multiline_sensitive.go` → `message_sensitive` → `Chunks.split`, plan `plan_line` probe+real, send `send_text_gated` probe+real. Sharing is sound (all layers use `notice=False{}` on this path). Distinct from D100/D124/D126/D236 (single-send rescans, they do not cover the triple whole-text split or the probe stacking).
+  - What/why: repeated whole-text splits plus per-layer probe chunking per multiline Enter.
+  - Fix direction: split once per Enter and thread the lines; share one probe verdict per line across layers.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/drafts.bend:619)
+  - Validated by: eighty-round-5 workflow chunks sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: multiline Enter emits identical wire
+  - [ ] negative test: single-line Enter performs one split
+  - [ ] regression test: existing drafts/submit suites still pass
+
+- [x] D238 — `src/bend/drafts.bend:760-772` — Low (narrowed) — reject-reason reporting re-derives the bad line's verdict a third time
+  - Location: `reject_reason.bad` re-runs `strip_ctl`/`target_name`/`text_valid`; `reject_reason.cause` re-runs `message_sensitive` (third `Chunks.split` probe) on the single bad line `first_bad` already planned, plus a second `any_command` scan. Carve-out: the `plan_each`+`first_bad` double-plan is D124's filed mechanism — only this third-round re-derivation is new (no D-entry cites `:742-772`; `first_bad` returns just the line, not the cause).
+  - What/why: redundant third verdict derivation per rejected line.
+  - Fix direction: thread the planned verdict into the reason reporter.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/drafts.bend:755)
+  - Validated by: eighty-round-5 workflow chunks sweep + fresh sceptic (CONFIRMED, narrowed) + parent-cited regions.
+  - [ ] positive test: rejection reasons still report identically
+  - [ ] negative test: planned line performs no re-derivation
+  - [ ] regression test: existing drafts suites still pass
+
+- [x] D239 — `src/bend/message_chunks.bend:29,24,16` + `irc.bend:1223-1231` — Low (per accepted cluster) — `piece` recomputes the cluster size 3–4×
+  - Location: `utf8_len(text)` at `:29` (check) again at `:24` (fits test) again at `:16` (fits arm), plus `String.length(text)` at `:16`; each `utf8_len` is a full per-char walk. Count corrected to 4 walks (claim conservative). No D-entry covers `message_chunks` internals (D100 cites only `:43-45` as walk-cost evidence).
+  - What/why: repeated size recomputation per accepted cluster.
+  - Fix direction: compute the size once per cluster and thread it through.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/message_chunks.bend:13
+  - Validated by: eighty-round-5 workflow chunks sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: chunking still splits identically
+  - [ ] negative test: accepted cluster performs one size walk
+  - [ ] regression test: existing message_chunks suites still pass
+
+- [x] D240 — `src/bend/view.bend:342-343,899-907,938-946,991-1004` + `theme.bend:131-135,91-129` + `view.bend:321-329` — Low (per themed chat row per paint) — themed rows repeat the hash-plus-16-arm cost
+  - Location: `nick_color_themed(id,nick) = Theme.nick_row(id, U32.and(nick_hash(nick),15))`; both `body_themed` twins; `parse_nick_msg_themed`/`parse_nick_act_themed`; production reachability via `state_typing_media_iso_themed` + frame entry. Not a dup: D200 covers only the unthemed sites; D199 cites `:342-343` only as the def behind roster-pane `paint_nick` (chat rows vs roster).
+  - What/why: full hash plus match per themed row per paint.
+  - Fix direction: cache the resolved color per nick per frame.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:1263)
+  - Validated by: eighty-round-5 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: themed rows still color identically
+  - [ ] negative test: single row performs one hash
+  - [ ] regression test: existing view suites still pass
+
+- [x] D241 — `src/bend/view.bend:1171,1270-1271,3692-3697` + `:1064-1067,1112-1121` — Low (per row per paint) — `opt_theme` re-resolved 2–3× per row
+  - Location: `paint_style`/`paint_spans`/`paint_dim` each call `opt_theme` independently; `paint_wrapped_metrics` calls both `paint_spans` and `paint_style`; `paint_unwrapped_on` binds both in the same row; dateless rows pay two, timestamped rows three — for a paint-constant value. No D-entry names `opt_theme` repetition on the row path.
+  - What/why: repeated deconstruction of a constant per row.
+  - Fix direction: resolve once per row and thread it through.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view.bend:1308-1314
+  - Validated by: eighty-round-5 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: rows still style identically
+  - [ ] negative test: dateless row performs two resolutions at most
+  - [ ] regression test: existing view suites still pass
+
+- [x] D242 — `src/bend/view.bend:482-483,1001-1002,467-470,97-101` — Low (per pending row) — pending rows pay an extra full span walk
+  - Location: Pending rows build inner spans, re-walk them in `spans_dim` (rebuilding each `Col` via `Theme.dim_fg`), then walk a third time in `cluster_spans` (re-deriving `spans_text` + `length` + full `go` walk); normal rows skip the middle walk. In-code note (`:459-460`) documents dimming behavior, not the walk cost.
+  - What/why: triple span walk on pending rows.
+  - Fix direction: dim during the single `cluster_spans` pass.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:472)
+  - Validated by: eighty-round-5 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: pending rows still dim identically
+  - [ ] negative test: normal row performs no middle walk
+  - [ ] regression test: existing view suites still pass
+
+- [x] D243 — `src/bend/view.bend:892-896` + `theme.bend:156-160,84-88` — Low (per use) — per-theme constants re-matched per call
+  - Location: `FG_DIM_themed`/`FG_TEXT_themed` redo their matches (4-arm + 3-arm id + 13-arm kind + Mono check) on every `paint_dim`/`paint_fg` call (per header×2, title, per-row timestamp, recon, notice, per-frame composer fg) while the unthemed twins are literals (`13158600`/`10526880`). No D-entry names these two defs (D197 covers `status_of` binds).
+  - What/why: repeated constant matching per call.
+  - Fix direction: hoist to per-frame constants.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/view.bend:3965)
+  - Validated by: eighty-round-5 workflow theme sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: themed constants resolve identically
+  - [ ] negative test: single paint performs one match set
+  - [ ] regression test: existing view suites still pass
+
+- [x] D244 — `src/bend/upload.bend:265-268,257-259,231-236,252-255` — Low (per offer) — `offer` validates scope+paths even when offline
+  - Location: `online && scope_valid(scope) && paths_valid(paths) && …` as strict args, then `offer.valid` discards on `False{}`; eager `&&` pays all walks before the discard. Distinct from D179/D180/D181/D182/D89/D216/D96.
+  - What/why: wasted validation on the offline path.
+  - Fix direction: match `online` first, validate only when true.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload.bend:350
+  - Validated by: eighty-round-5 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: online offer validates identically
+  - [ ] negative test: offline offer performs no walk
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D245 — `src/bend/upload.bend:190,252-255` — Low (per offer) — double `List.length` on one ≤8-list plus no-early-exit `paths_valid` recursion
+  - Location: two `List.length(words)` as strict `&&` args; `path_valid(…) && paths_valid(t)` walks tail even on invalid head. Distinct from D180 (outer lex, not list walks).
+  - What/why: redundant length plus missed early exit.
+  - Fix direction: single length, fail-fast recursion.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload.bend:329
+  - Validated by: eighty-round-5 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: path validation identical
+  - [ ] negative test: invalid head skips the tail
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D246 — `src/bend/upload.bend:280-285,225-229` — Low (while pending) — `retain` walks scope strings even when offline
+  - Location: `retain.valid(online && scope_eq(…), …)` in all three pending arms; `scope_eq` = two `String.eq`; `Idle{}` is free. Cost lands exactly while pending, under D179's maintain fan-out. Distinct from D179 (Session rebuild vs predicate cost).
+  - What/why: string compares on a path that discards them.
+  - Fix direction: gate on `online` first.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload.bend:371
+  - Validated by: eighty-round-5 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: pending retain still gates identically
+  - [ ] negative test: offline retain performs no compare
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D247 — `src/bend/upload.bend:56,84` — Low (per cons) — eager `Bool.pick` builds a discarded cons cell
+  - Location: `SCon{h, word}` built even when `same` selects `word` (`:56`); `SCon{Chr{92}, word}` built even when `keep` selects `word` (`:84`). Exact D52 shape, unlisted in D52/D65/D94/D95/D98/D128 (per-site precedent).
+  - What/why: wasted cons cell per construction.
+  - Fix direction: the D52 Unit-> idiom.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/upload.bend:53,87
+  - Validated by: eighty-round-5 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: construction identical on both arms
+  - [ ] negative test: selected arm builds no discarded cell
+  - [ ] regression test: existing upload suites still pass
+
+- [x] D248 — `src/bend/upload.bend:163-169,153-156,161` — Low (rare path, ≤1024B) — `file://` URI decode makes ~5 passes
+  - Location: `String.length` fuel walk + `percent_go` decode walk (`:168`) → `Fr.utf8_decode` walk (`:169`) → `printable` + `utf8_len` + prefix/`contains` walks on decoded form (`:161`,`:153-156`). Rare path (explicit `file://`). Distinct from D89/D182 (output-URL validation, not input decode).
+  - What/why: repeated decode + validation passes.
+  - Fix direction: single decode with inline validation.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/upload.bend:165)
+  - Validated by: eighty-round-5 workflow upload sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: file URIs still decode identically
+  - [ ] negative test: invalid URI fails on the first pass
+  - [ ] regression test: existing upload suites still pass
+
+- [ ] D249 — `src/ffi/timui_ffi.c:627-632` + `src/ffi/birc_media.h:115-135,100,80-97` — Low (bounded transient ~4.8 MiB/admission) — heap copy coexists with 2 MiB malloc through decode
+  - Location: `text` is a heap copy (`free(text)` at `:632` proves ownership) sized up to `((2MiB+2)/3)*4+2 ≈ 2.67 MB` (bound at `birc_media.h:120`); `birc_media_add` mallocs `bytes` up to 2 MiB (`:135`) while `text` is still alive, and retains it (`:100`). Coexistence through decode + parse + ≤24 `image_png_header_` validations. Distinct from D119 (encode side) and D71 (PNG-writer internals): admission side, different function.
+  - What/why: transient ~4.8 MiB peak per admission.
+  - Fix direction: free the text copy before the bytes malloc, or stream decode.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — free-before-malloc is use-after-free; needs ownership/streaming redesign.
+  - Status 2026-10-28: OPEN — free-before-malloc is use-after-free; needs ownership/streaming redesign; ~4.8MiB/admission peak remains.
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: admission still decodes identically
+  - [ ] negative test: text freed before bytes malloc
+  - [ ] regression test: existing media tests still pass
+
+- [x] D250 — `src/ffi/timui_ffi.c:571-603` (call site `:1679`) — Cosmetic (3 syscalls/frame) — per-frame `isatty` + `ioctl` before the cached compare
+  - Location: per-frame call verifies inside the frame path; body does up to 2 `isatty` + 1 `ioctl(TIOCGWINSZ)` (`timui.h:31310`) before the cached `ui->w/ui->h` comparison. No DEFECTS entry cites `birc_sync_term_size`/these lines (D42 cites different lines).
+  - What/why: syscalls per frame for a cached value.
+  - Fix direction: compare the cache first, syscall only on suspicion of change (or rate-limit).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/timui_ffi.c:567-610
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: resizes still detected
+  - [ ] negative test: steady frame performs no syscall
+  - [ ] regression test: existing timui tests still pass
+
+- [x] D251 — `src/ffi/timui_ffi.c:480-488` + `:509-539` + `birc_media.h:175-179` — Cosmetic (8×8 scans) — per-frame and per-`OpMedia` media-table scans
+  - Location: `birc_media_prune` runs every frame doing 8 × `birc_media_find` (each an 8-scan; `BIRC_PREVIEW_CAP = BIRC_MEDIA_CAP = 8`); `birc_draw_media` does two 8-scans per `OpMedia` plus a third inside `birc_preview_media`. D88/D109/D185/D187 cover Bend-side `maintain` duplication only; native lookup shape unfiled.
+  - What/why: repeated small-table scans per frame and per media op.
+  - Fix direction: index by slot instead of scanning, or share one lookup per frame.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/ffi/timui_ffi.c:480-488
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: media still resolves identically
+  - [ ] negative test: missing entry performs one scan
+  - [ ] regression test: existing timui tests still pass
+
+- [x] D252 — `src/ffi/timui_ffi.c:787-801` + `:196-201` — Cosmetic (retained peak) — monotonic scratch growth, no shrink path
+  - Location: growth-only doubling `realloc` with no shrink path (only writes to `paint_cap` are growth and zeroing); freed solely in `birc_state_destroy`. Peak retained for process lifetime. Caveat, not disqualifying: the reuse is a deliberate documented trade-off (`:177-179` "Reused UTF-8 encode buffer… (no per-op malloc)"), and D70's fix direction prescribes this same pattern — Cosmetic at most.
+  - What/why: retained peak allocation.
+  - Fix direction: accept as documented, or cap the scratch size.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/timui_ffi.c:179
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: scratch reuse still avoids per-op malloc
+  - [ ] negative test: no growth beyond the cap
+  - [ ] regression test: existing timui tests still pass
+
+- [x] D253 — `src/ffi/history_ffi.c:281-292` via `:764,:913,:758-762` — Cosmetic (nanosecond-scale, load-time) — 9 `strlen` per ingested candidate line
+  - Location: `strlen(kinds[i])` inside the loop (`:287`); called per line via `birc_hist_take` (`:764`) from the per-newline scan loop (`:913`), after the BIRC2/endpoint gates (`:758-762`) — so "per ingested line" narrows to endpoint-matching candidates. No DEFECTS entry cites `birc_hist_kind`/this hoisting (D121 cites different lines/mechanism).
+  - What/why: repeated strlen in the ingest loop.
+  - Fix direction: hoist the kind lengths out of the loop.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/history_ffi.c:289
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: ingest still classifies identically
+  - [ ] negative test: single pass over kinds
+  - [ ] regression test: existing history tests still pass
+
+- [x] D254 — `src/ffi/upload_ffi.c:650,672,676,681` + `:640-648` — Cosmetic — redundant parse plus repeated `strlen`
+  - Location: `strtoul` with `end`-pointer validation at `:650`, then the identical string re-parsed at `:672` (`want` is block-scoped at `:640-653`, so reuse needs hoisting); `strlen(checked)` at `:676` plus twice at `:681` (a fourth `strlen(clen)` at `:643`). Behavior-safe (digit-only pre-check). D69 cites different lines/mechanism.
+  - What/why: repeated parse and strlen of the same string.
+  - Fix direction: hoist the parsed value and the length out of the block.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/upload_ffi.c:478
+  - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: upload size still parses identically
+  - [ ] negative test: single parse per value
+  - [ ] regression test: existing upload tests still pass
+
+- [x] D255 — `src/bend/live_context.bend:260-269` — Low — flush-then-`Begin` serializes dial behind local file IO with no data dependency
+  - Location: `local <- history.flush(...)` (`:265`) precedes `Chan.send(..., S.Begin{gen})` (`:266`); `Begin` takes only `gen` while `:269` merges `local` afterward, so reordering is safe; header (`:2`, "No IRC traffic precedes Begin") is preserved since flush is file IO (`history_io.bend:88-119`). Not fixed, bounded, or documented; no DEFECTS dup.
+  - What/why: dial delayed behind unrelated local IO.
+  - Fix direction: send `Begin` first, flush concurrently/after.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/live_context.bend:260-269
+  - Validated by: eighty-round-5 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: startup still serializes identically
+  - [ ] negative test: dial not blocked on flush
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D256 — `src/bend/history_startup.bend:153-156` + `:106-109` — Low — gate presence-check discards the found index, collect re-walks the same spine
+  - Location: `admit.present(Cl.buf_find(import_client(acc), name))` keeps only `Bool`; `collect.target(target(control, cl, name), ...)` → `target.found(Cl.buf_find(cl, name), ...)` re-walks the identical client/name; each walk is `buf_find_cm.go` with `buf_eq_cm` two-fold compares. Threading the index is behavior-identical (no client mutation between the finds). Distinct from D57/D103/D162.
+  - What/why: duplicate spine walk for a discarded index.
+  - Fix direction: thread the found index from admit to collect.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_startup.bend:153-156
+  - Validated by: eighty-round-5 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: import admits identically
+  - [ ] negative test: admitted name performs one walk
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D257 — `src/bend/live_context.bend:129-132` via `:152-156`, driven per tick from `src/bend/net.bend:1804-1806` — Low — `gate_scope` rebuilds a byte-identical endpoint string every tick while Waiting
+  - Location: `Waiting{_, _} → Waiting{gen, endpoint(st)}` (`:132`) with `endpoint = host ++ ":" ++ U32.show(port)` (`endpoint.bend:121-122`); called unconditionally in `observe.pair` (`:155`); `net.bend:1806` runs `PrefLive.observe` inside `preferences_stage`, which re-arms after every live-step continuation. `archive_queue` goes quiet once active, but `gate_scope` has no stillness check. Distinct from D64 (prefs serialization, different function/layer).
+  - What/why: per-tick string rebuild of an unchanged value.
+  - Fix direction: stillness check — skip the rebuild when unchanged.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/live_context.bend:129-132
+  - Validated by: eighty-round-5 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: gate scope identical when unchanged
+  - [ ] negative test: still tick performs no rebuild
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D258 — `src/bend/history.bend:422-428` × `src/bend/buffer.bend:1710-1712,99-106` — Low — each loaded record re-derives the same canonical target ~4–5×
+  - Location: `target_name` (#1 at `:423`); `target_wire(canonical)` → `target_name` again (#2 at `:102`); `target_channel(canonical)` → `target_name` (#3); the result passed as a strict arg that `buf_get` recomputes via `target_name(name)` (#4) + `target_channel(canonical)` (#5). Both per-record entry points (`apply_hist_entry`, `apply_hist_fast`) funnel through `history_target`. Distinct from D135 (split-before-version gate).
+  - What/why: repeated canonical-target derivation per record.
+  - Fix direction: derive once per record and thread it through.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history.bend:422-428
+  - Validated by: eighty-round-5 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: loaded records target identically
+  - [ ] negative test: single derivation per record
+  - [ ] regression test: existing history suites still pass
+
+- [x] D259 — `src/bend/startup_headless.bend:50-52` — Low (cosmetic-grade) — `allowed=False{}` still pays the settings projections before the gate discards them
+  - Location: passes `allowed && ... && Cl.get_settings(S.session_cl(st)) && ...` as strict `&&` args into `archive.pick`, which matches `read` only at `:41-42`; Session/Client/Settings destructures and projection walks evaluate even on the notice path. Same shape as D160 but a fresh unlisted site (different module/path). Once-per-headless-startup, tiny inputs.
+  - What/why: wasted projections on the discard path.
+  - Fix direction: match `allowed` first, project only on accept.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/startup_headless.bend:50-52
+  - Validated by: eighty-round-5 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: allowed path still projects identically
+  - [ ] negative test: denied path performs no projection
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D260 — `src/bend/workspace.bend:1208-1209` + `session.bend:2337-2344,2373-2379` + `wsnet.bend:471-477` — Low — multiserver double-fail, distinct-site twin of D149
+  - Location: `live_on.routed` Eof/NetFail arms both call `live_failed(on_routed_fail(...))` unconditionally; True arm echoes error + `reconnecting in 2s` + diagnostic and re-arms a 2 s `redial_watch`; `reconnect_configured` returns True even while Reconnecting, so a second same-gen event re-emits cmd + intent; no gen bump at fail time (`on_redial` bumps only when the first `WsRedial` fires, so the second watch dies stale at `reconnect_ok`). Reachability is conditional on non-empty pending + failed send — the same conditional character D149 was accepted under. Distinct module/loop from D149 (`net.bend` vs `workspace.bend`+`wsnet.bend`); per-site precedent (D163–D168) supports a separate ticket.
+  - What/why: duplicate failure notice plus stillborn redial per single outage on the routed path.
+  - Fix direction: same-outage dedup via gen bump/pending-fail flag (D149's fix, new site).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — distinct-site twin of D149; same Session/Part shape change required.
+  - Status 2026-10-28: OPEN — Part/Workspace shapes frozen by wsnet + sessws tests; same stillborn-watch mitigation.
+  - Status 2026-10-28: CONFIRMED — no watch store in Workspace/Part; on_redial.emit passes the Reconnecting session through unchanged (workspace.bend:907-910), so a Reconnecting gate swallows post-redial failures identically to D149.
+  - Status 2026-10-28: CONFIRMED — not transferable from any actor-side fix: the workspace path runs a different loop (wsnet.bend) with per-part gens owned solely by Workspace (workspace.bend:703), bumped only at on_redial.emit (workspace.bend:907), with Intent-carried gens and reconnect_ok staleness fencing. An actor-held flag in the single-server loop would not cover routed parts; it needs its own store at the on_redial/live_on.routed site.
+  - Status 2026-10-28: CONFIRMED — echo-deferral fails the same three facts as D149 (no Connecting state exists; manual dials land on Reconnecting; immediacy pinned by disconnect_cleanup.py and sessws_s1s5_demo.bend:1551). Only double echo harm remains; dedup needs an on_redial-site last-fail store: none exists without shape changes.
+  - Status 2026-10-28: FIXED (render-side coalescing) — text-identical adjacent outage notices merge at the append choke point both arms share (`buffer.bend:1280-1295` `buf_append_line.tail`; predicate `outage_notice_row`/`outage_dup` at `:1257-1272`: same kind + identical text + exact notice strings only). True arm reaches it via `on_routed_fail.gated` → `Sess.session_fail` (`workspace.bend:866`); stale arm via `Sess.session_error` (`session.bend:2380`) → same `Sub.echo_err`. No shape/test changes. Gates: `test-buffer-spines` (new `outage_coalesce` assertions) =ok, `test-sessws-s1s5`=ok, `test-m21-session`=ok.
+  - Validated by: eighty-round-5 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [x] positive test: single outage posts one notice
+  - [x] negative test: distinct outages still post separately
+  - [x] regression test: existing workspace suites still pass
+
+- [x] D261 — `src/bend/actor.bend:1414-1419` + `session.bend:2386-2400` + `net.bend:411-414,931-937` — Low (silent data loss) — Drop-arm queue discard with no `writer_fail` when autoreconnect is off/unconfigured
+  - Location: `session_autoreconnect.chk` False arm and `dial` not-configured arm yield `(st, Drop{})`; `emit_fail_cmd` fallthrough delivers it via `emit_cmd` (Drop arm spawns no notice); the writer `Drop` arm closes the socket and replaces both queues with `Nil` with no `writer_fail`. `session_fail` echoes only the disconnect string, never a count — while every sibling fail path reports one (`writer_sent`, `writer_hangup_done`, `writer_dial_flushed`, overflow `:614`). Bound is `PENDING_CAP()=512`. D24/D27/D93 cover the bounded-with-notice, Sent-false-with-notice, and per-Cont-spam paths — none covers this arm.
+  - What/why: silent discard of up to 512 queued lines.
+  - Fix direction: emit the drop count through `writer_fail` like the sibling arms.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/actor.bend:1430)
+  - Validated by: eighty-round-5 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: drop reports the discarded count
+  - [ ] negative test: empty queue reports zero
+  - [ ] regression test: existing actor suites still pass
+
+## Round 5 non-findings (explicitly falsified, not filed)
+
+- [x] Confirm no ticket filed: `src/bend/frame.bend:479-480` 2-tuple `push` hardcodes `drop=False{}` — consequence false per fresh sceptic: all three live callers thread `drop` via `push_ex` (`actor.bend:169`, `replay.bend:32`, `session.bend:4620`); repo-wide grep shows zero `Fr.push` callers under `src/` (only test goldens and module self-checks, all single-shot from `Nil{}` where `False` is the correct initial flag). The hypothesized cross-chunk Drop-loss requires a caller that does not exist.
+- [x] Confirm no ticket filed: `src/bend/client.bend:944` numeric-path table scan — consequence false per fresh sceptic: `cls_verb` matches `num=True` first and returns `Numeric{code}` directly, skipping `cls_rows()` entirely; the sole per-numeric walk is the 6-row `num_kind`, already thunked per D9. No finding survives.
+- [x] Confirm no ticket filed: `src/bend/client.bend:273-276` mute-path skips — mechanism misattributed per fresh sceptic: `tgt` is the `chan` input to `is_muted_client_cm`, which feeds the scoped pattern match; skipping key resolution would break the mute verdict itself. No finding survives.
+- [x] Confirm no ticket filed: `src/bend/message_chunks.bend:40-41` fuel over-provision — premise falsified per fresh sceptic: worst case is clusters + break-retries ≤ 2n, so `1n+2n+2n·n` is tight, not ~2× over; the proposed `n+1` fix is unsound (inputs needing >n+1 recursions would spuriously reject valid messages).
+- [x] Confirm no ticket filed: `src/bend/net.bend:922-935` flush-failure retrigger — duplicate of D149 per fresh sceptic: same site (overlaps D149's `:929-935`), same mechanism, same consequence; D149's fix (same-outage dedup) covers this trigger identically.
+
+## Round 3 — 2026-10-26 residual review (10 parallel lanes + sceptical validation)
+
+Method: ten residual lanes (per-tick costs, startup, native, submit, search, view, laws, actor-boundary, wire codecs, auth) that first read D1–D108 plus all round-1/round-2 Non-findings and skipped filed/falsified ground; each candidate independently re-read and CONFIRMED/REJECTED by a fresh-context sceptical validator. Analysis only: no code touched, all items OPEN.
+
+- [x] D109 — `net.bend:1247-1257` + `session.bend:3490-3511/3546-3565` — Low (per-scan-tick) — anchored media/cards rows rebuilt twice, `maintain_full` up to 4×
+  - Location: `session_observe_visible_media.gated` rebuilds `View.visible_anchored_panes_media_cards_iso_pends` (`session.bend:3496`) and `session_observe_visible_cards.gated` rebuilds the identical call (`:3551`); `cards_stage_session` re-observes unconditionally (`cards_net.bend:131`), discarding the shared-cards enqueue the `:3480-3484` comment promises. `C.maintain_full` fires at `:3506`, `:3530` (ungated, every scan tick), `:3560`, `:3589` (ungated). Novel vs D88 (which covers only the `M.maintain` pair); `maintain_full` is trivial unless fullscreen (`cards.bend:628-634`) — the anchored rebuild is the substantive 2×.
+  - What/why: duplicate anchored-row rebuild plus up to 4 aliveness passes per scan tick.
+  - Fix direction: share one anchored-pends observation between media and cards; gate `maintain_full` on fullscreen or content change.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (media-stage): net portion fixed (single maintain per stage, net.bend:1247-1257); session/cards anchored-share remainder tracked as follow-up under this line
+  - Validated by: eighty-round-3 workflow tick sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: anchored rows identical with one observation
+  - [ ] negative test: content-unchanged tick performs no rebuild
+  - [ ] regression test: existing media/cards/net suites still pass
+
+- [x] D110 — `src/bend/notify.bend:537-544` — Low (per-chunk) — DM/mention classification runs before the cutoff check
+  - Location: `+dm` (`:541`) and `+men` (`:542`) bind strictly before `notify_collect_line.keep` tests `Nat.is_gt(id, cutoff)` (`:544`), so below-cutoff rows — the majority on every dispatch — pay `Irc.ieq` folds (`irc.bend:193-194`) and, on Action kinds, `is_mention`'s two `fold_casemap`s plus substring scan (`buffer.bend:612-622`), then discard. Per-chunk entry at `session.bend:4819`; bound 16 buffers × 1024 rows. Sibling `notify_claims_lines` (`session.bend:4905-4909`) already gates cutoff-first. No D-entry covers it (D75 = mute ledger, D86 = sort tail, D59 = parses).
+  - What/why: full classification of rows the cutoff then discards.
+  - Fix direction: match the cutoff first, classify only surviving rows (the sibling shape).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/notify.bend:586
+  - Validated by: eighty-round-3 workflow tick sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: above-cutoff rows still classify identically
+  - [ ] negative test: below-cutoff row skips classification
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D111 — `net.bend:719-740,762-782,796,811,822` — Low (bounded perf) — every hot frame paints and steps twice
+  - Location: first `frame_result` in `on_frame` (`:796`), then `pick(redraw && hot)` → `redo` re-runs `paint_session` + full `frame_result` (`:737-739`), including the `Clock.millis` read (`:673`) and full key pipeline (`:686-694`). Both callers pass `redraw=True{}` (`paint_input` `:811`, `on_chunk.paint` `:822`). No D-entry covers `redo` (D51/D96 are other sites). Bounded single redo; the second paint is load-bearing echo per `:717-718` — the residual waste is the unconditional second full key-step on typically-empty keys.
+  - What/why: duplicate key pipeline per hot frame.
+  - Fix direction: skip the key-step on the redo paint when no keys are pending, or thread the first step's result.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — redo key-step transforms are session-owned; entangled with typing gate (superseded: Nil-outs identity fix landed after this line).
+  - Status 2026-10-28: FIXED (tickoff): Nil-outs record is identity incl. redo repaints (session.bend:3100-3110; pend_nil_idle_ok both-echo-arms pin at :5404-5407); test-session-drafts green fresh. Remainder: ordinary (non-Nil) clear/restore skip needs the joined==sent cross-frame invariant + leg audit — left for follow-up under this line.
+  - Validated by: eighty-round-3 workflow tick sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: hot-frame echo still paints identically
+  - [ ] negative test: keyless redo performs no key-step
+  - [ ] regression test: existing net suites still pass
+
+- [x] D112 — `src/bend/history_startup_io.bend:14` + `src/bend/history_startup.bend:92` (via `:266`) — Medium (startup hang/OOM) — raw U32 cap materialized as unary Nat before clamping
+  - Location: `parse_cap` admits any ≤10-digit decimal (`preferences.bend:141-147`); `valid` never bounds `cap` (`:120-125`); `set_hist_cap` stores raw (`buffer.bend:363-366`), `settings_with_cap` no clamp (`:265-266`); `BIRC_HISTORY_LINES` resolves any `U32.read` (`history.bend:685-698`); `net.bend:2268` → `start_ui_client` (`:2217-2220`) passes env cap raw; `live_context.bend:147` archive cap = raw settings cap, no clamp → `F.start/run/load`; `history_startup_io.bend:14-15` (`U32.from_nat(clamp_nat(U32.to_nat(cap), …))`), `history_startup.bend:88-92` (`room` converts before clamp) fed raw at `:266`; `buffer.bend:2306-2314` (clamp is a strict arg, so `to_nat` evaluates first); `history.bend:482-486` (`hist_keep` = convert-then-clamp, called per record by `apply_fast.dated`); `history_io.bend:146-149,151-157` (file path also feeds raw cap per record). Retention *is* bounded (round-1 unclamped-restore non-finding stands) — this is conversion cost, which no clamp bounds. Distinct from D58/D64/D65/D66/D68/D73 and both `to_nat` non-findings (different sites/magnitudes).
+  - What/why: validated/env input (up to ~4 G) materialized as unary Nat before any clamp — hang/OOM vector at startup, per record on file paths.
+  - Fix direction: clamp in U32 domain first (or reject > cap at parse), convert only the clamped value.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): clamp_cap clamps in U32 domain before Nat conversion (history_startup_io.bend:14-18)
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: legitimate caps still resolve to the same bound
+  - [ ] negative test: 10-digit cap no longer hangs startup
+  - [ ] regression test: existing history/startup suites still pass
+
+- [x] D113 — `src/bend/history_startup.bend:185-190` vs `:131-137,217-224,246-251` — Low (bounded perf) — each buffer's lines filtered twice, first copy discarded
+  - Location: `admit.usable` builds `archive_lines(lines)` only for the `is_empty` test (`:185-190`); `collect.buffer` rebuilds `archive_lines(lines)` for import (`:131-137`); admit pass over sorted `rest` (`:217-224`), collect pass over same `rest` (`:246-251`); only picked names cross the seam. Distinct from D73 (`recent` comparator) and D58 (error-id scan). Startup-only.
+  - What/why: duplicate archive filtering per buffer on the import path.
+  - Fix direction: share one filtered copy between admit and collect.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_startup.bend:185-190
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: import admits the identical snapshot
+  - [ ] negative test: empty buffer performs no filter
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D114 — `src/bend/history_startup.bend:111-117` + `buffer.bend:1193-1195` — Low (bounded perf) — per-buffer trim pays length + length + drop
+  - Location: `take_last(lines, room(…))` (`:111-117`); `room` = `List.length` over current buffer's lines (`:88-92`); `take_last` = `length` + `drop` (`buffer.bend:1193-1195`). Result is used, so distinct from D36 (synthetic-path waste-then-discard). Startup-only.
+  - What/why: three walks where one suffix pass suffices.
+  - Fix direction: single indexed trim returning the tail directly.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_startup.bend:111-117
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: trimmed snapshot identical
+  - [ ] negative test: under-cap buffer performs no walk
+  - [ ] regression test: existing startup suites still pass
+
+- [x] D115 — `src/bend/history_startup.bend:294-300` + `history.bend:355-359` — Low (bounded perf) — divider gate walks each buffer's lines twice
+  - Location: both walks as strict `&&` args over same `lines` (`:294-300`); `last_id` recurses to tail (`history.bend:355-359`). Fusable into one pass; bounded (16×1024, startup-only). Not D55/D53/D73.
+  - What/why: duplicate full walk per buffer on the divider path.
+  - Fix direction: one pass returning (last_id, length).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_startup.bend:294-300
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: dividers land identically
+  - [ ] negative test: empty buffer performs no walk
+  - [ ] regression test: existing startup/history suites still pass
+
+- [x] D116 — `src/bend/replay.bend:25-55` + `frame.bend:461-472,329-330` + `client.bend:1040-1041` — Low (bounded perf) — framer pushed one byte at a time with full reopen per byte
+  - Location: `chunk(state, byte <> Nil{})` per byte (`replay.bend:49-55`); `:25-32` (`push_ex` + `Feed.feed_all` per byte); `frame.bend:471-472` (`push_ex` = `walk(chunk, reopen(…))`); `reopen_keep` = `reverse(rem)` + `payload_n(rem)` (`:461-469`); `payload_n` = `List.length` (`:329-330`); `feed_all` = `foldl` per call (`client.bend:1040-1041`). ~256× invocation reduction available by pushing the slice `step` already batches. Distinct from D68 (`:72-74` fuel `length` nit). Offline replay path.
+  - What/why: per-byte framer reopen plus per-byte feed fold.
+  - Fix direction: push whole slices through one `push_ex` + one `feed_all`.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/replay.bend:25-55
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: replay output byte-identical
+  - [ ] negative test: empty chunk path unchanged
+  - [ ] regression test: existing replay suites still pass
+
+- [x] D117 — `src/bend/replay.bend:89-110` — Low (bounded perf) — `--replay` fuel is `1n + to_nat(size)` for per-4 KiB consumption
+  - Location: each `read_loop` step reads `clamp_nat(remaining, 4096)` (`:89-95`); one fuel per chunk, seeded `1n+U32.to_nat(size)` (`:100-110`); size bounded only by U32-range `File.size` (`:97-99`). 1 MiB file ⇒ ~1M-cell one-shot Nat. Distinct from D68.
+  - What/why: ~4096× fuel over-provision per chunk.
+  - Fix direction: seed fuel in chunk units (`1n + size/4096`).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — REVERTED: chunk-unit replay fuel unsound under short reads; test-replay-stream pins split reads; byte-unit bound restored (replay.bend:115-123).
+  - Status 2026-10-28: OPEN — REVERTED: chunk-unit fuel unsound under short reads — test-replay-stream pins split reads; byte-unit bound restored; sound alternative = coalescing reads per step, needs the replay gate.
+  - Status 2026-10-28: FIXED — inner fill loop accumulates a full 4096-byte chunk per outer step (short reads keep filling; empty fails closed as before), outer fuel 2n+size/4096; test-replay-stream green on the full matrix (split-crlf/unterminated/empty/missing/oversized). Dead single-read path (read_loop.got/bytes) removed after the green run; file re-elaborates clean.
+  - Validated by: eighty-round-3 workflow startup sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: replay still terminates at EOF
+  - [ ] negative test: empty file path unchanged
+  - [ ] regression test: existing replay suites still pass
+
+- [x] D118 — `src/ffi/media_fetch_ffi.c:715-716,754,758,828-831` — Low (bounded perf) — per-hop `SSL_CTX` rebuild + trust reload
+  - Location: `ctx`/`ssl` declared inside the redirect loop (`:715-716`), `SSL_CTX_new` per hop (`:754`), trust reload per hop (`:758` → `birc_mf_ca_file` `:505-568`, up-to-8 MiB read + `PEM_X509_INFO_read_bio` parse when `SSL_CERT_FILE` set, else `SSL_CTX_set_default_verify_paths` at `:581`), freed on redirect-continue (`:828-831`). Bound is `BIRC_MF_REDIRECTS=3` (`:100`, ≤4 hops), worker-thread only, and handshake cost dominates — but the reload itself is real and undocumented. Novel vs DEFECTS.md.
+  - What/why: full trust-store reload per redirect hop.
+  - Fix direction: build the context once outside the loop and reuse it across hops.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/media_fetch_ffi.c:759-807
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: redirect chain still verifies against the CA set
+  - [ ] negative test: single-hop path unchanged
+  - [ ] regression test: existing media_fetch tests still pass
+
+- [x] D119 — `src/ffi/media_fetch_ffi.c:1547-1593` — Low (bounded memory) — `birc_media_encode` holds ~4–5 full-image buffers at once
+  - Location: `scaled` malloc (`:1547`, 410 KiB at max side 320 per `:90`), `birc_mf_write_png` (`:1555`) holds its own internals, `payload` (`:1561`, `32+rgba+8+png`), `b64` (`:1575`, 4/3×payload) all alive at `:1578`; full-size `rgba` is also still alive there (freed only at `:1586-1587`), so for large inputs the transient peak exceeds the claimed 2.8 MiB (up to `MAX_PIXELS×4` = 64 MiB pre-scale). Gated by `MAX_PAYLOAD` 2 MiB (`:88`, `:1559-1560`). Distinct from D71 (writer internals `:1380-1408`, `:1482-1493`), this is caller-side retention. Worker-thread only.
+  - What/why: transient peak far above the documented budget on large inputs.
+  - Fix direction: free `rgba` right after scaling, and stream payload→b64 instead of holding both.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/media_fetch_ffi.c:1645-1673
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: encoded output byte-identical
+  - [ ] negative test: small-image path unchanged
+  - [ ] regression test: existing media_fetch tests still pass
+
+- [x] D120 — `src/ffi/media_fetch_ffi.c:1811-1830` — Low (bounded perf) — cards meta scan re-walks document per tag, 3× attr walks per tag
+  - Location: `while ((p = strcasestr(p, "<meta")) && metas < BIRC_MF_MAX_META)` (`:1812`, cap 200 per `:97`) rescans from `end+1` per tag over up-to-256 KiB HTML (`:87`); per tag, `property` (`:1828`), fallback `name` (`:1829`), `content` (`:1830`) each run `birc_mf_attr` (`:1690-1735`, itself O(tag) with inner skip loop). Worker-thread only.
+  - What/why: O(doc) restart per tag plus three O(tag) attribute walks each.
+  - Fix direction: single-pass tag scan with one attribute pass per tag.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/media_fetch_ffi.c:1792,1966
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: card metadata still extracts identically
+  - [ ] negative test: meta-free document performs one scan
+  - [ ] regression test: existing cards tests still pass
+
+- [x] D121 — `src/ffi/history_ffi.c:939-953,1060-1063,191-195,755` — Low (bounded perf) — pack re-splits every kept line ingest already split
+  - Location: ingest validates with `birc_hist_split7` (`:755` inside `birc_hist_take`), but `BircHistSpan` stores only `{off,len,seq}` (`:191-195`), so `birc_hist_fields` re-runs `split7` (`:944`) plus 7 `io_str`/`io_node` builds (`:946-951`) per kept row at pack (`:1061-1062`). Bound `KEEP_MAX=1024` (`:188`) × `ALIVE_MAX=14` (`:189`) + server ring ≈ 15k rows of one linear tab-scan each — real, one-shot per load. Carrying offsets would bloat ring entries 12→40 B, so this is a trade-off, not a pure win. Novel (D15/D53/D55 are different paths).
+  - What/why: full re-split per kept row at pack time.
+  - Fix direction: memoize field boundaries at ingest, or accept and document the trade-off.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/history_ffi.c:191-199
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: packed history loads identically
+  - [ ] negative test: empty ring path unchanged
+  - [ ] regression test: existing history tests still pass
+
+- [x] D122 — `src/ffi/tls_ffi.c:23-24,46-47,385,391,442-448,571-572` — Low (bounded perf) — every TLS read calloc a 64 KiB struct
+  - Location: `bytes[65536]` embedded (`:47`, comment `:46` documents burst-coalescing intent but not the cost), `BIRC_TLS_ALLOC` is `calloc` (`:23-24`), allocated full-struct at `:385` even when `in->size` clamps to a small `max` (`:391`), freed after one read (`:576` via `birc_tls_read_free` at `:442-448`); per-byte cons list (`:571-572`) is FFI-inherent. Novel (TLS non-findings cover verify/fail-close, not read allocation).
+  - What/why: 64 KiB zeroed allocation per read regardless of requested size.
+  - Fix direction: size the buffer to `max` (or reuse one read buffer per handle).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/ffi/tls_ffi.c:386
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: TLS reads still coalesce bursts
+  - [ ] negative test: small-max read allocates small
+  - [ ] regression test: existing tls tests still pass
+
+- [x] D123 — `src/ffi/timui_ffi.c:1634,1639` + `BIRC_COMPOSER_CAP=512 (:122)` — Cosmetic — composer `strlen`-walked twice per frame
+  - Location: `at_end = stt->cursor >= strlen(stt->composer)` (`:1634`), then `n = strlen(stt->composer)` (`:1639`) after `timui_text_area_mut`. Two ≤512 B walks per frame — negligible. Distinct from D40 (Bend-side `at_boundary`, different layer).
+  - What/why: duplicate strlen per frame on the composer path.
+  - Fix direction: hoist one `strlen` into a local.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/ffi/timui_ffi.c:1634,1639
+  - Validated by: eighty-round-3 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: composer cursor still clamps identically
+  - [ ] negative test: empty composer path unchanged
+  - [ ] regression test: existing timui tests still pass
+
+- [x] D124 — `src/bend/drafts.bend:631-646,718-719,728-737,774-779` + `submit.bend:291-294,324-325` — Low (bounded perf) — multiline submit plans every line ~2–3× with no fail-fast
+  - Location: `plan_each.combine` (`:631-632`) evaluates strict tail `plan_each.go(p,…)` before `plan_each.head` matches; `first_bad.go` (`:737`) evaluates strict tail `first_bad.go(p,…)` and strict `wires_ready(plan_line(…))` before `first_bad.line` matches; `submit_ready` (`:718-719`) strict-`&&` runs full `plan_each` even when `any_command` rejects; accept path re-chunks via `submit_each` (`:690` → `Sub.send_text`) → `send_text_gated.valid` (`submit.bend:324-325`) → `message_parts` (`submit.bend:291-294`) second `Chunks.split`. Distinct from D100 (single-line rescan), D59/D17 (inbound parses), D94/D97/D99, D26. Bounded (draft/entry caps, Enter-only).
+  - What/why: repeated line walks with no early failure on multiline submit.
+  - Fix direction: fail-fast match (validate-then-plan), share one chunking between plan and send.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/drafts.bend:574,650,743
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: multiline submit still emits identical wire
+  - [ ] negative test: first-line failure skips the tail walk
+  - [ ] regression test: existing drafts/submit suites still pass
+
+- [x] D125 — `src/bend/session_drafts.bend:382-396,301-306` + `drafts.bend:525-526,312-317,354-362,147-164` — Low (per-keystroke) — every keystroke pays a discarded draft admission through the move gate
+  - Location: `+strip = move_requested(keys) && Bool.not(focus_admits_cm(…))` (`:383`) evaluates both strict args, so ordinary typing (`move_requested=False`, `:110-113`) still pays `focus_admits_cm` (`drafts.bend:525-526` → `set_ok_cm`/`set_cm.admit`, `:312-317,:354-362`, itself `fits` byte/line walks `:147-164` + `has_cm`/`count_server` spine walks); `step_keys.blocked` (`:393-396`) routes every step through `moves`, then `stayed_type` (`:301-306`) re-admits via `set_cm`. Distinct from D97 (walks inside `set_cm`) and D22.
+  - What/why: full admission check per keystroke, discarded on the typing path.
+  - Fix direction: match `move_requested` first, admit only when a move is actually requested.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session_drafts.bend:383-389
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: move keys still shelve/restore correctly
+  - [ ] negative test: ordinary typing performs no admission
+  - [ ] regression test: existing drafts suites still pass
+
+- [x] D126 — `src/bend/submit.bend:220-242,87-88,95-101,230-233` — Low (bounded perf) — `message_sensitive` revalidates target+body per chunk (N+1)
+  - Location: `credential_chunks` (`:220-223`) calls `credential_message(cl,target,body)` per chunk, each re-splitting target (`:95-101`) and re-running `credential_body` walks (`:87-88`); outer `message_sensitive` (`:237-242`) strict-`||` evaluates `credential_message` plus `fits` (which re-chunks at `:230-233`) even on hit. Sub-mechanism inside D100's function but unfiled there (D100 counts whole-send rescans, not per-chunk credential repetition). Bounded by chunk count.
+  - What/why: full credential revalidation per chunk plus one.
+  - Fix direction: validate once per send and thread the verdict into the chunk loop.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/submit.bend:227,254
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: chunked send still validates identically
+  - [ ] negative test: single-chunk send validates once
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D127 — `src/bend/submit.bend:1364-1382,1401-1468` + `buffer.bend:2629-2632,121-122` — Low (bounded perf) — `/links` and `/open` rescan full scrollback per invocation plus a rewrite
+  - Location: `active_buf_urls` (`:1380-1382`) reverses active buffer then `lines_urls.go` (`:1369-1378`) runs `Ws.extract` per line; `submit_links` (`:1441-1443`) runs `clear_link_results` (line rebuild `:1406-1412` + `reanchor_lines` `:1418`) before the same scan; `open_parse_arg.zero` (`:1445-1449`) and bare-`/open` arm (`:1465-1468`) each call `active_buf_urls`. Bound `SCROLL_CAP=1024` (`buffer.bend:121-122`), lines via `active_buf_lines` (`buffer.bend:2629-2632`). No D covers it. Explicit-invocation only.
+  - What/why: full scrollback extract plus a full rewrite per invocation.
+  - Fix direction: share one URL scan between links/open, and skip the rewrite when results are unchanged.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/submit.bend:1484)
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: `/links` output identical
+  - [ ] negative test: second invocation reuses the scan
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D128 — `src/bend/submit.bend:186-187` (+ call sites `:240,:277,:333`, `drafts.bend:614`) — Low (perf) — `message_wire` eagerly builds both arms on a hot path
+  - Location: `Bool.pick(String, notice, "NOTICE "++…, Irc.format_privmsg(…))` (`:186-187`), both strict args per eager-`Bool.pick` rule; call sites per send/line at `:333` (overhead), `:240` (overhead), `drafts.bend:614` (plan overhead), `:277` (per chunk). Unlisted in D52's confirmed-open list.
+  - What/why: both wire forms built, one discarded, on every send path.
+  - Fix direction: match on `notice` first with one construction per arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/submit.bend:186
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: NOTICE and PRIVMSG still format identically
+  - [ ] negative test: PRIVMSG path builds no NOTICE string
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D129 — `src/bend/submit.bend:202-207` — Low (perf nit) — labeled send formats the tagged wire twice on the allow path
+  - Location: `message_wire_labeled.gated` True arm (`:205`) passes `message_wire_labeled.tagged(…)` as a strict arg and constructs it a second time inside `Irc.line_ok(message_wire_labeled.tagged(…))` in the same expression. No D covers it.
+  - What/why: duplicate tagged-wire build per labeled send.
+  - Fix direction: bind once, reuse for the length check.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/submit.bend:206
+  - Validated by: eighty-round-3 workflow submit sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: labeled send still emits identical wire
+  - [ ] negative test: over-length label fails on the first build
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D130 — `src/bend/history_search.bend:314-327` — Low (bounded perf) — scan fuel `1+4·len` runs ~4n no-op window iterations after the string drains
+  - Location: fuel decrements 1 per 64 KiB window (`:317-322`, `SCAN_WINDOW()=65536n` at `:314-315`); sizing comment admits "spare fuel folds no-op windows over `""`" (`:324-327`) but not the ~4n scale. For 8 MiB that is ~33M recursions vs ~128 real windows. Distinct from D67 (memory spike, not iteration count).
+  - What/why: ~4 no-op window folds per byte on the search path.
+  - Fix direction: seed fuel at windows-remaining instead of bytes-remaining.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:314-327
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: search scans the full content window
+  - [ ] negative test: drained tail performs no extra folds
+  - [ ] regression test: existing search suites still pass
+
+- [x] D131 — `src/bend/history_search.bend:113-124` via `src/bend/client.bend:1088-1089` — Low (bounded perf) — every scanned record pays full render plus a refold of the constant query
+  - Location: `client.bend:1088-1089` (`search_text_matches` folds `Irc.rfc1459(q)` per record); `wire_style.bend:264-265` (`render` = `parse` + fresh `Links.aliases()` per call); `irc.bend:183-191` (`rfc1459` = `to_upper` + full rewalk); `history_search.bend:140-152` (query threaded constant through `match_record`). D18/D21 cover other call sites, not this loop. Caveat: only query-fold hoisting is valid (a raw-substring pre-check would break `fuzzy_contains` subsequence matching, `client.bend:1056-1084`).
+  - What/why: full render + constant refold per scanned record.
+  - Fix direction: hoist the folded query out of the per-record loop.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:113-124
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: search matches identically including fuzzy
+  - [ ] negative test: constant query folds once per search
+  - [ ] regression test: existing search suites still pass
+
+- [x] D132 — `src/bend/history_search.bend:158-170,30-31` — Low (bounded perf) — `retain` pays O(50) per admitted match over all H file matches
+  - Location: `:163-169` (`List.length` per hit + `List.append` in both arms); `PAGE_SIZE()=50n` (`:30-31`). Distinct from D76 (batch-import path, `:815-819`).
+  - What/why: quadratic page assembly over the match list.
+  - Fix direction: cons-assemble then reverse once, tracking count in the accumulator.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:158-170,30-31
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: retained page identical
+  - [ ] negative test: under-page result performs no append walk
+  - [ ] regression test: existing search suites still pass
+
+- [x] D133 — `src/bend/history_search.bend:1519-1531,826-893,865-880` — Low (bounded perf) — active-collect lines pay 2 parses + up to 3 tag splits
+  - Location: strict `+closed = batch_close(...)` before the done test (`:1529-1531`); close = unconditional `Irc.parse` (`:892-893` + `:887-890`); collect = second `Irc.parse` (`:847-848`, claimed lines); msgid + batch re-splits (`:827`, `:835`; `:865-866` tag split, `:880` split); `batch_suppressed` (`:1511-1512`) path for unclaimed lines. Claimed lines pay 2+3, unclaimed 2+2. D74 pins only the idle path (`batch_open_iso`/`batch_suppressed`); this `ChatCollect` path is untouched by it.
+  - What/why: repeated parse + tag-split per active-collect line.
+  - Fix direction: thread one parse and one tag-split through close/collect.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/history_search.bend:1519-1531,826-893,865-880
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED, precision note kept) + parent-cited regions.
+  - [ ] positive test: batch collect batches identically
+  - [ ] negative test: unclaimed line pays the reduced count
+  - [ ] regression test: existing search suites still pass
+
+- [x] D134 — `src/bend/history_search.bend:932-935,942-945` — Cosmetic (dead split) — `batch_row.as_notice` matches `action` with byte-identical arms
+  - Location: `:932-935` (both arms call `batch_row.notice` identically); `:942-945` (`pick` routes notice→`as_notice`, so the discriminant is threaded then discarded). Same disease as D2/D72, different function.
+  - What/why: dead branch; confusion only.
+  - Fix direction: delete the dispatch, call `notice` directly.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history_search.bend:1031-1048
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: as_notice output unchanged
+  - [ ] negative test: no caller references removed dispatch
+  - [ ] regression test: existing search suites still pass
+
+- [x] D135 — `src/bend/history.bend:168-177` via `src/bend/history_search.bend:151-152` — Low (bounded perf) — `parse_line_for` fully splits before version/endpoint validation
+  - Location: unconditional `String.split` (`:176-177`); version/endpoint checks live only inside the 7-deep match (`:168-174`); called per decoded record (`history_search.bend:151-152`). Caveat: only a `"BIRC2\t"` version-prefix gate is sound as stated; an endpoint-prefix gate must respect `Irc.ieq` case-folding. No D-entry covers it.
+  - What/why: full split before knowing the line is even ours.
+  - Fix direction: prefix-gate on the version tag before splitting.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/history.bend:182-187
+  - Validated by: eighty-round-3 workflow search sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: valid records still parse identically
+  - [ ] negative test: foreign line skips the split
+  - [ ] regression test: existing history suites still pass
+
+- [x] D136 — `src/bend/columns.bend:174-177,148-159` — Cosmetic (dead splits) — `take_end`/`text_width_go` match on dead flags
+  - Location: both `take_end` arms return byte-identical `Cut{String.reverse(head), s, used}`, so the `done` flag is dead; all three `text_width_go` fuel-0/SNil arms call `Bool.pick(U32, …, 0, 0)` with identical values, so the `bound` checks are dead. Harmless. Same disease as D2/D72, different site (D5 is the `Decide` fuel arms in the same file, different lines).
+  - What/why: dead dispatches; confusion only.
+  - Fix direction: drop the flags/branches.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/columns.bend:148,172
+  - Validated by: eighty-round-3 workflow view sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: column output unchanged
+  - [ ] negative test: no caller references removed flags
+  - [ ] regression test: existing columns suites still pass
+
+- [x] D137 — `src/bend/view.bend:3916,2888-2907,3264-3278` + `buffer.bend:656-660` — Low (per-paint) — 2× tab scan per paint
+  - Location: `paint_view_single` passes both `paint_tab_names(boxed, bufs, unreads)` and `paint_tab_alerts(boxed, bufs, unreads)` as strict args, and `paint_view_single.got` (`:3900`) consumes both into `paint_view_ops`. Each walks all B buffers calling `Cl.buf_unread_status` → `buf_unread_status_cm` (`buffer.bend:656-660`, a full unread-list walk with per-entry casemap-fold compare). Narrowing: the alerts walk skips the first buffer (`:2905-2907`), so only buffers 2..B pay double; cost is zero when `unreads` is `Nil`. No D item covers this site.
+  - What/why: double unread walk per paint across buffers.
+  - Fix direction: single walk returning both names and alerts.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view.bend:3491,4211,4355
+  - Validated by: eighty-round-3 workflow view sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: tabs still paint identically
+  - [ ] negative test: empty-unreads paint performs no walk
+  - [ ] regression test: existing view suites still pass
+
+- [x] D138 — `src/bend/composer_ui.bend:605-617,286-287,139-140,204-205` — Low (bounded perf) — 2× slash-table build per Tab probe
+  - Location: `tab_accept_ok.some` passes `menu_len(typed)` (`:286-287` → `command_names` → 43-row `names_pref`, `:139-140`) and `ghost_at.some(ms, ghost_suffix(typed), …)` (`ghost_suffix` → `ghost_word` → same `command_names`, `:204-205`) as strict nested `Bool.or` args, so both builds evaluate (eagerness is the pinned rule, in-code warning at `:501-502`). Narrowing: the double build fires only when `typed` is a slash token; otherwise `command_word` yields `None` and both sides are cheap. Distinct from D94 (`session.bend` `match_slash.go`), D98 (`session_keys` `menu_movable`), D18/D62 (table/fuel).
+  - What/why: duplicate 43-row table build per Tab probe.
+  - Fix direction: build once per probe and thread it into both checks.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/composer_ui.bend:623-640
+  - Validated by: eighty-round-3 workflow view sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: Tab completion still resolves
+  - [ ] negative test: non-slash Tab performs no build
+  - [ ] regression test: existing composer suites still pass
+
+- [x] D139 — `src/bend/view.bend:2428-2432,2403-2406` — Low (bounded perf) — double window walk per scroll step
+  - Location: `shift_anchor` binds `+count = List.length(rows)` (`:2429`) then calls `shift_len_of(rows, want)` (`:2430`), which recomputes `List.length(rows)` (`:2406`) for the same count. Distinct from D32 (the `anchor_end` eager-arg gate, already fixed with branch-first at `:2398-2401` and documented at `:2395-2397`); this residual is only the duplicated `length`. Bounded by window rows.
+  - What/why: duplicate length walk per scroll step.
+  - Fix direction: thread the already-computed count into `shift_len_of`.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view.bend:2592
+  - Validated by: eighty-round-3 workflow view sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: scroll anchor lands identically
+  - [ ] negative test: single scroll step performs one length walk
+  - [ ] regression test: existing view suites still pass
+
+- [x] D140 — `src/bend/view.bend:3488-3508,3503-3519` — Low (bounded perf) — quadratic candidate assembly
+  - Location: `visible_bottom.more` runs the tail continuation `k(…)` first (`:3507-3508`), then `visible_bottom.after` does `List.append(tail, mine)` (`:3490`), walking the already-accumulated `tail` per line while it grows — O(V²) in visible candidates, V bounded by the height budget (`left` starts at `height`, `:3503-3519`). Distinct from the rejected rev_tail non-finding (different function, preview-only caller at `:2349`).
+  - What/why: quadratic assembly of the visible-bottom candidate list.
+  - Fix direction: cons-assemble then reverse once.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/view.bend:3759
+  - Validated by: eighty-round-3 workflow view sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: visible bottom renders identically
+  - [ ] negative test: short list performs no append walk
+  - [ ] regression test: existing view suites still pass
+
+- [x] D141 — `src/bend/client_laws.bend:186,193,198,203,209,213` — Low (law gap) — six proof-facing oracles with no LAWS/PROOF pin
+  - Location: defs read (`:186-215`); repo-wide search finds only defs + `tests/bend/feed_demo.bend:119-125` callers (golden-only). LAWS `CL.*` use-list (`:331,335,465,469,473,477,481,485,489,493,497,521,525,549,739,744,847,844,1972`) pins sibling oracles but none of the six. Same law-gap class as fixed D28/D29 and round-2 D108; distinct from D108 (different predicates).
+  - What/why: six oracles with golden-only coverage, no law pin.
+  - Fix direction: add LAWS/PROOF entries 1:1, mirroring D28/D29.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (laws-lane): LAWS.bend 1:1 pins quit_query_logs_pinned, mode_channel_logs_pinned, part_nonmember_silent_pinned, server_nick_query_pinned, self_priv_query_pinned, nick_query_renames_pinned (LAWS.bend:1998-2029)
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: new branches pinned by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+  - Status-note 2026-10-28 (laws-lane): sixth oracle `nick_query_renames` pinned by a prior turn; this turn added the remaining five 1:1 (`LAWS.bend` quit/mode/part/server-nick/self-priv query laws + `PROOF.bend` counterparts); `make lint-laws-io` green, all five shards ALL PROOFS CHECK.
+
+- [x] D142 — `src/bend/session_keys.bend:85-90,98-99` — Low (law gap) — StepNext draft-restore path unpinned
+  - Location: `hist_next.restored` (`:85-87`, `past_end → stash`), `hist_next.step` (`:89-90`), mid-history `hist_prev.at` (`:77-78`, `at_bottom=False`); LAWS pins only StepStay (`:1987`), bottom StepPrev (`:1990`), isolated `shelve(False)` (`:1993`) — no StepNext or through-`at` stash-preservation law; regex search for `Sk.hist_next|Sk.hist_prev` in LAWS/PROOF returns only `:1993`. Residual of D29 (which delivered hist-Stay/Prev/shelve only), not a re-tread. Golden-only coverage.
+  - What/why: StepNext restore path has no law pin.
+  - Fix direction: add LAWS/PROOF entries mirroring D29's hist entries.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (laws-lane): LAWS.bend 1:1 pins hist_step_next_past_end_restores_stash (LAWS.bend:2001-2002), hist_step_next_mid_shows_entry_keeps_stash (LAWS.bend:2031-2032)
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: StepNext restore pinned by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+  - Status-note 2026-10-28 (laws-lane): past-end restore pinned by a prior turn; this turn added mid-history StepNext shown + through-`at` stash preservation 1:1 (`LAWS.bend` hist_step_next_mid_shows_entry_keeps_stash, hist_prev_through_at_keeps_stash + `PROOF.bend` counterparts); both shards ALL PROOFS CHECK.
+
+- [x] D143 — `src/bend/session_keys.bend:108-149,212-266` — Low (law gap) — KeyPlan/panel surface unpinned
+  - Location: `panel_keep.same` four arms (`:111-116`), `pick_len` (`:143-149`), `menu_movable` (`:131-136`), full `finish_keys` family (`accept/dismiss/pick/tab/comp/dir/navmenu/panel`, `:212-266`); zero `Sk.panel|Sk.finish|Sk.pick_len|Sk.menu_movable` hits in LAWS/PROOF. D29's title named KeyPlan/panel but its fix added hist-only laws — residual, not dup.
+  - What/why: the whole KeyPlan/panel surface lacks law pins.
+  - Fix direction: add LAWS/PROOF entries for panel retention, pick lengths, and menu mobility.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (laws-lane): LAWS.bend 1:1 pins panel_keep_same_retains_help, panel_pick_same_retains_index, panel_keep_changed_clears, pick_len_menu_wins_when_many (LAWS.bend:2004-2043)
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: panel retention pinned by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+  - Status-note 2026-10-28 (laws-lane): help retention pinned by a prior turn; this turn added pick-index retention, changed-draft clear, pick_len menu-wins, and three menu_movable arms 1:1 (`LAWS.bend` panel_pick_same_retains_index, panel_keep_changed_clears, pick_len_menu_wins_when_many, menu_movable_help_never, menu_movable_hidden_never, menu_movable_short_menu_moves + `PROOF.bend` counterparts); all six shards ALL PROOFS CHECK.
+
+- [x] D144 — `src/bend/isupport.bend:933-950,893-900,130-131,143` — Low (law gap) — `adding`'s sole observable effect unpinned
+  - Location: `takes_arg.class` read (`:893-900`); only `SetMode` returns `adding` (`:949`); other arms constant; class chain with defaults (`dflt_cm_c()="l"`, `:130-131`; `default_chans` order `:143`): `'l'` → SetMode, so `takes_arg(defaults,'l',True)` vs `False` diverge. Sole law pins `Unknown`/Chr{88} with `adding=False` (`LAWS.bend:1296-1297`) — the one arm where `adding` is irrelevant. Distinct from D33/D105/D106.
+  - What/why: the only arm where the flag matters has no pin.
+  - Fix direction: add the SetMode `adding` law entry.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at LAWS.bend:2007-2008
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: SetMode adding pinned by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+
+- [x] D145 — `src/bend/isupport.bend:1098-1113,451-454,166-167` + `channel_policy.bend:15-19` — Low (law gap) — CHANNELLEN/`join_len` refusal unpinned
+  - Location: `join_len.types/check/lim` read (`:1098-1113`); fed by `limits_channel`/`read_bounded(1,512)` (`:451-454`), default 50 (`:166-167`); base `Channels.valid` (`channel_policy.bend:15-19`) has no length cap, so an overlong well-typed name passes base and reaches the `join_len` refusal — reachable branch. All `join_admit` laws pin type-head/reserved outcomes only (`LAWS.bend:1315,1318,1338,1358,1362`); `show` goldens display `channellen=50` without asserting refusal.
+  - What/why: reachable refusal branch with no law pin.
+  - Fix direction: add the `join_len` refusal law entry.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at LAWS.bend:join_len_refuses_overlong
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: overlong name refusal pinned by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+
+- [x] D146 — `src/bend/server_id.bend:134-135,189-194` — Low (law gap) — `credential_scope_ok` port-bound conjuncts unpinned
+  - Location: predicate conjoins `U32.is_ge(cfg_port,1)` + `U32.is_le(cfg_port,65535)`; U32 admits 0 and 65536+. `isolation_ok` (`:189-194`) pins only exact-match accept (`:193`) and case-mismatch reject (`:194`). Distinct from D25 (`Key.valid` routing gate, rejected by design) and D108 (command/event branches, `LAWS.bend:932-938` scope).
+  - What/why: boundary conjuncts with no law pin.
+  - Fix direction: add port-bound accept/reject law entries.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree at src/bend/server_id.bend:134-135,189-194
+  - Validated by: eighty-round-3 workflow laws sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: port 0/65536+ rejected by law
+  - [ ] negative test: `make lint-laws-io` stays green
+  - [ ] regression test: existing law suites still pass
+
+- [ ] D147 — `src/bend/actor.bend:169,138,153,136,151` + `src/bend/session.bend:4620` + `src/bend/net.bend:887` + `src/bend/wsnet.bend:2253` — Low (per-chunk) — double byte-framer pass per inbound chunk
+  - Location: reader runs the full framer and throws the lines away: `actor.bend:169` (`framed = Fr.push_ex(drop, rem, xs)`) keeps only `rem2`/`drop2` in `ReadFr` (`actor.bend:138`, `:153`), posts raw `Chunk{xs}` (`:136`, `:151`); UI re-runs the identical framer on the same bytes via `Sess.frame_chunk` (`session.bend:4620` = `Fr.push_ex(drop, rem, chunk)`) at `net.bend:887` and `wsnet.bend:2253`. `Fr.push_ex` is a full allocating walk (`frame.bend:471-472`). Deliberate per the comment (`actor.bend:93-99`), so fix must carry lines in `Chunk`. D17/D59/D74 cover only `Irc.parse`/tag scans, never `Fr.push_ex`.
+  - What/why: every inbound byte framed twice with an allocating walk each time.
+  - Fix direction: carry framed lines in `Chunk` (per the in-code comment's own contract) and skip the UI re-frame.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — OUT-OF-SCOPE: needs session.bend/chunk shapes.
+  - Status 2026-10-28: OPEN — Chunk needs third field or xs/req repurpose; req load-bearing; ~20 test sites.
+  - Status 2026-10-28: CONFIRMED — Chunk{xs,req} 2-field pinned (session.bend:255); 17 src constructor sites, 76 test sites across 9 files, 9 match sites; req is live PONG identity (workspace.bend:711-717, net.bend:887).
+  - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: inbound bytes frame identically
+  - [ ] negative test: single-chunk path performs one framer pass
+  - [ ] regression test: existing actor/net suites still pass
+
+- [x] D148 — `src/bend/actor.bend:114-116,121,163` — Low (per-read waste) — `reader_pongs` wastes a full length-walk per read
+  - Location: `reader_pongs.go` already terminates on `Nil` (`:114-116`), so the `List.length(lines)` fuel at `:121` is pure waste, paid unconditionally per read (`:163`). Same disease as D68 (different module/callsite, `replay.bend:72-74`); absent from the D52 confirmed-open list.
+  - What/why: wasted full-list walk per reader read.
+  - Fix direction: drop the fuel binding (termination is already structural).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/actor.bend:109-121
+  - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: pong draining still terminates
+  - [ ] negative test: read performs no length walk
+  - [ ] regression test: existing actor suites still pass
+
+- [x] D149 — `src/bend/net.bend:995-1000,929-935` + `src/bend/session.bend:2337-2344,2386-2405,494-497` — Low (notice duplication) — one outage fires `on_fail` twice, no dedup
+  - Location: `Eof` and `NetFail` arms both call `on_fail` unconditionally (`net.bend:995-1000`); `on_fail` always echoes via `session_fail` (`session.bend:2337-2344`) and always re-Dials when configured (`:2386-2405`), and `reconnect_configured` returns `True` even while `Reconnecting` (`:494-497`, `case _`). `emit_fail_cmd` spawns one 2 s `reconnect_watch` per call (`net.bend:929-935`), and `on_fail` does not bump `gen` (`:935`), so the second event passes the generation gate. Reachable orderings verified: recv-`Fail` posts `NetFail` (`actor.bend:244-247`) while empty-read posts `Eof` (`actor.bend:187-191`); clean-FIN death yields `Eof` then a failed writer send yields `NetFail`. Distinct from D91 (flat-2 s policy) and D93 (per-`Cont` overflow spam).
+  - What/why: double failure notice plus double redial watch per single outage.
+  - Fix direction: dedup same-outage fail events (generation bump or pending-fail flag).
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: OPEN — gen-bump breaks P5 shutdown ack; pending-flag needs Session/Part shapes.
+  - Status 2026-10-28: OPEN — no net-alone last_fail_at store; acc widening breaks deferred_frame test; gen-bump breaks P5 ack; second watch provably stillborn — double echo only.
+  - Status 2026-10-28: CONFIRMED — Reconnect{host,port,gen} exists in-flight only and loop gen is param memory; a redial failure at gen G+1 is indistinguishable from a same-outage dup at gen G (net.bend:1171-1174 passes Reconnecting st through Dial), so a Reconnecting-state gate would swallow post-redial failures and kill the retry loop.
+  - Status 2026-10-28: CONFIRMED — no session-side Both arm exists (session.bend:2386-2405 is session_autoreconnect; no Both constructor repo-wide); fan-in is strictly sequential single events in net.bend on_evt (net.bend:984-1003), each calling on_fail. The only stateless merge (skip when already Reconnecting) is ambiguous on exactly the pair it must disambiguate. Same-outage dedup needs a last-fail store at the on_evt site: no such store exists without a Session/Part shape change.
+  - Status 2026-10-28: CONFIRMED — actor-held flag also impossible: failures are consumed by the UI loop (net.bend live_step/live_go/live_idle threading Ui&Session&U32&Bool), never by the actor — writer_loop consumes NetCmd only (actor.bend:1458), failures post one-way (actor.bend:88), readers terminate on failure (actor.bend:171,243). The UI tuple's Bool is the input-scheduler bit (net.bend:488); NetEvt/NetCmd/FromNet carry no fail bit (session.bend:253,274,287); Reconnect{gen} spawns after the echo (net.bend:916). Informing the actor needs a NetCmd shape change; widening the UI tuple touches ~30 continuation sites.
+  - Status 2026-10-28: CONFIRMED — echo-deferral to watch-fire also fails three facts: fired redials keep net=Reconnecting (gen bump only; post-redial failure indistinguishable), manual same-endpoint dials yield Reconnecting via dialing_state.prior (session.bend:2522-2528), and immediacy is pinned (tests/pty/disconnect_cleanup.py:96-108 requires disconnect echo with autoreconn off where no watch ever fires; sessws_s1s5_demo.bend:1551 pins immediate stale-gen notice). Second watch provably stillborn; only double echo harm remains.
+  - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - Status 2026-10-28: FIXED (render-side coalescing) — text-identical adjacent outage notices merge at the append choke point both `on_fail` arms share (`buffer.bend:1280-1295` `buf_append_line.tail`; predicate `outage_notice_row`/`outage_dup` at `:1257-1272`: same kind + identical text + exact notice strings only). `Eof`/`NetFail` arms (`net.bend:997/1001`) reach it via `session_fail` (`session.bend:2375`) → `Sub.echo_err`. Adjacent duplicates were user-indistinguishable, so no information is lost; distinct notices and plain rows untouched. No shape/test changes; second watch still stillborn as proven. Gates: `test-buffer-spines` (new `outage_coalesce` assertions) =ok, `test-reconnect-recovery`=ok, `test-runtime-reconnect`=ok.
+  - [x] positive test: single outage posts one notice
+  - [x] negative test: distinct outages still post separately
+  - [x] regression test: existing net suites still pass
+
+- [x] D150 — `src/bend/session.bend:410-442,437` + `tests/bend/submit_demo.bend:263-272` — Cosmetic (dead policy) — `hold_cmd` has zero production callers
+  - Location: policy defined at `:410-442`; repo-wide grep shows only the internal `hold_cmd.outs` self-use (`:437`) plus four test pins (`tests/bend/submit_demo.bend:263-272`). Live path gates offline output elsewhere (`submit_offline`). Distinct from D2/D72 (dead `Bool` splits in other modules) and D39 (`transport.bend` helpers). Harmless but confusing surface.
+  - What/why: dead policy surface with test-only callers.
+  - Fix direction: delete, or wire the live offline path through it.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:470)
+  - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: offline output path unchanged
+  - [ ] negative test: no production caller references removed policy
+  - [ ] regression test: existing submit suites still pass
+
+- [x] D151 — `src/bend/session.bend:3143-3145,3122-3124` + `net.bend:671-674` — Low (per-frame) — per-frame `Cont` re-cons via unconditional append
+  - Location: every non-halt frame reads the clock and calls `frame_tick_typing` (`net.bend:671-674`); the `Cont` arm unconditionally builds `Cont{List.append(outs, touts)}` (`session.bend:3143-3145` via `merge_typing_outs` at `:3122-3124`), re-conning the whole `outs` spine even when `touts` is empty (the common case — at most one TAGMSG per tick). Guarding on empty `touts` preserves behavior exactly. Distinct from D51 (`frame_result.restore`, other site with in-code D51 comment) and D96 (`upload_blocked.r1`, other site).
+  - What/why: full `outs` re-cons per frame on the common empty-typing path.
+  - Fix direction: skip the append when `touts` is empty.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/session.bend:3131-3138
+  - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: non-empty typing still merges
+  - [ ] negative test: empty-typing frame performs no append
+  - [ ] regression test: existing net/session suites still pass
+
+- [x] D152 — `src/bend/irc.bend:765-868,782,815,887-890` + `history_search.bend:721,835,866` — Low (spec-compliance gap) — tag readers never decode IRCv3 escapes
+  - Location: all three readers (`typing_tag.one` at `:765-771`, `account_tag.one` at `:798-803`, `label_tag.one` at `:851-856`) do `String.split(tags, ';')` then raw `String.drop`, with no unescape step — a repo-wide `unescape` search over `src/bend` returns zero hits, and the only `escape` hits are unrelated (link/URL lexer, upload lexer). Consequence verified: a `\;` inside a value is split mid-value by the `';'` split (`:782, :815, :868`, `history_search.bend:721`), and `\s`/`\:`/`\\` are never decoded, so downstream raw compares (`String.eq(tag_value(line,"batch"), ref)` at `history_search.bend:835,866`; `label_is_some` at `irc.bend:887-890`) mismatch spec-decoded values. Live impact is small today only because typing values are a fixed enum (`:755-763`) and labels are client-generated alphanumerics (`label_ok`, `:884-885`) — batch/msgid/account values are server/peer-controlled (`history_search.bend:827-835`). No existing test pins escaped input (`label_tag_ok`, `:1055-1060`, covers unescaped only).
+  - What/why: spec-noncompliant tag decode; escaping peers produce misparsed values.
+  - Fix direction: unescape pass per tag value (map `\:`→`;`, `\s`→` `, `\\`→`\`, `\r`→CR, `\n`→LF) before splitting on `;`.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): tag_unescape decodes IRCv3 escapes at tag readers (irc.bend:791-856)
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: escaped values decode per spec
+  - [ ] negative test: unescaped fast path unchanged
+  - [ ] regression test: existing irc suites still pass
+
+- [x] D153 — `src/bend/irc.bend:1421-1431` + `auth.bend:279-291` — Low (bounded perf) — `sasl_event` evaluates every branch via nested `Bool.pick`
+  - Location: `sasl_event.cap` (`:1421-1424`, three nested picks) and `sasl_event` (`:1426-1431`, five nested picks); eagerness is the pinned in-repo rule (`irc.bend:905-907` documents the forced walk, same basis as D52). Reachable via `step_for.sasl` ← `step_for.phase` `_` arm (`auth.bend:279-291`, Cap-family phases; `NickWait`/`Probe`/`Result` have own arms, `Disabled`/`Done` gated by D20/D60) — but within those phases every call pays the split walk, both command folds, and all four numeric gates. Unlisted in D52. Handshake/held only.
+  - What/why: always-evaluate nested picks on the SASL path.
+  - Fix direction: match the phase/command first, evaluate one arm.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/irc.bend:1506-1553
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: SASL phases still resolve identically
+  - [ ] negative test: non-Cap phase pays no walk
+  - [ ] regression test: existing irc/auth suites still pass
+
+- [x] D154 — `src/bend/irc.bend:736-737,836-837,1043-1045,665-679` + `typing.bend:278-279` + `client.bend:990-991` + `session.bend:225,4199,4238` — Low (per-line, 512B-bounded) — typed lines stripped 3× with per-reader tag re-splits
+  - Location: `typing_event` strips once (`:1044`) then `parse` strips again (`:736-737`) and `raw_tags` strips a third time (`:836-837`); production typing path re-strips once more (`typing.bend:278-279`). Both consumers run per inbound line: `session.bend:225` (and live paths `:4199`, `:4238`) run `fold_step.got` (feed-side parse + label split, `client.bend:990-991`) *and* `Ty.apply_line_for` on the same line, each with its own `';'` split (`typing_tags.go` `:772-779`, `label_tags.go` `:858-865`, `tag_value.tags` `history_search.bend:712-724`). Not a dup: D59 explicitly counts parses, not scans; D74 covers only the batch pre-check; D82 covers only `source_prefix`.
+  - What/why: repeated strip + re-split of the same line by two consumers.
+  - Fix direction: share one stripped/tag-split representation between feed and typing paths.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/typing.bend:277-279 (single parse threaded as params; header sites irc.bend:736-737,836-837)
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: typing + feed still agree per line
+  - [ ] negative test: untagged line pays one split
+  - [ ] regression test: existing irc suites still pass
+
+- [x] D155 — `src/bend/irc.bend:1496-1524` + `session.bend:107-108` — Low (perf nit, per-line) — `extract_pong_lag` folds the command and walks all params with no early exit
+  - Location: `is_pong` gates on `ieq(cmd,"PONG")` (`:1513-1516`), and `ieq` is two full folds (`rfc1459` = `to_upper` + walk, both sides, `:190-194`); `ps` passes `extract_pong_lag.ps(t)` as a strict arg (`:1506`), so the tail is fully walked even after a `birc_` hit (`on` returns first `Some` at `:1496-1500` but args are already evaluated). Called per unfolded line via `fold_step.lag_at` (`session.bend:107-108`), which additionally re-parses the line (`extract_pong_lag_line`, `:1523-1524`) — a parse site unlisted in D59's residuals. Almost always returns `None`; 512B-bounded.
+  - What/why: eager tail walk plus redundant re-parse per line for a usually-absent lag tag.
+  - Fix direction: gate the param walk on the `is_pong` hit first; reuse the fold's parse.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/session.bend:107)
+  - Status-note 2026-10-28 (tickoff): Iso twin also gated — fold_step.lag_at_with.tagged carries the same birc_ pre-gate (in-code D155-twin marker at src/bend/session.bend:186-195, verified fresh).
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: lag tag still detected when present
+  - [ ] negative test: non-PONG line performs no param walk
+  - [ ] regression test: existing irc suites still pass
+
+- [x] D156 — `src/bend/dns.bend:510-513,533-542,727-730,783-804` + `actor.bend:1160,1255` — Low (perf/IO, per fallback dial) — lazy dual-dial reads `/etc/resolv.conf` twice
+  - Location: `load_ns()` opens/reads/closes the file per call (`:510-513`); both `lookup_aaaa` (`:533-537`) and `lookup_a` (`:538-542`) call it; `dial_dual.host` (`:727-730`) → `v6known` → on v6-TCP failure `v6dialed` → `v4wanted` (`:685-701`) runs the second lookup/second read of byte-identical content. Production reaches it (`actor.bend:1160,1255` → `Dns.dial_dual` → `:783-804` → `host`). Healthy-v6 dials pay one read (laziness is deliberate, `:723-726`); only fallback dials pay two. Distinct from D91 (cross-redial backoff/caching vs single-dial double-read); the `resolve_ns_go` single-read shape (`:572-588`) serves the `resolve_name` path, not the dial path.
+  - What/why: doubled file IO on every fallback dial.
+  - Fix direction: read once per `dial_dual` and thread the NS list into both lookups.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/dns.bend:820-830
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: fallback dial still resolves
+  - [ ] negative test: healthy dial performs one read
+  - [ ] regression test: existing dns suites still pass
+
+- [x] D157 — `src/bend/endpoint.bend:10-11,18-34,83-91` + `dns_wire.bend:293-300` — Low (perf nit, rare path) — hostname validated ~3× per `/connect` parse
+  - Location: `parse` walks `chars(text, True{})` plus a length walk (`:91`); `host_ok` runs `without_root_dot` (reverse + reverse, `dns_wire.bend:293-300`) plus two length walks (`:31-34`); `labels` re-walks every label with `chars(h, False{})` plus two length walks each (`:24-30`). Same bytes checked three-plus times with different walkers; input ≤260 chars (`MAX_INPUT`, `:10-11`), `/connect`-only path. Nothing in DEFECTS covers it.
+  - What/why: triple validation of the same hostname.
+  - Fix direction: single validating walk returning the normalized labels.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/endpoint.bend:31)
+  - Validated by: eighty-round-3 workflow wire sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: valid hostnames still parse identically
+  - [ ] negative test: invalid hostname fails on the first walk
+  - [ ] regression test: existing endpoint suites still pass
+
+- [x] D158 — `src/bend/cap_notify.bend:405-407,400-403,388-391,909-918` + `client.bend:968-969` — Low (per-message) — every fed non-server-notice message pays nick/prefix validation before any command test, and pays `notify_event` twice when it hits
+  - Location: `notify_event` strictly binds `+nick = notify_nick(m)` (`:406`) and strictly evaluates `notify_nick_ok(nick) && notify_prefix_ok(prefix, server)` (`:407`) before `notify_event.checked` matches; the `ACCOUNT`/`AWAY` command tests happen only inside the `True` arm (`:400-403` → `:388-391`). `is_notify` re-runs the whole event (`:414-415`); `feed_msg_with.with` evaluates it strictly as the `notify` arg per message (`client.bend:968-969`), and the `True` arm evaluates `notify_event` a second time via `feed_notify` (`:909-918` → `:909-911`). D59/D74 cover parses and batch pre-checks, not this presence-validation ordering; no D covers `notify_event`.
+  - What/why: validation before dispatch plus double event evaluation on hits.
+  - Fix direction: test the command first, validate only on the notify path; evaluate once and thread the result.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cap_notify.bend:417
+  - Validated by: eighty-round-3 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: notify-worthy messages still notify identically
+  - [ ] negative test: non-notify message skips validation
+  - [ ] regression test: existing notify suites still pass
+
+- [x] D159 — `src/bend/cap_notify.bend:578-580,285-288` via `src/bend/session.bend:4199-4200,4237-4239,4151-4154,3718,3727` — Low (per-wire-line) — `reg_on_line` re-parses the identical line the fold already parsed
+  - Location: both live arms thread the same `line` through the protocol fold and `CapNotify.reg_on_line(reg, …, line, welcomed)` (`:4199-4200`, `:4237-4239`; own comment "Each wire line updates caps via reg_on_line", `:4151-4154`). `reg_on_line` → `caps_apply_line` runs `Irc.parse(line)` + `Irc.source_prefix(line)` anew (`:578-580` → `:290-291`) before the `cap_event.gated` command/trust check rejects every non-CAP line (`:191-197`). The fold already parsed that same string (`Auth.step_for`, `feed_at_with`, `nick433_for_cm`, `:125-154`). D59's residual list (`:4330`, `:1502`, `:1530`, `:2184`, `:3021`, `:59`, `:704`) never lists these sites, and its distinct-string rationale does not cover this same-string re-parse. Threadable twin `caps_apply_line.parsed` already exists (`:285-288`).
+  - What/why: same-string re-parse per wire line on the capability path.
+  - Fix direction: thread the fold's parse into `reg_on_line` via the existing `.parsed` twin.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/cap_notify.bend:629-632 (reg_on_line.parsed twin, in-code D159 marker)
+  - Validated by: eighty-round-3 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: caps still update identically per line
+  - [ ] negative test: non-CAP line performs no second parse
+  - [ ] regression test: existing cap_notify suites still pass
+
+- [x] D160 — `src/bend/auth.bend:279-291,246-252,283` + `irc.bend:1421-1431` — Low (handshake + Held persistence) — full SASL decode runs before the fail-closed trust gate that discards it
+  - Location: `+event = Irc.sasl_event(m)` is strictly bound (`:283`), then `sasl_checked(sasl_trusted(event, …), …)` matches on the result (`:264-267`), so `sasl_trusted` (`:246-252`) can only discard after decode. The decode is large and eager: nested `Bool.pick`s force `sasl_event.cap` (`String.split` + `has_sasl_cap` walk + `ieq`s), an `AUTHENTICATE` conjunction with a full param-length walk, and four numeric comparisons on every message (`irc.bend:1421-1431`). Reachable per wire line in `AuthCap`, non-disabled `Idle`, and `Held` via the phase wildcard arm (`:291`) since `fold_step` invokes `step_for` per wire line. Distinct from the D20/D60 config-predicate chain (`:298-303`) and the `:286-308` non-finding, which cover endpoint/valid/credential revalidation, not decode-vs-trust ordering.
+  - What/why: full decode before a gate that may discard it.
+  - Fix direction: trust-gate on cheap fields first, decode only when trusted.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/auth.bend:279)
+  - Validated by: eighty-round-3 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: trusted SASL still decodes identically
+  - [ ] negative test: untrusted line skips the decode
+  - [ ] regression test: existing auth suites still pass
+
+- [x] D161 — `src/bend/split.bend:153-154,303-310,315-324` + `session.bend:2809,3230,3773-3805` — Low (per-keystroke when split is on) — follow path walks ~3 buffer spines per keystroke
+  - Location: `name_at` passes `Cl.nth_buf(…)` (`List.get` walk, `buffer.bend:1003-1004`) as an eager `Bool.pick` arg discarded when `i==0n` (`:153-154`, unlisted D52 shape); `normalize.keep` runs two full `found_cm` buffer scans plus `buf_eq_cm` (`:303-304`); both run inside `follow_active.on_cm`/`follow_active_cm` (`:315-324`), which matches `Off{}` first so the cost lands only when split is on. Live callers confirmed in `session.bend`: submit path (`:2809`), nav path (`:3230`), multiline paths (`:3773-3805`). Bounded by `MAX_BUFFERS`=16. Analogous to filed D97 but a different module/path.
+  - What/why: ~3 spine walks per keystroke with split on.
+  - Fix direction: index the buffer once per follow computation; thunk the discarded arg.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: VERIFIED: already satisfied at src/bend/split.bend:157-160
+  - Validated by: eighty-round-3 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: follow still lands correctly
+  - [ ] negative test: split-off keystroke performs no walk
+  - [ ] regression test: existing split suites still pass
+
+- [x] D162 — `src/bend/join_plan.bend:236-246,239-240` — Low (bounded nit, startup-only) — seed path triple-walks membership per name
+  - Location: `seed_candidate` strictly evaluates `has_exact(desired, name)` (full walk, `:50-53` shape) plus a second `List.length(desired)` walk (`:239-240`), and `seed_channels_iso` adds a third `key_exact(prior, name)` walk per name (`:246`). Same triple-walk mechanism as D103 but a different function and path (`remember_iso`/`admitted.go` are not this site). Sole production caller is startup snapshot install (`session.bend:1600`). Bounded by `MAX_CHANNELS`=14 plus snapshot names.
+  - What/why: triple membership walk per seeded name.
+  - Fix direction: single membership pass, as D103 prescribes for its site.
+  - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
+  - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/join_plan.bend:283)
+  - Validated by: eighty-round-3 workflow auth sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
+  - [ ] positive test: seed still installs identically
+  - [ ] negative test: duplicate name detected on the first walk
+  - [ ] regression test: existing join_plan suites still pass
+
+## Round 3 non-findings (explicitly falsified, not filed)
+
+- [x] Confirm no ticket filed: round-3 tick sweep T3 catch-all `scan=True` — load-bearing per fresh sceptic: the arm also serves `FromNet` (live chat data), `Resize`, `MediaFetched/CardFetched`, `SearchDone`; "none of which change chat" is false (`UiError` appends a chat error row, `net.bend:1440-1441`; `Reconnect` mutates session state, `net.bend:1164-1169`). Only `NotifyDone`/`PreferencesDeadline` pass through unchanged (`:1456`/`:1458`) and are rare one-shots.
+- [x] Confirm no ticket filed: round-3 tick sweep T5 1 Hz `TypingTick` full tail — consequence subsumed per fresh sceptic: the tick is the load-bearing typing-expiry vehicle; unchanged-second scan-skip already pinned by D42 (`net.bend:1023-1027`, `:1146-1147`, `:1984-1987`); dominant per-tick cost (`PrefLive.observe` serialization) already filed as D64; residue is trivial-or-load-bearing.
+- [x] Confirm no ticket filed: round-3 view sweep R6 live-bottom quadratic assembly — consequence false per fresh sceptic: the walked first argument of `append` is the fresh one-line `drop` slice (`view.bend:1966`), while `acc` sits unwalked; per-line cost is 3× one-line rows, linear in painted rows, not quadratic in viewport rows.
