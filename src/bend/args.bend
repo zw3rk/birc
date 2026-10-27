@@ -272,10 +272,24 @@ def args_sasl_pass_con(+xs: List<&2, String>, +cfg: Cfg) -> Step:
 def args_sasl_pass(+xs: List<&2, String>, +cfg: Cfg) -> Step:
   args_sasl_pass_con(xs, cfg)
 
+# Match-first chain: later mode walks evaluate only when earlier miss.
+def auth_mode.sns(+value: String, sns: Bool) -> Maybe<&2, Cl.AuthMode>:
+  match sns:
+    case True{}: Some{Cl.SaslNickServ{}}
+    case False{}: None{}
+
+def auth_mode.ns(+value: String, ns: Bool) -> Maybe<&2, Cl.AuthMode>:
+  match ns:
+    case True{}: Some{Cl.NickServOnly{}}
+    case False{}: auth_mode.sns(value, String.eq(value, "sasl-nickserv"))
+
+def auth_mode.sasl(+value: String, sasl: Bool) -> Maybe<&2, Cl.AuthMode>:
+  match sasl:
+    case True{}: Some{Cl.SaslOnly{}}
+    case False{}: auth_mode.ns(value, String.eq(value, "nickserv"))
+
 def auth_mode(+value: String) -> Maybe<&2, Cl.AuthMode>:
-  Bool.pick(Maybe<&2, Cl.AuthMode>, String.eq(value, "sasl"), Some{Cl.SaslOnly{}},
-    Bool.pick(Maybe<&2, Cl.AuthMode>, String.eq(value, "nickserv"), Some{Cl.NickServOnly{}},
-      Bool.pick(Maybe<&2, Cl.AuthMode>, String.eq(value, "sasl-nickserv"), Some{Cl.SaslNickServ{}}, None{})))
+  auth_mode.sasl(value, String.eq(value, "sasl"))
 
 def args_auth.mode(got: Maybe<&2, Cl.AuthMode>, t: List<&2, String>, +cfg: Cfg, prefix: String, success: String) -> Step:
   match got:

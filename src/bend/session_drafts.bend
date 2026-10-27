@@ -166,22 +166,29 @@ def last_sig.go(+xs: List<&2, Cl.Line>, acc: Nat & Bool) -> Nat & Bool:
 def last_sig(+xs: List<&2, Cl.Line>) -> Nat & Bool:
   last_sig.go(xs, (0n, False{}))
 
-def find_sig.pick(hit: Bool, found: Nat & Bool, cont: Nat & Bool) -> Nat & Bool:
-  match hit:
-    case True{}: found
-    case False{}: cont
+# D99: tail-sig fast path. Every spine writer conses the pushed line onto
+# `newest` (buf_push/buf_hist_push) or rebuilds the mirror (buf_indexed),
+# so a nonempty newest head IS the buffer tail — the same discipline as
+# Cl.buf_tail_stamp. The lines walk stays only for the transient open
+# window (newest empty pre-seal). Live buffers are sealed mirrors, so
+# Enter-time error-echo detection pays no line walk.
+def last_sig_buf(+lines: List<&2, Cl.Line>, +newest: List<&2, Cl.Line>) -> Nat & Bool:
+  match newest:
+    case Con{+h, _}: line_sig(h)
+    case Nil{}: last_sig(lines)
 
-def find_sig.buf(+cm: String, +h: Cl.Buffer, cont: Nat & Bool, +name: String) -> Nat & Bool:
-  match h:
-    case Cl.Buffer{+stored, _, _, +lines, _, _, _, _}:
-      find_sig.pick(Cl.buf_eq_cm(cm, stored, name), last_sig(lines), cont)
+def find_sig.cell(hit: Bool, +lines: List<&2, Cl.Line>, +newest: List<&2, Cl.Line>, k: Unit -> Nat & Bool) -> Nat & Bool:
+  match hit:
+    case True{}: last_sig_buf(lines, newest)
+    case False{}: k(Unit{})
 
 def find_sig.go(+cm: String, +xs: List<&2, Cl.Buffer>, +name: String) -> Nat & Bool:
   match xs:
     case Nil{}: (0n, False{})
     case Con{+h, +t}:
-      cont = find_sig.go(cm, t, name)
-      find_sig.buf(cm, h, cont, name)
+      match h:
+        case Cl.Buffer{+stored, _, _, +lines, _, _, +newest, _}:
+          find_sig.cell(Cl.buf_eq_cm(cm, stored, name), lines, newest, _ => find_sig.go(cm, t, name))
 
 def sig_new_error(bsig: Nat & Bool, fsig: Nat & Bool) -> Bool:
   match bsig:
@@ -190,14 +197,18 @@ def sig_new_error(bsig: Nat & Bool, fsig: Nat & Bool) -> Bool:
         case (oid, _):
           nerr && Bool.not(Nat.is_eq(nid, oid))
 
+def new_error.cell(hit: Bool, k: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: k(Unit{})
+
 def new_error.go(+cm: String, +after: List<&2, Cl.Buffer>, +before: List<&2, Cl.Buffer>) -> Bool:
   match after:
     case Nil{}: False{}
     case Con{+h, +t}:
       match h:
-        case Cl.Buffer{+name, _, _, +lines, _, _, _, _}:
-          +tail = new_error.go(cm, t, before)
-          sig_new_error(last_sig(lines), find_sig.go(cm, before, name)) || tail
+        case Cl.Buffer{+name, _, _, +lines, _, _, +newest, _}:
+          new_error.cell(sig_new_error(last_sig_buf(lines, newest), find_sig.go(cm, before, name)), _ => new_error.go(cm, t, before))
 
 def submit_had_error(+cm: String, +before: Cl.Client, +after: Cl.Client) -> Bool:
   new_error.go(cm, Cl.client_bufs(after), Cl.client_bufs(before))
@@ -379,9 +390,13 @@ def step_keys.stripped(+st: Sess.Session, +ds: Drafts.Drafts, +server: Key.Serve
     case True{}: step_keys.route(st, ds, server, strip_moves(keys), typed, enter, cur)
     case False{}: step_keys.route(st, ds, server, keys, typed, enter, cur)
 
+def step_keys.moves.gated(requested: Bool, +ds: Drafts.Drafts, +server: Key.ServerId, +cur: String, +typed: String, +cm: String) -> Bool:
+  match requested:
+    case False{}: False{}
+    case True{}: Bool.not(Drafts.focus_admits_cm(ds, server, cur, typed, cm))
+
 def step_keys.moves(+st: Sess.Session, +ds: Drafts.Drafts, +server: Key.ServerId, +keys: Sess.Keys, +typed: String, +enter: Bool, +cur: String) -> AD & Sess.NetCmd & Bool:
-  +strip = move_requested(keys) && Bool.not(Drafts.focus_admits_cm(ds, server, cur, typed, Sess.session_cm(st)))
-  step_keys.stripped(st, ds, server, keys, typed, enter, cur, strip)
+  step_keys.stripped(st, ds, server, keys, typed, enter, cur, step_keys.moves.gated(move_requested(keys), ds, server, cur, typed, Sess.session_cm(st)))
 
 # A /focus the store cannot accept keeps the old active buffer with an
 # explicit error echo; drafts stay untouched and the composer keeps the

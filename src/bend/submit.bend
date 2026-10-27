@@ -183,8 +183,12 @@ def credential_echo.parsed(+cl: Cl.Client, parsed: Maybe<&2, Irc.Message>) -> Bo
 def credential_echo(+cl: Cl.Client, +line: String) -> Bool:
   credential_echo.parsed(cl, Irc.parse(line))
 
+# One wire form per send (D128): match the notice flag first instead of
+# building both NOTICE and PRIVMSG arms through an eager pick.
 def message_wire(+target: String, +body: String, notice: Bool) -> String:
-  Bool.pick(String, notice, "NOTICE " ++ target ++ " :" ++ body, Irc.format_privmsg(target, body))
+  match notice:
+    case True{}: "NOTICE " ++ target ++ " :" ++ body
+    case False{}: Irc.format_privmsg(target, body)
 
 # Labeled-response send: the label rides only when negotiated AND well-formed
 # AND the tagged line still fits the wire cap; otherwise silently downgrade to
@@ -199,10 +203,13 @@ def message_wire_labeled.fit(+plain: String, +tagged: String, fits: Bool) -> Str
     case True{}: tagged
     case False{}: plain
 
+# One tagged build per labeled send (D129): bind the tagged wire once and
+# reuse it for the length check instead of formatting it twice.
 def message_wire_labeled.gated(+target: String, +body: String, +notice: Bool, +label: String, gated: Bool) -> String:
   match gated:
     case True{}:
-      message_wire_labeled.fit(message_wire(target, body, notice), message_wire_labeled.tagged(notice, target, body, label), Irc.line_ok(message_wire_labeled.tagged(notice, target, body, label)))
+      +tagged = message_wire_labeled.tagged(notice, target, body, label)
+      message_wire_labeled.fit(message_wire(target, body, notice), tagged, Irc.line_ok(tagged))
     case False{}:
       message_wire(target, body, notice)
 
@@ -217,10 +224,15 @@ def labeled_wire_ok() -> Bool:
     && String.eq(message_wire_labeled("#c", "hi", False{}, "bad label", True{}), "PRIVMSG #c :hi")
     && String.eq(message_wire_labeled("#c", "hi", True{}, "bad label", True{}), "NOTICE #c :hi")
 
-def credential_chunks(xs: List<&2, String>, +cl: Cl.Client, +target: String) -> Bool:
+# Split-once chunk scan (D126): the target list is derived once per send and
+# threaded through the chunk loop instead of re-splitting per chunk.
+def credential_chunks.targets(xs: List<&2, String>, +targets: List<&2, String>, +cl: Cl.Client) -> Bool:
   match xs:
     case Nil{}: False{}
-    case Con{+body, rest}: credential_message(cl, target, body) || credential_chunks(rest, cl, target)
+    case Con{+body, rest}: (credential_targets(targets, cl) && credential_body(body)) || credential_chunks.targets(rest, targets, cl)
+
+def credential_chunks(xs: List<&2, String>, +cl: Cl.Client, +target: String) -> Bool:
+  credential_chunks.targets(xs, String.split(target, Chr{44}), cl)
 
 def message_sensitive.parts(parts: Maybe<&2, List<&2, String>>, +cl: Cl.Client, target: String) -> Bool:
   match parts:
@@ -234,12 +246,20 @@ def message_sensitive.fits(fits: Bool, +cl: Cl.Client, target: String, body: Str
 
 # A later chunk can start a service command although the original text did
 # not. Use the same planned-wire predicate before sending and saving a draft.
+def message_sensitive.direct(hit: Bool, +cl: Cl.Client, target: String, body: String, +overhead: Nat) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: message_sensitive.fits(Nat.is_lt(overhead, Irc.LINE_MAX()), cl, target, body, overhead)
+
+# Credential hit skips the chunking probe (D126): when the whole body is
+# already a service command there is nothing for the per-chunk re-split to add.
+def message_sensitive.cleaned(+cl: Cl.Client, +name: String, +clean: String, overhead: Nat) -> Bool:
+  message_sensitive.direct(credential_message(cl, name, clean), cl, name, clean, overhead)
+
 def message_sensitive(+cl: Cl.Client, +target: String, +body: String, +notice: Bool) -> Bool:
   +clean = Irc.strip_ctl(body)
   +name = Cl.target_name(target)
-  +overhead = Irc.utf8_len(message_wire(name, "", notice))
-  credential_message(cl, name, clean)
-    || message_sensitive.fits(Nat.is_lt(overhead, Irc.LINE_MAX()), cl, name, clean, overhead)
+  message_sensitive.cleaned(cl, name, clean, Irc.utf8_len(message_wire(name, "", notice)))
 
 def echo_text_gated.notice.suppressed(suppressed: Bool, +cl: Cl.Client, +bi: Nat, +body: String) -> Cl.Client:
   match suppressed:
@@ -293,6 +313,50 @@ def message_parts(private: Bool, +body: String, cap: Nat) -> Maybe<&2, List<&2, 
     case True{}: Bool.pick(Maybe<&2, List<&2, String>>, Nat.is_le(Irc.utf8_len(body), cap), Some{body <> Nil{}}, None{})
     case False{}: Chunks.split(body, cap)
 
+# D237: one chunk split shared between the sensitivity probe and the send
+# plan for a validated line. Direct-credential lines skip the split (the D126
+# fast path stays); every other line probes and plans over the same chunks.
+def message_probe.split(parts: Maybe<&2, List<&2, String>>, +cl: Cl.Client, +name: String) -> Bool & Maybe<&2, List<&2, String>>:
+  match parts:
+    case None{}: (False{}, None{})
+    case Some{+xs}: (credential_chunks(xs, cl, name), Some{xs})
+
+def message_probe.fits(fits: Bool, +cl: Cl.Client, +name: String, +clean: String, cap: Nat) -> Bool & Maybe<&2, List<&2, String>>:
+  match fits:
+    case False{}: (False{}, None{})
+    case True{}: message_probe.split(Chunks.split(clean, cap), cl, name)
+
+def message_probe.hit(hit: Bool, +cl: Cl.Client, +name: String, +clean: String, +overhead: Nat) -> Bool & Maybe<&2, List<&2, String>>:
+  match hit:
+    case True{}: (True{}, None{})
+    case False{}: message_probe.fits(Nat.is_lt(overhead, Irc.LINE_MAX()), cl, name, clean, Nat.sub(Irc.LINE_MAX(), overhead))
+
+def message_probe(+cl: Cl.Client, +name: String, +clean: String, overhead: Nat) -> Bool & Maybe<&2, List<&2, String>>:
+  message_probe.hit(credential_message(cl, name, clean), cl, name, clean, overhead)
+
+def message_parts.fit(fits: Bool, +clean: String) -> Maybe<&2, List<&2, String>>:
+  match fits:
+    case False{}: None{}
+    case True{}: Some{clean <> Nil{}}
+
+def message_parts.single(+clean: String, cap: Nat) -> Maybe<&2, List<&2, String>>:
+  message_parts.fit(Nat.is_le(Irc.utf8_len(clean), cap), clean)
+
+def message_parts.unprobed(sensitive: Bool, +clean: String, cap: Nat) -> Maybe<&2, List<&2, String>>:
+  match sensitive:
+    case True{}: message_parts.single(clean, cap)
+    case False{}: Chunks.split(clean, cap)
+
+def message_parts.kept(sensitive: Bool, +chunks: List<&2, String>, +clean: String, cap: Nat) -> Maybe<&2, List<&2, String>>:
+  match sensitive:
+    case False{}: Some{chunks}
+    case True{}: message_parts.single(clean, cap)
+
+def message_parts.probed(sensitive: Bool, parts: Maybe<&2, List<&2, String>>, +clean: String, cap: Nat) -> Maybe<&2, List<&2, String>>:
+  match parts:
+    case Some{+chunks}: message_parts.kept(sensitive, chunks, clean, cap)
+    case None{}: message_parts.unprobed(sensitive, clean, cap)
+
 def has_no_nul(+s: String) -> Bool:
   match s:
     case SNil{}: True{}
@@ -303,10 +367,17 @@ def has_no_nul(+s: String) -> Bool:
 # word, framing on the stripped body, no NUL anywhere in the raw body
 # (CR/LF cannot survive line splitting, NUL would silently vanish), and
 # target headroom under the wire cap.
+# D100: one cleaned record per send (cleaned body + target name + overhead).
+# The single-send path binds it once and shares it across the valid/reason
+# and sensitive/chunking predicates instead of re-stripping, re-naming, and
+# re-measuring the body per predicate.
+def text_valid.cleaned(+name: String, +clean: String, +raw: String, overhead: Nat) -> Bool:
+  Commands.word(name) && Commands.framing(clean) && has_no_nul(raw)
+    && Nat.is_lt(overhead, Irc.LINE_MAX())
+
 def text_valid(+target: String, +raw: String, +notice: Bool) -> Bool:
   +name = Cl.target_name(target)
-  Commands.word(name) && Commands.framing(Irc.strip_ctl(raw)) && has_no_nul(raw)
-    && Nat.is_lt(Irc.utf8_len(message_wire(name, "", notice)), Irc.LINE_MAX())
+  text_valid.cleaned(name, Irc.strip_ctl(raw), raw, Irc.utf8_len(message_wire(name, "", notice)))
 
 # Accurate cause for a text_valid rejection: a NUL byte is a control-input
 # failure even for a valid target, never a target failure.
@@ -318,21 +389,21 @@ def text_reason.cause(nul: Bool) -> String:
 def text_reason(+target: String, +raw: String, +notice: Bool) -> String:
   text_reason.cause(Bool.not(has_no_nul(raw)))
 
-def send_text_gated.valid(valid: Bool, +reason: String, +cl: Cl.Client, bi: Nat, +target: String, +body: String, +private: Bool, notice: Bool, overhead: Nat, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
+# Lazy send verdict (D100 slice): the rejection reason is derived only on the
+# invalid path and the credential/chunking probe only on the valid path,
+# instead of evaluating both verdicts through strict args on every send.
+def send_text_gated.planned(valid: Bool, +cl: Cl.Client, bi: Nat, +name: String, +clean: String, +target: String, +body: String, +notice: Bool, +overhead: Nat, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
   match valid:
-    case False{}: (echo_err(cl, reason), Nil{})
+    case False{}: (echo_err(cl, text_reason(target, body, notice)), Nil{})
     case True{}:
-      send_text_gated.parts(message_parts(private, body, Nat.sub(Irc.LINE_MAX(), overhead)), cl, bi, target, private, notice, echo_ok)
-
-def send_text.valid(valid: Bool, +reason: String, +cl: Cl.Client, bi: Nat, +target: String, +body: String, +private: Bool, notice: Bool, overhead: Nat) -> Cl.Client & List<&2, String>:
-  send_text_gated.valid(valid, reason, cl, bi, target, body, private, notice, overhead, False{})
+      +private = message_sensitive.cleaned(cl, name, clean, overhead)
+      send_text_gated.parts(message_parts(private, clean, Nat.sub(Irc.LINE_MAX(), overhead)), cl, bi, name, private, notice, echo_ok)
 
 def send_text_gated(+cl: Cl.Client, bi: Nat, +target: String, +body: String, +notice: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
   +clean = Irc.strip_ctl(body)
   +name = Cl.target_name(target)
   +overhead = Irc.utf8_len(message_wire(name, "", notice))
-  send_text_gated.valid(text_valid(target, body, notice), text_reason(target, body, notice),
-    cl, bi, name, clean, message_sensitive(cl, name, clean, notice), notice, overhead, echo_ok)
+  send_text_gated.planned(text_valid.cleaned(name, clean, body, overhead), cl, bi, name, clean, target, body, notice, overhead, echo_ok)
 
 def send_text(+cl: Cl.Client, bi: Nat, +target: String, +body: String, +notice: Bool) -> Cl.Client & List<&2, String>:
   send_text_gated(cl, bi, target, body, notice, False{})
@@ -358,18 +429,30 @@ def join_channel(+target: String) -> Bool:
     case SNil{}: False{}
     case SCon{h, t}: Irc.is_chan_type(h) && Bool.not(String.is_empty(t))
 
+# Fail-fast validation (D166): the tail walk is a lazy continuation applied
+# only when the head channel is admitted, so a rejection skips the tail.
+def join_channels.step(ok: Bool, rest: Unit -> Bool) -> Bool:
+  match ok:
+    case False{}: False{}
+    case True{}: rest(Unit{})
+
 def join_channels(targets: List<&2, String>) -> Bool:
   match targets:
     case Nil{}: True{}
-    case Con{+h, t}: join_channel(h) && join_channels(t)
+    case Con{+h, t}: join_channels.step(join_channel(h), _ => join_channels(t))
+
+def join_channels_iso.after(ok: Bool, rest: Unit -> Bool) -> Bool:
+  match ok:
+    case False{}: False{}
+    case True{}: rest(Unit{})
 
 def join_channels_iso(targets: List<&2, String>, keys: List<&2, String>, +iso: Is.State) -> Bool:
   match targets:
     case Nil{}: True{}
     case Con{+target, target_rest}:
       match keys:
-        case Nil{}: Is.join_admit(iso, target, "") && join_channels_iso(target_rest, Nil{}, iso)
-        case Con{+key, key_rest}: Is.join_admit(iso, target, key) && join_channels_iso(target_rest, key_rest, iso)
+        case Nil{}: join_channels_iso.after(Is.join_admit(iso, target, ""), _ => join_channels_iso(target_rest, Nil{}, iso))
+        case Con{+key, key_rest}: join_channels_iso.after(Is.join_admit(iso, target, key), _ => join_channels_iso(target_rest, key_rest, iso))
 
 def join_staged.got_cm(+cm: String, pair: Cl.Client & Maybe<&2, Nat>) -> Maybe<&2, Cl.Client>:
   match pair:
@@ -1398,27 +1481,56 @@ def nth_link(xs: List<&2, String>, +n: Nat) -> Maybe<&2, String>:
 def echo_link_result(+cl: Cl.Client, +text: String) -> Cl.Client:
   Cl.client_log(cl, Cl.active_of(cl), Cl.LinkResult{}, text)
 
-def clear_link_results.keep(skip: Bool, line: Cl.Line, rest: List<&2, Cl.Line>) -> List<&2, Cl.Line>:
-  match skip:
-    case True{}: rest
-    case False{}: line <> rest
+# D127: the clear walk reports the kept lines only when it removed something,
+# so a buffer with no prior link results keeps its exact lines and scroll
+# anchor instead of paying the rebuild plus the reanchor walk before the URL
+# scan. Each match scrutinizes its discriminant first (match-first shape).
+def clear_link_results.tail_kept(tail: List<&2, Cl.Line>, rest: Maybe<&2, List<&2, Cl.Line>>) -> List<&2, Cl.Line>:
+  match rest:
+    case None{}: tail
+    case Some{+kept}: kept
 
-def clear_link_results.lines(lines: List<&2, Cl.Line>) -> List<&2, Cl.Line>:
+def clear_link_results.tail_maybe(line: Cl.Line, tail: List<&2, Cl.Line>, rest: Maybe<&2, List<&2, Cl.Line>>) -> Maybe<&2, List<&2, Cl.Line>>:
+  match rest:
+    case None{}: None{}
+    case Some{+kept}: Some{line <> kept}
+
+def clear_link_results.kept(skip: Bool, line: Cl.Line, tail: List<&2, Cl.Line>, rest: Maybe<&2, List<&2, Cl.Line>>) -> Maybe<&2, List<&2, Cl.Line>>:
+  match skip:
+    case True{}: Some{clear_link_results.tail_kept(tail, rest)}
+    case False{}: clear_link_results.tail_maybe(line, tail, rest)
+
+def clear_link_results.lines(lines: List<&2, Cl.Line>) -> Maybe<&2, List<&2, Cl.Line>>:
   match lines:
-    case Nil{}: Nil{}
-    case Con{+line, t}:
+    case Nil{}: None{}
+    case Con{+line, +t}:
       match line:
         case Cl.Line{kind, _, _, _, _}:
-          clear_link_results.keep(Cl.is_link_result(kind), line, clear_link_results.lines(t))
+          clear_link_results.kept(Cl.is_link_result(kind), line, t, clear_link_results.lines(t))
 
-def clear_link_results.buf(b: Cl.Buffer) -> Cl.Buffer:
+def clear_link_results.lines2(+b: Cl.Buffer) -> Maybe<&2, List<&2, Cl.Line>>:
+  match b:
+    case Cl.Buffer{_, _, _, +lines, _, _, _, _}:
+      clear_link_results.lines(lines)
+
+def clear_link_results.gated(kept: Maybe<&2, List<&2, Cl.Line>>, b: Cl.Buffer, name: String, channel: Bool, topic: String, +lines: List<&2, Cl.Line>, nicks: List<&2, String>, scroll: Cl.Scroll) -> Cl.Buffer:
+  match kept:
+    case None{}: b
+    case Some{+kept2}: Cl.buf_indexed(name, channel, topic, kept2, nicks, Cl.reanchor_lines(lines, kept2, scroll))
+
+def clear_link_results.swap(kept: Maybe<&2, List<&2, Cl.Line>>, +b: Cl.Buffer) -> Cl.Buffer:
   match b:
     case Cl.Buffer{name, channel, topic, +lines, nicks, scroll, _, _}:
-      +kept = clear_link_results.lines(lines)
-      Cl.buf_indexed(name, channel, topic, kept, nicks, Cl.reanchor_lines(lines, kept, scroll))
+      clear_link_results.gated(kept, b, name, channel, topic, lines, nicks, scroll)
+
+def clear_link_results.buf(+b: Cl.Buffer) -> Cl.Buffer:
+  clear_link_results.swap(clear_link_results.lines2(b), b)
+
+def clear_link_results.plain(b: Cl.Buffer) -> Cl.Buffer:
+  clear_link_results.buf(b)
 
 def clear_link_results(+cl: Cl.Client) -> Cl.Client:
-  Cl.buf_modify_client(cl, Cl.active_of(cl), clear_link_results.buf)
+  Cl.buf_modify_client(cl, Cl.active_of(cl), clear_link_results.plain)
 
 def echo_links.go(fuel: Nat, cl: Cl.Client, xs: List<&2, String>, +idx: Nat) -> Cl.Client:
   match fuel:
@@ -1442,35 +1554,41 @@ def submit_links(+cl: Cl.Client) -> Cl.Client & List<&2, String>:
   +source = clear_link_results(cl)
   submit_links.on(source, active_buf_urls(source))
 
-def open_parse_arg.zero(is_zero: Bool, +cl: Cl.Client, n: U32) -> Maybe<&2, String>:
+# D127: numbered and bare /open share one caller-supplied URL scan instead of
+# each rescanning the scrollback; the wrappers preserve the single-scan shape
+# for the existing callers and law tests.
+def open_parse_arg.zero(is_zero: Bool, +urls: List<&2, String>, n: U32) -> Maybe<&2, String>:
   match is_zero:
     case True{}: None{}
     case False{}:
-      nth_link(active_buf_urls(cl), U32.to_nat(U32.sub(n, 1)))
+      nth_link(urls, U32.to_nat(U32.sub(n, 1)))
 
-def open_parse_arg.num(+cl: Cl.Client, num_mb: Maybe<&2, U32>) -> Maybe<&2, String>:
+def open_parse_arg.num(+urls: List<&2, String>, num_mb: Maybe<&2, U32>) -> Maybe<&2, String>:
   match num_mb:
     case None{}:
       None{}
     case Some{+n}:
-      open_parse_arg.zero(U32.is_eq(n, 0), cl, n)
+      open_parse_arg.zero(U32.is_eq(n, 0), urls, n)
 
-def open_resolve_target.http(is_http: Bool, +cl: Cl.Client, +arg: String) -> Maybe<&2, String>:
+def open_resolve_target.http(is_http: Bool, +urls: List<&2, String>, +arg: String) -> Maybe<&2, String>:
   match is_http:
     case True{}:
       Some{arg}
     case False{}:
-      open_parse_arg.num(cl, U32.read(arg))
+      open_parse_arg.num(urls, U32.read(arg))
 
-def open_resolve_target.empty(empty: Bool, +cl: Cl.Client, +arg: String) -> Maybe<&2, String>:
+def open_resolve_target.empty(empty: Bool, +arg: String, +urls: List<&2, String>) -> Maybe<&2, String>:
   match empty:
     case True{}:
-      nth_link(active_buf_urls(cl), 0n)
+      nth_link(urls, 0n)
     case False{}:
-      open_resolve_target.http(is_http_pfx(arg), cl, arg)
+      open_resolve_target.http(is_http_pfx(arg), urls, arg)
+
+def open_resolve_target.urls(+arg: String, +urls: List<&2, String>) -> Maybe<&2, String>:
+  open_resolve_target.empty(String.is_empty(arg), arg, urls)
 
 def open_resolve_target(+cl: Cl.Client, +arg: String) -> Maybe<&2, String>:
-  open_resolve_target.empty(String.is_empty(arg), cl, arg)
+  open_resolve_target.urls(arg, active_buf_urls(cl))
 
 def submit_open_cmd.got(+cl: Cl.Client, mb: Maybe<&2, String>) -> Cl.Client & List<&2, String>:
   match mb:
@@ -1479,8 +1597,11 @@ def submit_open_cmd.got(+cl: Cl.Client, mb: Maybe<&2, String>) -> Cl.Client & Li
     case Some{+url}:
       (echo_link_result(cl, "opening " ++ url), empty_out())
 
+def submit_open_cmd.urls(+cl: Cl.Client, +rest: String, +urls: List<&2, String>) -> Cl.Client & List<&2, String>:
+  submit_open_cmd.got(cl, open_resolve_target.urls(Irc.drop_spaces(rest), urls))
+
 def submit_open_cmd(+cl: Cl.Client, +rest: String) -> Cl.Client & List<&2, String>:
-  submit_open_cmd.got(cl, open_resolve_target(cl, Irc.drop_spaces(rest)))
+  submit_open_cmd.urls(cl, rest, active_buf_urls(cl))
 
 # ---- /search ------------------------------------------------------------
 

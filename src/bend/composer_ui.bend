@@ -294,16 +294,20 @@ type Colon is Data:
 def one(+h: Char) -> String:
   SCon{h, SNil{}}
 
+# D78: the plain arm copied after per character (O(n^2)) and the colon arm
+# re-appended before per colon. Accumulate reversed (O(1) cons per char);
+# the single reverse pair at the end restores forward order. before/after
+# below are stored reversed; the returned Colon keeps forward strings.
 def split_colon.go(s: String, colon: Bool, +held: Char, +before: String, +after: String, seen: Bool) -> Colon:
   match s:
     case SNil{}:
       match colon:
-        case True{}: Colon{True{}, before ++ after ++ ":", ""}
-        case False{}: Colon{seen, before, after ++ one(held)}
+        case True{}: Colon{True{}, String.reverse(before) ++ String.reverse(after) ++ ":", ""}
+        case False{}: Colon{seen, String.reverse(before), String.reverse(after) ++ one(held)}
     case SCon{+n, t}:
       match colon:
-        case True{}: split_colon.go(t, U32.is_eq(Char.to_u32(n), 58), n, before ++ after ++ ":", "", True{})
-        case False{}: split_colon.go(t, U32.is_eq(Char.to_u32(n), 58), n, before, after ++ one(held), seen)
+        case True{}: split_colon.go(t, U32.is_eq(Char.to_u32(n), 58), n, SCon{held, after} ++ before, "", True{})
+        case False{}: split_colon.go(t, U32.is_eq(Char.to_u32(n), 58), n, before, SCon{held, after}, seen)
 
 def split_colon(s: String) -> Colon:
   match s:
@@ -513,14 +517,28 @@ def emoji_ghost.drop(empty: Bool, +name: String, +pre: String) -> String:
     case True{}: ""
     case False{}: String.drop(name, String.length(":" ++ pre))
 
+# D198: the two emoji_at probes walked the match list twice (plus a length
+# for fuel inside each). The common in-range probe has idx == clamp, so one
+# walk suffices there; the out-of-range shape keeps both probes.
+def emoji_ghost.one(+row: Emoji.Entry, +pre: String) -> String:
+  +name = emoji_name(row)
+  emoji_ghost.drop(String.is_empty(name), name, pre)
+
+def emoji_ghost.clamped(same: Bool, +ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat, +c: Nat) -> String:
+  match same:
+    case True{}: emoji_ghost.one(emoji_at(ms, idx), pre)
+    case False{}:
+      emoji_ghost.drop(
+        String.is_empty(emoji_name(emoji_at(ms, idx))),
+        emoji_name(emoji_at(ms, c)),
+        pre)
+
 def emoji_ghost.ms(+ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat) -> String:
   +n = List.length(&2, Emoji.Entry, ms)
+  +c = pick_clamp(idx, n)
   # Empty probe keeps the unclamped idx (out-of-range → no ghost); the
   # suffix still reads the clamped selection when the probe hits.
-  emoji_ghost.drop(
-    String.is_empty(emoji_name(emoji_at(ms, idx))),
-    emoji_name(emoji_at(ms, pick_clamp(idx, n))),
-    pre)
+  emoji_ghost.clamped(Nat.is_eq(idx, c), ms, pre, idx, c)
 
 def emoji_ghost.pre(word: Maybe<&2, String>, +idx: Nat) -> String:
   match word:
@@ -602,12 +620,29 @@ def ghost_at.some(+ms: List<&2, Emoji.Entry>, +slash: String, +pre: String, +idx
 # One prefix parse, one alias-table build, and one match per Tab probe: the
 # naive shape evaluates emoji_len (parse+table+match) and then ghost_at
 # (slash, plus another parse+table+match). The boolean is unchanged.
-def tab_accept_ok.some(+ms: List<&2, Emoji.Entry>, +typed: String, +pre: String, +idx: Nat) -> Bool:
+# D138: menu_len(typed) and ghost_suffix(typed) each built the 43-row
+# command table per Tab probe. Parse the word and build the table once,
+# then thread both into the two checks (same verdicts, one build).
+def tab_accept_ok.noslash(+ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat) -> Bool:
+  Bool.or(
+    Nat.is_gt(List.length(&2, Emoji.Entry, ms), 0n),
+    Bool.not(String.is_empty(ghost_at.some(ms, "", pre, idx))))
+
+def tab_accept_ok.slashed(+w: String, +ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat) -> Bool:
+  +names = command_names(w)
   Bool.or(
     Nat.is_gt(List.length(&2, Emoji.Entry, ms), 0n),
     Bool.or(
-      Nat.is_gt(menu_len(typed), 1n),
-      Bool.not(String.is_empty(ghost_at.some(ms, ghost_suffix(typed), pre, idx)))))
+      Nat.is_gt(List.length(&2, String, names), 1n),
+      Bool.not(String.is_empty(ghost_at.some(ms, ghost_of(w, names), pre, idx)))))
+
+def tab_accept_ok.worded(word: Maybe<&2, String>, +ms: List<&2, Emoji.Entry>, +pre: String, +idx: Nat) -> Bool:
+  match word:
+    case None{}: tab_accept_ok.noslash(ms, pre, idx)
+    case Some{+w}: tab_accept_ok.slashed(w, ms, pre, idx)
+
+def tab_accept_ok.some(+ms: List<&2, Emoji.Entry>, +typed: String, +pre: String, +idx: Nat) -> Bool:
+  tab_accept_ok.worded(command_word(typed), ms, pre, idx)
 
 def tab_accept_ok.pre(word: Maybe<&2, String>, +typed: String, +idx: Nat) -> Bool:
   match word:

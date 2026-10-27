@@ -42,24 +42,28 @@ def hist_prev.on(+lines: List<&2, String>, +pos: Nat, z: Bool) -> Nat & String:
 def hist_prev(+lines: List<&2, String>, +pos: Nat) -> Nat & String:
   hist_prev.on(lines, pos, Nat.is_eq(pos, 0n))
 
-def hist_next.at(+lines: List<&2, String>, +p: Nat, +n: Nat, last: Bool) -> Nat & String:
-  match last:
-    case True{}:
-      (n, "")
-    case False{}:
-      (p, line_at(lines, p))
+# Single index pass: one walk yields both the ring length and the entry
+# at the recall target, so a recall step pays no separate length/get walks.
+def hist_next.kept(at: Bool, +h: String, +kept: String) -> String:
+  match at:
+    case True{}: h
+    case False{}: kept
 
-def hist_next.on(+lines: List<&2, String>, +pos: Nat, +n: Nat, last: Bool) -> Nat & String:
-  match last:
-    case True{}:
-      (n, "")
-    case False{}:
-      +p = Nat.add(pos, 1n)
-      hist_next.at(lines, p, n, Nat.is_eq(p, n))
+def hist_next.scan.done(past_end: Bool, +p: Nat, +n: Nat, +kept: String) -> Nat & String:
+  match past_end:
+    case True{}: (n, "")
+    case False{}: (p, kept)
+
+def hist_next.scan.go(+xs: List<&2, String>, +p: Nat, +i: Nat, +kept: String) -> Nat & String:
+  match xs:
+    case Nil{}: hist_next.scan.done(Nat.is_ge(p, i), p, i, kept)
+    case Con{+h, +t}: hist_next.scan.go(t, p, Nat.add(i, 1n), hist_next.kept(Nat.is_eq(i, p), h, kept))
+
+def hist_next.scan(+lines: List<&2, String>, +p: Nat) -> Nat & String:
+  hist_next.scan.go(lines, p, 0n, "")
 
 def hist_next(+lines: List<&2, String>, +pos: Nat) -> Nat & String:
-  +n = List.length(&2, String, lines)
-  hist_next.on(lines, pos, n, Nat.is_ge(pos, n))
+  hist_next.scan(lines, Nat.add(pos, 1n))
 
 # Recall shelves the unsubmitted composer text on the first step back from
 # the bottom and restores it on the step past the newest entry. Browsing
@@ -77,17 +81,18 @@ def hist_prev.with_kept(pair: Nat & String, +kept: String) -> Recall:
 def hist_prev.at(+lines: List<&2, String>, +pos: Nat, +draft: String, +stash: String) -> Recall:
   hist_prev.with_kept(hist_prev(lines, pos), hist_prev.shelve(Nat.is_eq(pos, List.length(&2, String, lines)), draft, stash))
 
-def hist_next.shown(past_end: Bool, +shown: String, +stash: String) -> String:
+def hist_next.step.done(past_end: Bool, +p: Nat, +n: Nat, +kept: String, +stash: String) -> Recall:
   match past_end:
-    case True{}: stash
-    case False{}: shown
+    case True{}: Recall{n, stash, stash}
+    case False{}: Recall{p, kept, stash}
 
-def hist_next.restored(pair: Nat & String, +n: Nat, +stash: String) -> Recall:
-  match pair:
-    case (+p, +shown): Recall{p, hist_next.shown(Nat.is_eq(p, n), shown, stash), stash}
+def hist_next.step.go(+xs: List<&2, String>, +p: Nat, +i: Nat, +kept: String, +stash: String) -> Recall:
+  match xs:
+    case Nil{}: hist_next.step.done(Nat.is_ge(p, i), p, i, kept, stash)
+    case Con{+h, +t}: hist_next.step.go(t, p, Nat.add(i, 1n), hist_next.kept(Nat.is_eq(i, p), h, kept), stash)
 
 def hist_next.step(+lines: List<&2, String>, +pos: Nat, +stash: String) -> Recall:
-  hist_next.restored(hist_next(lines, pos), List.length(&2, String, lines), stash)
+  hist_next.step.go(lines, Nat.add(pos, 1n), 0n, "", stash)
 
 def hist_move(+lines: List<&2, String>, +pos: Nat, +stash: String, +draft: String, dir: HistStep) -> Recall:
   match dir:
@@ -128,25 +133,38 @@ def pick_idx(view: CView) -> Nat:
     case CPick{idx}: idx
     case _: 0n
 
+def menu_movable.other(short: Bool, +draft: String) -> Bool:
+  match short:
+    case True{}: True{}
+    case False{}: Nat.is_gt(Cu.emoji_len(draft), 0n)
+
 def menu_movable(view: CView, +draft: String) -> Bool:
   match view:
     case CHelp{_}: False{}
     case CHidden{}: False{}
     case CUpload{}: False{}
-    case _: Bool.or(Nat.is_gt(Cu.menu_len(draft), 1n), Nat.is_gt(Cu.emoji_len(draft), 0n))
+    case _: menu_movable.other(Nat.is_gt(Cu.menu_len(draft), 1n), draft)
 
 def dir_down(dir: HistStep) -> Bool:
   match dir:
     case StepNext{}: True{}
     case _: False{}
 
-def pick_len.on(slash: Bool, +draft: String) -> Nat:
-  match slash:
-    case True{}: Cu.menu_len(draft)
+def pick_len.gt(gt: Bool, +m: Nat, +draft: String) -> Nat:
+  match gt:
+    case True{}: m
     case False{}: Cu.emoji_len(draft)
 
 def pick_len(+draft: String) -> Nat:
-  pick_len.on(Nat.is_gt(Cu.menu_len(draft), 1n), draft)
+  +m = Cu.menu_len(draft)
+  pick_len.gt(Nat.is_gt(m, 1n), m, draft)
+
+# Threaded twin of pick_len.gt: the caller already holds both lengths, so
+# the pick count reuses them instead of rebuilding the menu/emoji tables.
+def pick_len.threaded(gt: Bool, +m: Nat, +e: Nat) -> Nat:
+  match gt:
+    case True{}: m
+    case False{}: e
 
 def seed_of(dir: HistStep) -> U32:
   match dir:
@@ -220,20 +238,40 @@ def finish_keys.plain.at(recall: Recall, view: CView, +typed: String, +prev: Str
 def finish_keys.plain(+lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, +dir: HistStep, enter: Bool) -> KeyPlan:
   finish_keys.plain.at(hist_move(lines, pos, stash, draft, dir), view, typed, prev, dir, enter)
 
-def finish_keys.pick(down: Bool, +pos: Nat, view: CView, +draft: String, +prev: String, +stash: String) -> KeyPlan:
-  +n = pick_len(draft)
+# D98: menu_len is built once in navmenu.routed and threaded through short
+# into pick; emoji_len is built at most once (only when the menu is short).
+# menu_movable/pick_len stay intact for the LAWS pins; this path replaces
+# their per-frame double evaluation. Closed views build no lengths at all.
+def finish_keys.pick.threaded(down: Bool, +pos: Nat, view: CView, +draft: String, +prev: String, +stash: String, +m: Nat, +e: Nat) -> KeyPlan:
+  +n = pick_len.threaded(Nat.is_gt(m, 1n), m, e)
   +idx = Cu.pick_move(down, Cu.pick_clamp(pick_idx(view), n), n)
   KeyApply{False{}, 1, panel_keep(CPick{idx}, draft, prev), pos, draft, stash}
 
-def finish_keys.navmenu(open: Bool, dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
+def finish_keys.navmenu.open(open: Bool, dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, enter: Bool, +m: Nat, +e: Nat) -> KeyPlan:
   match open:
-    case True{}: finish_keys.pick(dir_down(dir), pos, view, draft, prev, stash)
+    case True{}: finish_keys.pick.threaded(dir_down(dir), pos, view, draft, prev, stash, m, e)
     case False{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
+
+def finish_keys.navmenu.short(short: Bool, dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, view: CView, +typed: String, +draft: String, +prev: String, enter: Bool, +m: Nat) -> KeyPlan:
+  match short:
+    case True{}: finish_keys.navmenu.open(True{}, dir, lines, pos, stash, view, typed, draft, prev, enter, m, 0n)
+    case False{}:
+      +e = Cu.emoji_len(draft)
+      finish_keys.navmenu.open(Nat.is_gt(e, 0n), dir, lines, pos, stash, view, typed, draft, prev, enter, m, e)
+
+def finish_keys.navmenu.routed(view: CView, dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
+  match view:
+    case CHelp{_}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
+    case CHidden{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
+    case CUpload{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
+    case _:
+      +m = Cu.menu_len(draft)
+      finish_keys.navmenu.short(Nat.is_gt(m, 1n), dir, lines, pos, stash, view, typed, draft, prev, enter, m)
 
 def finish_keys.dir(dir: HistStep, +lines: List<&2, String>, +pos: Nat, +stash: String, +view: CView, +typed: String, +draft: String, +prev: String, enter: Bool) -> KeyPlan:
   match dir:
     case StepStay{}: finish_keys.plain(lines, pos, stash, view, typed, draft, prev, dir, enter)
-    case _: finish_keys.navmenu(menu_movable(view, draft), dir, lines, pos, stash, view, typed, draft, prev, enter)
+    case _: finish_keys.navmenu.routed(view, dir, lines, pos, stash, typed, draft, prev, enter)
 
 def finish_keys.accept(+pos: Nat, +view: CView, +typed: String, +prev: String, +stash: String) -> KeyPlan:
   +next = Cu.compose_accept(typed, pick_idx(view))

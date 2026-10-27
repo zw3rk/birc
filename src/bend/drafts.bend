@@ -174,12 +174,14 @@ def fits(+text: String) -> Bool:
 # entry points delegate with Cl.dflt_cm(); session paths call the _cm
 # variants with Sess.session_cm. One store, one comparison core per op.
 
-def find_entry.rest(cont: Maybe<&2, String>, +text: String, hit: Bool) -> Maybe<&2, String>:
+# Early-exit lookup (D97): the tail walk is a lazy continuation applied only
+# on a miss, so a hit returns without evaluating the rest of the spine.
+def find_entry.matched(hit: Bool, +text: String, rest: Unit -> Maybe<&2, String>) -> Maybe<&2, String>:
   match hit:
     case True{}:
       Some{text}
     case False{}:
-      cont
+      rest(Unit{})
 
 def find_entry_cm.go(xs: List<&2, Draft>, +server: Key.ServerId, +key: String, +cm: String) -> Maybe<&2, String>:
   match xs:
@@ -188,8 +190,7 @@ def find_entry_cm.go(xs: List<&2, Draft>, +server: Key.ServerId, +key: String, +
     case Con{h, +t}:
       match h:
         case Draft{+srv, +stored, +text}:
-          +cont = find_entry_cm.go(t, server, key, cm)
-          find_entry.rest(cont, text, Key.eq(srv, server) && Cl.buf_eq_cm(cm, stored, key))
+          find_entry.matched(Key.eq(srv, server) && Cl.buf_eq_cm(cm, stored, key), text, _ => find_entry_cm.go(t, server, key, cm))
 
 def find_entry_cm(+ds: Drafts, +server: Key.ServerId, +key: String, +cm: String) -> Maybe<&2, String>:
   match ds:
@@ -570,19 +571,21 @@ def route(+text: String) -> Route:
 def command_line(+line: String) -> Bool:
   String.starts_with(Irc.drop_spaces(Irc.strip_ctl(line)), "/")
 
-def any_command.or(+tail: Bool, hit: Bool) -> Bool:
+# Fail-fast command scan (D124): the tail walk is a lazy continuation, so a
+# command-led paste rejects without walking the remaining lines.
+def any_command.head(hit: Bool, tail: Unit -> Bool) -> Bool:
   match hit:
     case True{}:
       True{}
     case False{}:
-      tail
+      tail(Unit{})
 
 def any_command(+xs: List<&2, String>) -> Bool:
   match xs:
     case Nil{}:
       False{}
     case Con{+h, +t}:
-      any_command.or(any_command(t), command_line(h))
+      any_command.head(command_line(h), _ => any_command(t))
 
 def wire_each(+xs: List<&2, String>, +target: String, +notice: Bool) -> List<&2, String>:
   match xs:
@@ -598,21 +601,44 @@ def plan_line.wires(chunks: Maybe<&2, List<&2, String>>, +target: String, +notic
     case Some{+xs}:
       Some{wire_each(xs, target, notice)}
 
-def plan_line.valid(valid: Bool, +cl: Cl.Client, +name: String, +clean: String, +notice: Bool, +overhead: Nat) -> Maybe<&2, List<&2, String>>:
+def plan_line.wired(probe: Bool & Maybe<&2, List<&2, String>>, +clean: String, cap: Nat, +name: String, +notice: Bool) -> Maybe<&2, List<&2, String>> & Bool:
+  match probe:
+    case (+sensitive, parts):
+      (plan_line.wires(Sub.message_parts.probed(sensitive, parts, clean, cap), name, notice), sensitive)
+
+def plan_line.valid(valid: Bool, +cl: Cl.Client, +name: String, +clean: String, +notice: Bool, +overhead: Nat) -> Maybe<&2, List<&2, String>> & Bool:
   match valid:
     case False{}:
-      None{}
+      (None{}, False{})
     case True{}:
-      plan_line.wires(Sub.message_parts(Sub.message_sensitive(cl, name, clean, notice), clean, Nat.sub(Irc.LINE_MAX(), overhead)), name, notice)
+      plan_line.wired(Sub.message_probe(cl, name, clean, overhead), clean, Nat.sub(Irc.LINE_MAX(), overhead), name, notice)
 
 # Planning uses the one shared Sub.text_valid with the raw line, so a NUL
 # anywhere rejects the whole send instead of silently shipping a stripped
 # line while send_text would report a different cause.
-def plan_line(+cl: Cl.Client, +target: String, +body: String, +notice: Bool) -> Maybe<&2, List<&2, String>>:
+# D237: the cleaned record (name/clean/overhead) is validated once and the
+# probe shares its single chunk split with the plan. D238: verbose threads
+# the planned verdicts (plan, validity, sensitivity) into the reason reporter
+# so the cause is exact without a third-round probe of the bad line.
+def plan_line.packed(pair: Maybe<&2, List<&2, String>> & Bool, valid: Bool) -> Maybe<&2, List<&2, String>> & Bool & Bool:
+  match pair:
+    case (wires, sensitive):
+      (wires, valid, sensitive)
+
+def plan_line.verbose(+cl: Cl.Client, +target: String, +body: String, +notice: Bool) -> Maybe<&2, List<&2, String>> & Bool & Bool:
   +clean = Irc.strip_ctl(body)
   +name = Cl.target_name(target)
   +overhead = Irc.utf8_len(Sub.message_wire(name, "", notice))
-  plan_line.valid(Sub.text_valid(target, body, notice), cl, name, clean, notice, overhead)
+  +valid = Sub.text_valid.cleaned(name, clean, body, overhead)
+  plan_line.packed(plan_line.valid(valid, cl, name, clean, notice, overhead), valid)
+
+def plan_line.only(triple: Maybe<&2, List<&2, String>> & Bool & Bool) -> Maybe<&2, List<&2, String>>:
+  match triple:
+    case (wires, _, _):
+      wires
+
+def plan_line(+cl: Cl.Client, +target: String, +body: String, +notice: Bool) -> Maybe<&2, List<&2, String>>:
+  plan_line.only(plan_line.verbose(cl, target, body, notice))
 
 def plan_each.ok(+tail: Maybe<&2, List<&2, String>>, +head: List<&2, String>) -> Maybe<&2, List<&2, String>>:
   match tail:
@@ -621,15 +647,14 @@ def plan_each.ok(+tail: Maybe<&2, List<&2, String>>, +head: List<&2, String>) ->
     case Some{+rest}:
       Some{List.append(&2, String, head, rest)}
 
-def plan_each.head(+tail: Maybe<&2, List<&2, String>>, +head: Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
+# Fail-fast planning (D124): the tail plan is a lazy continuation applied
+# only when the head line succeeds, so a first-line failure skips the tail.
+def plan_each.head2(+head: Maybe<&2, List<&2, String>>, tail: Unit -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
   match head:
     case None{}:
       None{}
     case Some{+wires}:
-      plan_each.ok(tail, wires)
-
-def plan_each.combine(+tail: Maybe<&2, List<&2, String>>, +cl: Cl.Client, +line: String, +target: String, +notice: Bool) -> Maybe<&2, List<&2, String>>:
-  plan_each.head(tail, plan_line(cl, target, line, notice))
+      plan_each.ok(tail(Unit{}), wires)
 
 def plan_each.go(fuel: Nat, +cl: Cl.Client, xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, List<&2, String>>:
   match fuel:
@@ -640,7 +665,7 @@ def plan_each.go(fuel: Nat, +cl: Cl.Client, xs: List<&2, String>, +target: Strin
         case Nil{}:
           Some{Nil{}}
         case Con{+line, +t}:
-          plan_each.combine(plan_each.go(p, cl, t, target, notice), cl, line, target, notice)
+          plan_each.head2(plan_line(cl, target, line, notice), _ => plan_each.go(p, cl, t, target, notice))
 
 def plan_each(+cl: Cl.Client, +xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, List<&2, String>>:
   plan_each.go(Nat.add(1n, List.length(&2, String, xs)), cl, xs, target, notice)
@@ -715,28 +740,47 @@ def wires_ready(+wires: Maybe<&2, List<&2, String>>) -> Bool:
     case Some{_}:
       True{}
 
-def submit_ready(+cl: Cl.Client, +target: String, +lines: List<&2, String>, +notice: Bool) -> Bool:
-  Bool.not(any_command(lines)) && wires_ready(plan_each(cl, lines, target, notice))
-
-def first_bad.line(+line: String, +tail: Maybe<&2, String>, head_ok: Bool) -> Maybe<&2, String>:
-  match head_ok:
+# Fail-fast admission (D124): a command-led composition rejects before the
+# full plan runs, and a bad head line reports before the tail re-plans.
+def submit_ready.gated(cmd: Bool, +cl: Cl.Client, +target: String, +lines: List<&2, String>, +notice: Bool) -> Bool:
+  match cmd:
     case True{}:
-      tail
+      False{}
     case False{}:
-      Some{line}
+      wires_ready(plan_each(cl, lines, target, notice))
 
-def first_bad.go(fuel: Nat, +cl: Cl.Client, xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, String>:
+def submit_ready(+cl: Cl.Client, +target: String, +lines: List<&2, String>, +notice: Bool) -> Bool:
+  submit_ready.gated(any_command(lines), cl, target, lines, notice)
+
+# D238: the bad-line search threads the planned verdict (plan + validity)
+# into the reason reporter instead of re-deriving it a third time. A valid
+# line with no plan is necessarily an over-cap sensitive line (the single
+# rule admits only fitting credential chunks), so the credential reason is
+# exact without another probe.
+def first_bad.head(wires: Maybe<&2, List<&2, String>>, valid: Bool, sensitive: Bool, +line: String, tail: Unit -> Maybe<&2, String> & Bool & Bool) -> Maybe<&2, String> & Bool & Bool:
+  match wires:
+    case Some{_}:
+      tail(Unit{})
+    case None{}:
+      (Some{line}, valid, sensitive)
+
+def first_bad.planned(triple: Maybe<&2, List<&2, String>> & Bool & Bool, +line: String, tail: Unit -> Maybe<&2, String> & Bool & Bool) -> Maybe<&2, String> & Bool & Bool:
+  match triple:
+    case (wires, valid, sensitive):
+      first_bad.head(wires, valid, sensitive, line, tail)
+
+def first_bad.go(fuel: Nat, +cl: Cl.Client, xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, String> & Bool & Bool:
   match fuel:
     case 0n:
-      None{}
+      (None{}, False{}, False{})
     case 1n+p:
       match xs:
         case Nil{}:
-          None{}
+          (None{}, False{}, False{})
         case Con{+line, +t}:
-          first_bad.line(line, first_bad.go(p, cl, t, target, notice), wires_ready(plan_line(cl, target, line, notice)))
+          first_bad.planned(plan_line.verbose(cl, target, line, notice), line, _ => first_bad.go(p, cl, t, target, notice))
 
-def first_bad(+cl: Cl.Client, +xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, String>:
+def first_bad(+cl: Cl.Client, +xs: List<&2, String>, +target: String, +notice: Bool) -> Maybe<&2, String> & Bool & Bool:
   first_bad.go(Nat.add(1n, List.length(&2, String, xs)), cl, xs, target, notice)
 
 def reject_reason.sensitive(sensitive: Bool) -> String:
@@ -746,20 +790,19 @@ def reject_reason.sensitive(sensitive: Bool) -> String:
     case False{}:
       "message cluster exceeds IRC line limit"
 
-def reject_reason.cause(caused: Bool, +target: String, +line: String, +cl: Cl.Client, +name: String, +clean: String, +notice: Bool) -> String:
+def reject_reason.cause(caused: Bool, sensitive: Bool, +target: String, +line: String, +notice: Bool) -> String:
   match caused:
     case False{}:
       Sub.text_reason(target, line, notice)
     case True{}:
-      reject_reason.sensitive(Sub.message_sensitive(cl, name, clean, notice))
+      reject_reason.sensitive(sensitive)
 
-def reject_reason.bad(bad: Maybe<&2, String>, +cl: Cl.Client, +target: String, +notice: Bool) -> String:
+def reject_reason.bad(bad: Maybe<&2, String> & Bool & Bool, +cl: Cl.Client, +target: String, +notice: Bool) -> String:
   match bad:
-    case None{}:
+    case (None{}, _, _):
       "message cluster exceeds IRC line limit"
-    case Some{+line}:
-      +clean = Irc.strip_ctl(line)
-      reject_reason.cause(Sub.text_valid(target, line, notice), target, line, cl, Cl.target_name(target), clean, notice)
+    case (Some{line}, caused, sensitive):
+      reject_reason.cause(caused, sensitive, target, line, notice)
 
 def reject_reason.command(command: Bool, +cl: Cl.Client, +target: String, +lines: List<&2, String>, +notice: Bool) -> String:
   match command:
@@ -845,14 +888,26 @@ def submit_lines_echo.resolved(+cl: Cl.Client, +bi: Nat, +target: String, +lines
     case False{}:
       (Sub.echo_err(cl, "read-only buffer"), Nil{})
 
+# D237: the split-once Enter computes the lines a single time and threads
+# them here, so the over check gates on a caller-supplied verdict instead of
+# re-walking the text.
+def submit_lines_echo.split(+cl: Cl.Client, +bi: Nat, +target: String, +lines: List<&2, String>, +notice: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
+  submit_lines_echo.resolved(cl, bi, target, lines, notice,
+    Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))), echo_ok)
+
+def submit_lines_echo.lines(+cl: Cl.Client, +bi: Nat, +target: String, +lines: List<&2, String>, +notice: Bool, over: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
+  match over:
+    case True{}:
+      (Sub.echo_err(cl, over_text_note()), Nil{})
+    case False{}:
+      submit_lines_echo.split(cl, bi, target, lines, notice, echo_ok)
+
 def submit_lines_echo.over(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool, +echo_ok: Bool, over: Bool) -> Cl.Client & List<&2, String>:
   match over:
     case True{}:
       (Sub.echo_err(cl, over_text_note()), Nil{})
     case False{}:
-      +lines = nonempty(split_lines(text))
-      submit_lines_echo.resolved(cl, bi, target, lines, notice,
-        Bool.not(Nat.is_eq(bi, 0n)) && Bool.not(Cl.target_is_synthetic(Sp.name_at(cl, bi))), echo_ok)
+      submit_lines_echo.split(cl, bi, target, nonempty(split_lines(text)), notice, echo_ok)
 
 def submit_lines_echo(+cl: Cl.Client, +bi: Nat, +target: String, +text: String, +notice: Bool, +echo_ok: Bool) -> Cl.Client & List<&2, String>:
   submit_lines_echo.over(cl, bi, target, text, notice, echo_ok, over_text(text))
