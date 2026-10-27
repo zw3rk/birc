@@ -1991,3 +1991,63 @@ law hist_step_back_from_bottom_shelves_draft:
 
 law hist_shelve_keeps_stash_off_bottom:
   {Sk.hist_prev.shelve(False{}, "D", "S") == "S" : String}
+
+law cmd_pump_gen_gated:
+  {Sid.cmd_gen_ok(Sess.Pump{3}, 3) == True{} : Bool}
+
+law nick_query_renames_pinned:
+  {CL.nick_query_renames() == True{} : Bool}
+
+law hist_step_next_past_end_restores_stash:
+  {Sk.hist_move(["a", "b"], 2n, "S", "D", Sk.StepNext{}) == Sk.Recall{2n, "S", "S"} : Sk.Recall}
+
+law panel_keep_same_retains_help:
+  {Sk.panel_keep(Sk.CHelp{"h"}, "d", "d") == Sk.CHelp{"h"} : Sk.CView}
+
+law takes_arg_setmode_follows_adding:
+  {Isupport.takes_arg(Isupport.defaults(), Chr{108}, True{}) == True{} : Bool}
+
+law join_len_refuses_overlong:
+  {Isupport.join_admit(Isupport.apply_line(Isupport.defaults(), ":s 005 me CHANNELLEN=5 :are supported"), "#abcdef", "") == False{} : Bool}
+
+law credential_scope_rejects_port_zero:
+  {Sid.credential_scope_ok("h", 0, "h", 0) == False{} : Bool}
+
+law quit_query_logs_pinned:
+  {CL.quit_query_logs() == True{} : Bool}
+
+law mode_channel_logs_pinned:
+  {CL.mode_channel_logs() == True{} : Bool}
+
+law part_nonmember_silent_pinned:
+  {CL.part_nonmember_silent() == True{} : Bool}
+
+law server_nick_query_pinned:
+  {CL.server_nick_query() == True{} : Bool}
+
+law self_priv_query_pinned:
+  {CL.self_priv_query() == True{} : Bool}
+
+law hist_step_next_mid_shows_entry_keeps_stash:
+  {Sk.hist_move(["a", "b"], 0n, "S", "D", Sk.StepNext{}) == Sk.Recall{1n, "b", "S"} : Sk.Recall}
+
+law hist_prev_through_at_keeps_stash:
+  {Sk.hist_prev.at(["a", "b"], 1n, "D", "S") == Sk.Recall{0n, "a", "S"} : Sk.Recall}
+
+law panel_pick_same_retains_index:
+  {Sk.panel_keep(Sk.CPick{2n}, "d", "d") == Sk.CPick{2n} : Sk.CView}
+
+law panel_keep_changed_clears:
+  {Sk.panel_keep(Sk.CHelp{"h"}, "e", "d") == Sk.CNone{} : Sk.CView}
+
+law pick_len_menu_wins_when_many:
+  {Sk.pick_len.gt(True{}, 3n, "d") == 3n : Nat}
+
+law menu_movable_help_never:
+  {Sk.menu_movable(Sk.CHelp{"h"}, "d") == False{} : Bool}
+
+law menu_movable_hidden_never:
+  {Sk.menu_movable(Sk.CHidden{}, "d") == False{} : Bool}
+
+law menu_movable_short_menu_moves:
+  {Sk.menu_movable.other(True{}, "d") == True{} : Bool}

@@ -2122,3 +2122,63 @@ def Laws.hist_step_back_from_bottom_shelves_draft():
 
 def Laws.hist_shelve_keeps_stash_off_bottom():
   {==}
+
+def Laws.cmd_pump_gen_gated():
+  {==}
+
+def Laws.nick_query_renames_pinned():
+  {==}
+
+def Laws.hist_step_next_past_end_restores_stash():
+  {==}
+
+def Laws.panel_keep_same_retains_help():
+  {==}
+
+def Laws.takes_arg_setmode_follows_adding():
+  {==}
+
+def Laws.join_len_refuses_overlong():
+  {==}
+
+def Laws.credential_scope_rejects_port_zero():
+  {==}
+
+def Laws.quit_query_logs_pinned():
+  {==}
+
+def Laws.mode_channel_logs_pinned():
+  {==}
+
+def Laws.part_nonmember_silent_pinned():
+  {==}
+
+def Laws.server_nick_query_pinned():
+  {==}
+
+def Laws.self_priv_query_pinned():
+  {==}
+
+def Laws.hist_step_next_mid_shows_entry_keeps_stash():
+  {==}
+
+def Laws.hist_prev_through_at_keeps_stash():
+  {==}
+
+def Laws.panel_pick_same_retains_index():
+  {==}
+
+def Laws.panel_keep_changed_clears():
+  {==}
+
+def Laws.pick_len_menu_wins_when_many():
+  {==}
+
+def Laws.menu_movable_help_never():
+  {==}
+
+def Laws.menu_movable_hidden_never():
+  {==}
+
+def Laws.menu_movable_short_menu_moves():
+  {==}
