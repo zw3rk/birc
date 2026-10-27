@@ -432,8 +432,20 @@ def mute_match(+m: String, +from: String, +chan: String, +server: String) -> Boo
 def is_muted_list(mutes: List<&2, String>, +from: String, +chan: String, +server: String) -> Bool:
   is_muted_list_cm(dflt_cm(), mutes, from, chan, server)
 
-def add_mute_list(mutes: List<&2, String>, +pat: String) -> List<&2, String>:
-  pat <> mutes
+# Mute ledger cap (D75): like nicks (MAX_NICKS) and buffers
+# (MAX_BUFFERS), the mute list is bounded so per-message and per-line
+# scans stay proportional to a fixed cap. A full ledger keeps its
+# current patterns and skips the newcomer, mirroring nick_add.
+def MAX_MUTES() -> Nat:
+  64n
+
+def add_mute_list.full(full: Bool, mutes: List<&2, String>, +pat: String) -> List<&2, String>:
+  match full:
+    case True{}: mutes
+    case False{}: pat <> mutes
+
+def add_mute_list(+mutes: List<&2, String>, +pat: String) -> List<&2, String>:
+  add_mute_list.full(Nat.is_ge(List.length(&2, String, mutes), MAX_MUTES()), mutes, pat)
 
 # Scoped patterns use the same channel types as IRC routing. Extract the nick
 # once so restored-line filtering and /unmute agree on every supported scope.
@@ -593,17 +605,33 @@ def mention_right_bound(+s: String) -> Bool:
     case SNil{}: True{}
     case SCon{+h, _}: Bool.not(is_nick_char(h))
 
-def str_mentions.hit(+s: String, +needle: String, left_ok: Bool) -> Bool:
-  left_ok
-    && String.starts_with(s, needle)
-    && mention_right_bound(String.drop(s, String.length(needle)))
+# Short-circuit mention scan (D163): the needle length is hoisted out of
+# the offset loop, and a hit returns without evaluating the tail walk.
+# The miss arm takes a lazy Unit-> continuation (Bend args are eager, so
+# a plain recurse argument would walk the whole tail even on a hit).
+def str_mentions.at(+s: String, +needle: String, +nlen: Nat, starts: Bool) -> Bool:
+  match starts:
+    case False{}: False{}
+    case True{}: mention_right_bound(String.drop(s, nlen))
 
-def str_mentions(s: String, +needle: String, left_ok: Bool) -> Bool:
+def str_mentions.hit(+s: String, +needle: String, +nlen: Nat, left_ok: Bool) -> Bool:
+  match left_ok:
+    case False{}: False{}
+    case True{}: str_mentions.at(s, needle, nlen, String.starts_with(s, needle))
+
+def str_mentions.rest(hit: Bool, cont: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: cont(Unit{})
+
+def str_mentions.go(s: String, +needle: String, +nlen: Nat, left_ok: Bool) -> Bool:
   match s:
     case SNil{}: False{}
     case SCon{+h, +t}:
-      str_mentions.hit(SCon{h, t}, needle, left_ok)
-        || str_mentions(t, needle, Bool.not(is_nick_char(h)))
+      str_mentions.rest(str_mentions.hit(SCon{h, t}, needle, nlen, left_ok), _ => str_mentions.go(t, needle, nlen, Bool.not(is_nick_char(h))))
+
+def str_mentions(s: String, +needle: String, left_ok: Bool) -> Bool:
+  str_mentions.go(s, needle, String.length(needle), left_ok)
 
 # Negotiated mention fold (I2-dynamic3 R3): body and nick compare under the
 # Session CASEMAPPING through the shared fold owner, so a nick that only
@@ -1223,8 +1251,58 @@ def buf_push(+b: Buffer, +line: Line, +cap: Nat) -> Buffer:
     case Buffer{+name, +ch, +topic, +lines, +nicks, +scroll, +newest, +count}:
       buf_push.over(Nat.is_ge(count, cap), name, ch, topic, lines, nicks, scroll, newest, count, line, cap)
 
+# Outage-notice coalescing: a repeated identical Eof / NetFail echo
+# ("disconnected", "disconnected: <reason>") or the "reconnecting in 2s"
+# follow-up merges with the tail row instead of appending a duplicate row.
+# Only these exact notice strings coalesce, only against a text-identical
+# tail row of the same kind, and only at append time.
+def outage_notice_row(kind: LineKind, +text: String) -> Bool:
+  match kind:
+    case Error{}:
+      String.eq(text, "disconnected") || String.starts_with(text, "disconnected: ")
+    case System{}:
+      String.starts_with(text, "reconnecting in 2s to ")
+    case _: False{}
+
+def outage_dup(old: Line, new: Line) -> Bool:
+  match old new:
+    case Line{+ok, _, +otext, _, _} Line{+nk, _, +ntext, _, _}:
+      kind_eq(ok, nk) && String.eq(otext, ntext) && outage_notice_row(nk, ntext)
+
+def buf_tail_line.last(lines: List<&2, Line>) -> Maybe<&2, Line>:
+  match lines:
+    case Nil{}: None{}
+    case Con{+h, Nil{}}: Some{h}
+    case Con{_, +t}: buf_tail_line.last(t)
+
+def buf_tail_line.newest(newest: List<&2, Line>) -> Maybe<&2, Line>:
+  match newest:
+    case Nil{}: None{}
+    case Con{+h, _}: Some{h}
+
+def buf_tail_line.pick(has_new: Bool, +newest: List<&2, Line>, +lines: List<&2, Line>) -> Maybe<&2, Line>:
+  match has_new:
+    case True{}: buf_tail_line.newest(newest)
+    case False{}: buf_tail_line.last(lines)
+
+# Head of the newest-first mirror, else the last sealed line. Empty is None.
+def buf_tail_line(+b: Buffer) -> Maybe<&2, Line>:
+  match b:
+    case Buffer{_, _, _, +lines, _, _, +newest, _}:
+      buf_tail_line.pick(Bool.not(List.is_empty(&2, Line, newest)), newest, lines)
+
+def buf_append_line.dup(+b: Buffer, +line: Line, dup: Bool) -> Buffer:
+  match dup:
+    case True{}: b
+    case False{}: buf_push(b, line, SCROLL_CAP())
+
+def buf_append_line.tail(+b: Buffer, +line: Line, +tail: Maybe<&2, Line>) -> Buffer:
+  match tail:
+    case None{}: buf_push(b, line, SCROLL_CAP())
+    case Some{t}: buf_append_line.dup(b, line, outage_dup(t, line))
+
 def buf_append_line(+b: Buffer, +line: Line) -> Buffer:
-  buf_push(b, line, SCROLL_CAP())
+  buf_append_line.tail(b, line, buf_tail_line(b))
 
 # History load keeps one bounded tail per buffer. `lines` is the oldest
 # prefix and `newest` is only the newer suffix, so a push is a cons.
@@ -1451,11 +1529,35 @@ def now_split(+now: String) -> String & String:
     case SNil{}: ("", "")
     case SCon{+h, +t}: now_mark.fin(h, t, now_split(t), Char.is_eq(h, Chr{124}))
 
+# Single-split halves (D79): one now_split walk serves both the day and
+# the time half. A stamp without '|' has no day half (rest is empty), so
+# no contains pre-walk is needed; callers needing both halves share one
+# now_halves call instead of two separate splits.
+def now_halves.pick(empty: Bool, +day: String, +rest: String, +now: String) -> String & String:
+  match empty:
+    case True{}: ("", now)
+    case False{}: (day, String.drop(rest, 1n))
+
+def now_halves.split(pair: String & String, +now: String) -> String & String:
+  match pair:
+    case (+day, +rest): now_halves.pick(String.is_empty(rest), day, rest, now)
+
+def now_halves(+now: String) -> String & String:
+  now_halves.split(now_split(now), now)
+
+def now_day.halves(pair: String & String) -> String:
+  match pair:
+    case (+day, _): day
+
 def now_day(+now: String) -> String:
-  now_day.cut(String.contains(now, "|"), now_split(now))
+  now_day.halves(now_halves(now))
+
+def now_hms.halves(pair: String & String) -> String:
+  match pair:
+    case (_, +hms): hms
 
 def now_hms(+now: String) -> String:
-  now_hms.cut(String.contains(now, "|"), now_split(now), now)
+  now_hms.halves(now_halves(now))
 
 def stamp_wire(+ts: String) -> String:
   ts
@@ -1465,10 +1567,15 @@ def stamp_live(+ts: String) -> String:
 
 # Keep the receipt local day when server-time supplies only HH:MM:SS so paint
 # can still insert day dividers. A stamp that already carries a day wins.
+# No-split combine (D176): the stamp used to be re-split for its day
+# half (now_day) and again for its time half (now_hms) on every fed line.
+# Neither split is needed: a stamp carrying a day wins as-is, and a bare
+# HMS stamp supplies its own time half, so only the receipt day is ever
+# split (once, via now_day on now).
 def stamp_combine.day(empty: Bool, +day: String, +stamp: String) -> String:
   match empty:
     case True{}: stamp
-    case False{}: day ++ "|" ++ now_hms(stamp)
+    case False{}: day ++ "|" ++ stamp
 
 def stamp_combine.dated(has_day: Bool, +now: String, +stamp: String) -> String:
   match has_day:
@@ -1477,16 +1584,24 @@ def stamp_combine.dated(has_day: Bool, +now: String, +stamp: String) -> String:
       +day = now_day(now)
       stamp_combine.day(String.is_empty(day), day, stamp)
 
-def stamp_combine.empty(empty: Bool, +now: String, +stamp: String) -> String:
+def stamp_combine.split(empty: Bool, +now: String, +stamp: String) -> String:
   match empty:
     case True{}: now
-    case False{}: stamp_combine.dated(Bool.not(String.is_empty(now_day(stamp))), now, stamp)
+    case False{}: stamp_combine.dated(String.contains(stamp, "|"), now, stamp)
 
 def stamp_combine(+now: String, +stamp: String) -> String:
-  stamp_combine.empty(String.is_empty(stamp), now, stamp)
+  stamp_combine.split(String.is_empty(stamp), now, stamp)
 
 def buf_log_ts(+b: Buffer, kind: LineKind, +ts: String, +text: String) -> Buffer:
   buf_append_line(b, Line{kind, Irc.sanitize_in(ts), Irc.sanitize_keep_style(text), "", 0n})
+
+# Stamped append (D235): same sanitization and author as buf_log_ts, but
+# the event id is assigned inline while threading the Client sequence.
+# Lets the rename map stamp its rows in its own pass instead of paying a
+# second full stamp_bufs re-fold afterwards.
+def buf_log_ts_seq(+b: Buffer, kind: LineKind, +ts: String, +text: String, +seq: Nat) -> Buffer & Nat:
+  +next: Nat = 1n+seq
+  (buf_append_line(b, Line{kind, Irc.sanitize_in(ts), Irc.sanitize_keep_style(text), "", next}), next)
 
 def buf_reconnect.on(internal: Bool, b: Buffer, now: String) -> Buffer:
   match internal:
@@ -1749,6 +1864,49 @@ def client_log.append(internal: Bool, mirror: Bool, cl: Client, i: Nat, line: Li
     case True{}: diagnostic_line(cl, line)
     case False{}: client_log.original(mirror, cl, i, line)
 
+# Single-index log install (D178): one head-to-i walk both classifies the
+# destination (internal *log* vs chat buffer) and applies the append,
+# instead of an nth_buf probe walk plus a buf_modify walk per logged row.
+# Out-of-range installs keep the spine and report non-internal, matching
+# buf_modify's miss behavior.
+def client_log.is_internal(+b: Buffer) -> Bool:
+  match b:
+    case Buffer{+name, _, _, _, _, _, _, _}:
+      Irc.ieq(name, Diagnostic.name())
+
+# The internal *log* destination is appended exactly once via
+# diagnostic_line, never via buf_modify: skip f there to preserve the
+# single-append behavior of client_log.append's True arm.
+def client_log.locate.at(internal: Bool, +h: Buffer, +t: List<&2, Buffer>, f: Buffer -> Buffer) -> List<&2, Buffer> & Bool:
+  match internal:
+    case True{}: (h <> t, True{})
+    case False{}: (f(h) <> t, False{})
+
+def client_log.locate.hit(+h: Buffer, +t: List<&2, Buffer>, f: Buffer -> Buffer) -> List<&2, Buffer> & Bool:
+  client_log.locate.at(client_log.is_internal(h), h, t, f)
+
+def client_log.locate.rest(pair: List<&2, Buffer> & Bool, +h: Buffer) -> List<&2, Buffer> & Bool:
+  match pair:
+    case (+rest, +internal): (h <> rest, internal)
+
+def client_log.locate(bufs: List<&2, Buffer>, n: Nat, f: Buffer -> Buffer) -> List<&2, Buffer> & Bool:
+  match bufs n:
+    case Nil{} _: (Nil{}, False{})
+    case h <> t 0n:
+      client_log.locate.hit(h, t, f)
+    case h <> t 1n+p:
+      client_log.locate.rest(client_log.locate(t, p, f), h)
+
+def client_log_author_ts.routed(internal: Bool, mirror: Bool, +cl: Client, +line: Line) -> Client:
+  match internal:
+    case True{}: diagnostic_line(cl, line)
+    case False{}: diagnostic_mirror(mirror, cl, line)
+
+def client_log_author_ts.placed(pair: List<&2, Buffer> & Bool, mirror: Bool, +nick: String, +server: String, +active: Nat, +now: String, +stg: Settings, +auth: AuthPhase, +next: Nat, welcomed: Bool, +line: Line) -> Client:
+  match pair:
+    case (+bufs2, +internal):
+      client_log_author_ts.routed(internal, mirror, Client{nick, server, bufs2, active, now, stg, auth, next, welcomed}, line)
+
 # A failed history append rewinds log_seq and leaves the row. The next id
 # is one past the greater of that seq and any id still stored.
 def log_id.max(gt: Bool, +a: Nat, +b: Nat) -> Nat:
@@ -1788,7 +1946,7 @@ def client_log_author_ts.noted(+nick: String, +server: String, +bufs: List<&2, B
   +ts_use = client_log_ts.pick(String.is_empty(ts), ts, now)
   +next: Nat = log_id.alloc(seq, log_id.bufs(bufs))
   +line: Line = Line{kind, Irc.sanitize_in(ts_use), Irc.sanitize_keep_style(text), Irc.sanitize_in(author), next}
-  client_log.append(client_log.destination(nth_buf(bufs, i)), mirror, Client{nick, server, bufs, active, now, stg, auth, next, welcomed}, i, line)
+  client_log_author_ts.placed(client_log.locate(bufs, i, b => buf_append_line(b, line)), mirror, nick, server, active, now, stg, auth, next, welcomed, line)
 
 def client_log_author_ts.record(+mirror: Bool, +cl: Client, +i: Nat, +kind: LineKind, +ts: String, +text: String, +author: String) -> Client:
   match cl:
@@ -2125,11 +2283,33 @@ def set_active.unread_index(control: Bool, stg: Settings, got: Maybe<&2, Buffer>
 
 # Client has no casemap field. Callers that hold the negotiated mapping
 # pass it here. The two-argument entry stays on rfc1459.
-def set_active_cm(+cm: String, +cl: Client, +i: Nat) -> Client:
-  match cl:
-    case Client{+nick, +server, +bufs, _, +now, +stg, +auth, +log_seq, welcomed}:
+# Same-index installs skip the rebuild when there is nothing to clear
+# (D203): mark_unread never accrues unreads for the active buffer, so an
+# empty unread ledger means reinstalling changes nothing and the spine
+# walk plus Client rebuild are skipped. A non-empty ledger still takes
+# the full path: renames can move an unread onto the active buffer's
+# name, and the reinstall (e.g. nick-focus) is what clears it. This
+# covers clamp, cycle (1-buffer cycle resolves to active), and click
+# paths, which all funnel through here.
+def set_active_cm.kept(keep: Bool, +nick: String, +server: String, +bufs: List<&2, Buffer>, +active: Nat, +now: String, +stg: Settings, +auth: AuthPhase, +log_seq: Nat, welcomed: Bool, +i: Nat, +cm: String) -> Client:
+  match keep:
+    case True{}:
+      Client{nick, server, bufs, active, now, stg, auth, log_seq, welcomed}
+    case False{}:
       +stg2 = set_active.unread_index_cm(Nat.is_eq(i, 0n), cm, stg, nth_buf(bufs, i))
       Client{nick, server, bufs, i, now, stg2, auth, log_seq, welcomed}
+
+def set_active_cm.same(same: Bool, +nick: String, +server: String, +bufs: List<&2, Buffer>, +active: Nat, +now: String, +stg: Settings, +auth: AuthPhase, +log_seq: Nat, welcomed: Bool, +i: Nat, +cm: String) -> Client:
+  match same:
+    case True{}:
+      set_active_cm.kept(List.is_empty(&2, Alert, settings_unreads(stg)), nick, server, bufs, active, now, stg, auth, log_seq, welcomed, i, cm)
+    case False{}:
+      set_active_cm.kept(False{}, nick, server, bufs, active, now, stg, auth, log_seq, welcomed, i, cm)
+
+def set_active_cm(+cm: String, +cl: Client, +i: Nat) -> Client:
+  match cl:
+    case Client{+nick, +server, +bufs, +active, +now, +stg, +auth, +log_seq, welcomed}:
+      set_active_cm.same(Nat.is_eq(i, active), nick, server, bufs, active, now, stg, auth, log_seq, welcomed, i, cm)
 
 def set_active(+cl: Client, +i: Nat) -> Client:
   set_active_cm(dflt_cm(), cl, i)
@@ -2692,3 +2872,123 @@ def client_overflows(+cl: Client, +ceiling: Nat) -> Bool:
   match cl:
     case Client{_, _, _, _, _, _, _, +seq, _}:
       client_overflows.kept(Nat.is_lt(seq, ceiling))
+
+# Lane-C law checks (D75/D79/D163/D176/D178/D203/D235-support): each fixed
+# behavior asserts here beside the module it covers.
+def buffer_lane_c.mutes(n: Nat, acc: List<&2, String>, +tag: String) -> List<&2, String>:
+  match n:
+    case 0n: acc
+    case 1n+p: buffer_lane_c.mutes(p, add_mute_list(acc, tag), "m" ++ tag)
+
+def buffer_lane_c.mute_ok() -> Bool:
+  +led = buffer_lane_c.mutes(70n, Nil{}, "m")
+  +row: Line = Line{Msg{}, "", "hi", "m", 1n}
+  +ghost: Line = Line{Msg{}, "", "hi", "zzz", 2n}
+  Nat.is_eq(List.length(&2, String, led), MAX_MUTES())
+    && Nat.is_eq(List.length(&2, String, add_mute_list(led, "zzz")), MAX_MUTES())
+    && is_muted_list(led, "m", "#c", "s")
+    && Bool.not(is_muted_list(led, "zzz", "#c", "s"))
+    && Bool.not(is_muted_list(Nil{}, "m", "#c", "s"))
+    && is_line_muted(led, row, "#c", "s")
+    && Bool.not(is_line_muted(led, ghost, "#c", "s"))
+
+def buffer_lane_c.halves_empty(+day: String, +hms: String, +bare_day: String, +bare_hms: String, empty: String & String) -> Bool:
+  match empty:
+    case (+empty_day, +empty_hms):
+      String.eq(day, "2024-01-02 (Tue)") && String.eq(hms, "03:04:05")
+        && String.eq(bare_day, "") && String.eq(bare_hms, "03:04:05")
+        && String.eq(empty_day, "") && String.eq(empty_hms, "")
+        && String.eq(now_day("2024-01-02 (Tue)|03:04:05"), day)
+        && String.eq(now_hms("2024-01-02 (Tue)|03:04:05"), hms)
+        && String.eq(now_day("03:04:05"), "")
+        && String.eq(now_hms("03:04:05"), "03:04:05")
+
+def buffer_lane_c.halves_bare(+day: String, +hms: String, bare: String & String, empty: String & String) -> Bool:
+  match bare:
+    case (+bare_day, +bare_hms):
+      buffer_lane_c.halves_empty(day, hms, bare_day, bare_hms, empty)
+
+def buffer_lane_c.halves3(dated: String & String, bare: String & String, empty: String & String) -> Bool:
+  match dated:
+    case (+day, +hms):
+      buffer_lane_c.halves_bare(day, hms, bare, empty)
+
+def buffer_lane_c.halves_ok() -> Bool:
+  buffer_lane_c.halves3(now_halves("2024-01-02 (Tue)|03:04:05"), now_halves("03:04:05"), now_halves(""))
+
+def buffer_lane_c.combine_ok() -> Bool:
+  +now: String = "2024-01-02 (Tue)|09:00:00"
+  String.eq(stamp_combine(now, "04:05:06"), "2024-01-02 (Tue)|04:05:06")
+    && String.eq(stamp_combine(now, "2024-01-02 (Tue)|04:05:06"), "2024-01-02 (Tue)|04:05:06")
+    && String.eq(stamp_combine(now, ""), now)
+    && String.eq(stamp_combine("", "04:05:06"), "04:05:06")
+
+def buffer_lane_c.mention_ok() -> Bool:
+  str_mentions("hey me! x", "me", True{})
+    && Bool.not(str_mentions("message", "me", True{}))
+    && Bool.not(str_mentions("memo", "me", True{}))
+    && is_mention("hey me!", "me")
+    && Bool.not(is_mention("message", "me"))
+
+def buffer_lane_c.locate.lines(+lines: List<&2, Line>) -> String:
+  match lines:
+    case Nil{}: ""
+    case Con{Line{_, _, +text, _, _}, t}: text ++ "|" ++ buffer_lane_c.locate.lines(t)
+
+def buffer_lane_c.locate.text(got: Maybe<&2, Buffer>) -> String:
+  match got:
+    case None{}: "!"
+    case Some{b}:
+      match b:
+        case Buffer{_, _, _, +lines, _, _, _, _}: buffer_lane_c.locate.lines(lines)
+
+def buffer_lane_c.with_opened(pair: Client & Maybe<&2, Nat>) -> Client:
+  match pair:
+    case (cl, _): cl
+
+def buffer_lane_c.located_oob(oob: List<&2, Buffer> & Bool, +bufs2: List<&2, Buffer>, internal: Bool, +bufs: List<&2, Buffer>) -> Bool:
+  match oob:
+    case (+bufs3, +miss):
+      Bool.not(internal)
+        && String.eq(buffer_lane_c.locate.text(nth_buf(bufs2, 1n)), "x|")
+        && Bool.not(client_log.destination(nth_buf(bufs, 1n)))
+        && Bool.not(miss)
+        && Nat.is_eq(buf_count(bufs3), buf_count(bufs))
+        && Nat.is_eq(log_id.bufs(bufs2), 9n)
+
+def buffer_lane_c.located(pair: List<&2, Buffer> & Bool, +bufs: List<&2, Buffer>) -> Bool:
+  match pair:
+    case (+bufs2, +internal):
+      buffer_lane_c.located_oob(client_log.locate(bufs, 9n, b => buf_append_line(b, Line{Msg{}, "t", "y", "a", 9n})), bufs2, internal, bufs)
+
+def buffer_lane_c.with_client(+cl: Client) -> Bool:
+  match cl:
+    case Client{_, _, +bufs, _, _, _, _, _, _}:
+      buffer_lane_c.located(client_log.locate(bufs, 1n, b => buf_append_line(b, Line{Msg{}, "t", "x", "a", 9n})), bufs)
+
+def buffer_lane_c.locate_ok() -> Bool:
+  buffer_lane_c.with_client(buffer_lane_c.with_opened(buf_get(init("me", "s"), "#a", True{}, True{})))
+
+def buffer_lane_c.stale_client(+cl: Client) -> Client:
+  match cl:
+    case Client{+nick, +server, +bufs, +active, +now, +stg, +auth, +log_seq, welcomed}:
+      Client{nick, server, bufs, active, now, set_unreads(stg, Alert{"#a", Activity{}} <> Nil{}), auth, log_seq, welcomed}
+
+def buffer_lane_c.active_ok() -> Bool:
+  +cl0 = set_active(buffer_lane_c.with_opened(buf_get(init("me", "s"), "#a", True{}, True{})), 1n)
+  +same = set_active_clamp(cl0, 1n)
+  +other = set_active_clamp(cl0, 0n)
+  Nat.is_eq(active_of(same), 1n)
+    && Nat.is_eq(buf_count(client_bufs(same)), buf_count(client_bufs(cl0)))
+    && Nat.is_eq(log_seq_of(same), log_seq_of(cl0))
+    && Nat.is_eq(List.length(&2, Alert, settings_unreads(get_settings(same))), List.length(&2, Alert, settings_unreads(get_settings(cl0))))
+    && Nat.is_eq(active_of(other), 0n)
+    && Nat.is_eq(List.length(&2, Alert, settings_unreads(get_settings(set_active_clamp(buffer_lane_c.stale_client(cl0), 1n)))), 0n)
+
+def buffer_lane_c_laws_ok() -> Bool:
+  buffer_lane_c.mute_ok()
+    && buffer_lane_c.halves_ok()
+    && buffer_lane_c.combine_ok()
+    && buffer_lane_c.mention_ok()
+    && buffer_lane_c.locate_ok()
+    && buffer_lane_c.active_ok()
