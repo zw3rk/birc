@@ -28,10 +28,75 @@ def labels(xs: List<&2, String>) -> Bool:
       Nat.is_ge(String.length(h), 1n) && Nat.is_le(String.length(h), 63n)
         && chars(h, False{}) && labels(t)
 
+# Single validating walk (D157): one pass over the hostname checks the
+# character class, counts every label (1..63) and the total (<=253), and
+# collects the normalized labels. The old shape validated the same bytes
+# three-plus times: without_root_dot reversed twice, host_ok walked the
+# clean length twice, and labels re-walked every label with chars plus two
+# length walks each. Only a terminal root dot is stripped; any other empty
+# label (leading, doubled, or bare ".") fails closed, matching labels().
+# Recursion lives only in host_labels.go; the step helpers take a
+# continuation, so no helper calls a later definition.
+def host_labels.done(ok: Bool, +labs: List<&2, String>) -> Maybe<&2, List<&2, String>>:
+  match ok:
+    case True{}:
+      Some{List.reverse(&2, String, labs)}
+    case False{}:
+      None{}
+
+def host_labels.end(+cur: String, +labs: List<&2, String>, +lab_len: Nat, +total: Nat) -> Maybe<&2, List<&2, String>>:
+  match lab_len:
+    case 0n:
+      None{}
+    case 1n+p:
+      host_labels.done(Nat.is_le(1n+p, 63n) && Nat.is_le(total, 253n), String.reverse(cur) <> labs)
+
+def host_labels.mid(empty: Bool, bounded: Bool, +cur: String, +labs: List<&2, String>, +total: Nat, k: String -> List<&2, String> -> Nat -> Nat -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
+  match empty:
+    case True{}:
+      None{}
+    case False{}:
+      match bounded:
+        case True{}:
+          k("", String.reverse(cur) <> labs, 0n, 1n+total)
+        case False{}:
+          None{}
+
+def host_labels.step(dot: Bool, word: Bool, last: Bool, +h: Char, +t: String, +cur: String, +labs: List<&2, String>, +lab_len: Nat, +total: Nat, k: String -> List<&2, String> -> Nat -> Nat -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
+  match dot:
+    case True{}:
+      match last:
+        case True{}:
+          host_labels.end(cur, labs, lab_len, total)
+        case False{}:
+          host_labels.mid(Nat.is_eq(lab_len, 0n), Nat.is_le(lab_len, 63n), cur, labs, total, k)
+    case False{}:
+      match word:
+        case True{}:
+          k(SCon{h, cur}, labs, 1n+lab_len, 1n+total)
+        case False{}:
+          None{}
+
+def host_labels.go(+s: String, +cur: String, +labs: List<&2, String>, +lab_len: Nat, +total: Nat) -> Maybe<&2, List<&2, String>>:
+  match s:
+    case SNil{}:
+      host_labels.end(cur, labs, lab_len, total)
+    case SCon{+h, t}:
+      +n = Char.to_u32(h)
+      host_labels.step(U32.is_eq(n, 46), ascii_word(n), String.is_empty(t), h, t, cur, labs, lab_len, total, c2 => labs2 => len2 => tot2 => host_labels.go(t, c2, labs2, len2, tot2))
+
+def host_labels(+host: String) -> Maybe<&2, List<&2, String>>:
+  host_labels.go(host, "", Nil{}, 0n, 0n)
+
+def host_labels.some(got: Maybe<&2, List<&2, String>>) -> Bool:
+  match got:
+    case Some{_}:
+      True{}
+    case None{}:
+      False{}
+
 def host_ok(+host: String) -> Bool:
-  +clean = Wire.without_root_dot(host)
-  Nat.is_ge(String.length(clean), 1n) && Nat.is_le(String.length(clean), 253n)
-    && labels(String.split(clean, Chr{46}))
+  host_labels.some(host_labels(host))
 
 # Shared IRC server-prefix shape for Auth and CapNotify. Empty prefixes carry
 # no attestation and fail closed; peer binding stays at the transport/endpoint.
@@ -61,8 +126,36 @@ def port.valid(+text: String, valid: Bool) -> Maybe<&2, U32>:
     case True{}: port.read(U32.read(text))
 
 # Leading zeros remain valid, as with the existing numeric CLI flags.
+# Single validating read (D172): one walk rejects non-digits and accumulates
+# the value, replacing the decimal pre-walk plus the U32.read re-walk. The
+# accumulator saturates at 100000 (past any valid port), so over-long digit
+# strings fail the same range gate; empty input yields 0 and fails closed
+# like before. The digit helper takes a continuation, so no helper calls a
+# later definition.
+def port.cap(big: Bool, +v: U32) -> U32:
+  match big:
+    case True{}: 100000
+    case False{}: v
+
+def port.next(+acc: U32, +n: U32) -> U32:
+  +d = U32.sub(n, 48)
+  +v = U32.add(U32.mul(acc, 10), d)
+  port.cap(U32.is_gt(v, 100000), v)
+
+def port.digit(digit: Bool, +n: U32, +acc: U32, k: U32 -> Maybe<&2, U32>) -> Maybe<&2, U32>:
+  match digit:
+    case False{}: None{}
+    case True{}: k(port.next(acc, n))
+
+def port.go(+s: String, +acc: U32) -> Maybe<&2, U32>:
+  match s:
+    case SNil{}:
+      port.range(acc, U32.is_ge(acc, 1) && U32.is_le(acc, 65535))
+    case SCon{+h, t}:
+      port.digit(U32.is_ge(Char.to_u32(h), 48) && U32.is_le(Char.to_u32(h), 57), Char.to_u32(h), acc, a2 => port.go(t, a2))
+
 def port(+text: String) -> Maybe<&2, U32>:
-  port.valid(text, decimal(text))
+  port.go(text, 0)
 
 def parse.host(valid: Bool, host: String, port: Maybe<&2, U32>) -> Result<&2, &2, String, Endpoint>:
   match valid:

@@ -418,18 +418,30 @@ def parse_server_time.is_time(+tag: String, is_tm: Bool) -> String:
     case False{}:
       ""
 
-def parse_server_time.on_tag(+tag: String, acc: String) -> String:
-  match acc:
+# First non-empty `time=` value wins; later tags are never examined. An
+# empty extract (bare `time=`) does not stick, matching the old fold. The
+# tail walk lives inside the taken arm (eager-args rule, alias_step idiom).
+def parse_server_time.keep(+hit: String, k: Unit -> String) -> String:
+  match hit:
+    case SCon{_, _}:
+      hit
     case SNil{}:
-      parse_server_time.is_time(tag, String.starts_with(tag, "time="))
-    case SCon{+h, +t}:
-      SCon{h, t}
+      k(Unit{})
 
-def parse_server_time.step(acc: String, tag: String) -> String:
-  parse_server_time.on_tag(tag, acc)
+def parse_server_time.go(fuel: Nat, xs: List<&2, String>) -> String:
+  match fuel:
+    case 0n:
+      ""
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          ""
+        case Con{+tag, rest}:
+          parse_server_time.keep(parse_server_time.is_time(tag, String.starts_with(tag, "time=")), _ => parse_server_time.go(p, rest))
 
 def parse_server_time(+tags: String) -> String:
-  List.foldl(~&2, ~String, ~String, ~parse_server_time.step, String.split(tags, Chr{59}), "")
+  +parts = String.split(tags, Chr{59})
+  parse_server_time.go(Nat.add(1n, List.length(&2, String, parts)), parts)
 
 # Inbound: drop C0 except SOH (CTCP), drop DEL, strip mIRC colour (0x03+digits).
 def is_c0_drop(+c: Char) -> Bool:
@@ -665,13 +677,23 @@ def source_prefix.body(s: String) -> String:
     case SCon{Chr{58}, t}: source_prefix.word(take_until_space(t))
     case _: ""
 
-def source_prefix.tagged(pair: String & String) -> String:
-  match pair:
-    case (_, rest): source_prefix.body(drop_spaces(rest))
+# Skip-without-build twin of take_until_space for the tags section: the
+# caller only needs the remainder, so the discarded token is never built.
+def drop_until_space.step(space: Bool, +t: String, k: Unit -> String) -> String:
+  match space:
+    case True{}: t
+    case False{}: k(Unit{})
+
+def drop_until_space(s: String) -> String:
+  match s:
+    case SNil{}:
+      SNil{}
+    case SCon{+h, +t}:
+      drop_until_space.step(is_space(h), t, _ => drop_until_space(t))
 
 def source_prefix.on(tagged: Bool, +s: String) -> String:
   match tagged:
-    case True{}: source_prefix.tagged(take_until_space(s))
+    case True{}: source_prefix.body(drop_spaces(drop_until_space(s)))
     case False{}: source_prefix.body(s)
 
 def source_prefix(+line: String) -> String:
@@ -736,6 +758,39 @@ def sanitize_keep_style(+s: String) -> String:
 def parse(line: String) -> Maybe<&2, Message>:
   parse_body(strip_cr(line))
 
+# ---- IRCv3 tag value decoding ------------------------------------------
+# Tag values escape `;`, space, backslash, CR, and LF (`\:`, `\s`, `\\`,
+# `\r`, `\n`). Splitting on raw `;` is still correct: a literal semicolon
+# in a value must arrive escaped, so a raw `;` always delimits. Each value
+# is decoded after its `name=` prefix is dropped, never before the split
+# (unescaping first would turn `\:` into a false delimiter).
+# Single structural walk: deep patterns on the parameter, recursion on
+# nested tails only. An unknown escape keeps both bytes; a trailing lone
+# backslash is kept as-is.
+def tag_unesc.go(+s: String, +acc: String) -> String:
+  match s:
+    case SNil{}:
+      String.reverse(acc)
+    case SCon{Chr{92}, SNil{}}:
+      String.reverse(SCon{Chr{92}, acc})
+    case SCon{Chr{92}, SCon{Chr{58}, rest}}:
+      tag_unesc.go(rest, SCon{Chr{59}, acc})
+    case SCon{Chr{92}, SCon{Chr{115}, rest}}:
+      tag_unesc.go(rest, SCon{Chr{32}, acc})
+    case SCon{Chr{92}, SCon{Chr{92}, rest}}:
+      tag_unesc.go(rest, SCon{Chr{92}, acc})
+    case SCon{Chr{92}, SCon{Chr{114}, rest}}:
+      tag_unesc.go(rest, SCon{Chr{13}, acc})
+    case SCon{Chr{92}, SCon{Chr{110}, rest}}:
+      tag_unesc.go(rest, SCon{Chr{10}, acc})
+    case SCon{Chr{92}, SCon{+e, rest}}:
+      tag_unesc.go(rest, SCon{e, SCon{Chr{92}, acc}})
+    case SCon{+h, t}:
+      tag_unesc.go(t, SCon{h, acc})
+
+def tag_unescape(+value: String) -> String:
+  tag_unesc.go(value, "")
+
 # ---- IRCv3 client-only +typing tag -------------------------------------
 
 def typing_status.done(+value: String, done: Bool) -> Maybe<&2, TypingStatus>:
@@ -765,7 +820,7 @@ def typing_status(+value: String) -> Maybe<&2, TypingStatus>:
 def typing_tag.one(+tag: String, hit: Bool) -> Maybe<&2, TypingStatus>:
   match hit:
     case True{}:
-      typing_status(String.drop(tag, 8n))
+      typing_status(tag_unescape(String.drop(tag, 8n)))
     case False{}:
       None{}
 
@@ -798,7 +853,7 @@ def account_tag.val(+value: String) -> Maybe<&2, String>:
 def account_tag.one(+tag: String, hit: Bool) -> Maybe<&2, String>:
   match hit:
     case True{}:
-      account_tag.val(String.drop(tag, 8n))
+      account_tag.val(tag_unescape(String.drop(tag, 8n)))
     case False{}:
       None{}
 
@@ -846,7 +901,7 @@ def label_tag.value(+tag: String, empty: Bool) -> Maybe<&2, String>:
     case True{}:
       None{}
     case False{}:
-      Some{String.drop(tag, 6n)}
+      Some{tag_unescape(String.drop(tag, 6n))}
 
 def label_tag.one(+tag: String, hit: Bool) -> Maybe<&2, String>:
   match hit:
@@ -1040,9 +1095,17 @@ def typing_event_parsed(m: Maybe<&2, Message>, status: Maybe<&2, TypingStatus>) 
     case Some{msg}:
       typing_event_msg(msg, status)
 
+# Stripped-once twins: typing strips once, then parses the clean form
+# instead of each consumer re-stripping the same line.
+def parse_clean(+clean: String) -> Maybe<&2, Message>:
+  parse_body(clean)
+
+def raw_tags_clean(+clean: String) -> String:
+  raw_tags.clean(clean)
+
 def typing_event(+line: String) -> Maybe<&2, TypingEvent>:
   +clean = strip_cr(line)
-  typing_event_parsed(parse(clean), typing_tag(raw_tags(clean)))
+  typing_event_parsed(parse_clean(clean), typing_tag(raw_tags_clean(clean)))
 
 # Standard-replies use the canonical label_tag above (Slice 3 owner).
 def label_shown(+v: Maybe<&2, String>) -> String:
@@ -1058,31 +1121,53 @@ def label_tag_ok() -> Bool:
     && String.eq(label_shown(label_tag("time=x")), "")
     && String.eq(label_shown(label_tag("label=")), "")
     && String.eq(label_shown(label_tag("")), "")
+    && String.eq(label_shown(label_tag("label=a" ++ SCon{Chr{92}, SCon{Chr{58}, "b"}})), "a;b")
+    && String.eq(label_shown(label_tag("label=a" ++ SCon{Chr{92}, SCon{Chr{115}, "b"}})), "a b")
+    && String.eq(label_shown(label_tag("label=a" ++ SCon{Chr{92}, SCon{Chr{92}, "b"}})), "a" ++ SCon{Chr{92}, "b"})
+    && String.eq(label_shown(label_tag("time=x;label=a" ++ SCon{Chr{92}, SCon{Chr{58}, "b"}} ++ ";foo=1")), "a;b")
+    && String.eq(label_shown(label_tag("label=a;b=x")), "a")
 
 # ---- IRCv3 standard replies (FAIL/WARN/NOTE, no capability) ---------------
 # Params: (<cmd> <code> [<context>] :<description>), i.e. 3 or 4 params.
-def stdreply_len(+m: Message) -> Nat:
-  match m:
-    case Message{_, _, _, _, +ps}:
-      List.length(&2, String, ps)
+# One walk capturing (count, last) shared by the gate and the text path,
+# replacing the separate length + last walks each used to pay.
+def stdreply_parts.go(ps: List<&2, String>, +n: Nat, +last: String) -> Nat & String:
+  match ps:
+    case Nil{}:
+      (n, last)
+    case Con{+h, t}:
+      stdreply_parts.go(t, Nat.add(n, 1n), h)
 
 def stdreply_fields_ok(+cmd: String, +code: String, +desc: String) -> Bool:
   Bool.not(String.is_empty(sanitize_in(cmd)))
     && Bool.not(String.is_empty(sanitize_in(code)))
     && Bool.not(String.is_empty(sanitize_in(desc)))
 
-def stdreply_ok(+m: Message) -> Bool:
-  +n = stdreply_len(m)
-  (Nat.is_eq(n, 3n) || Nat.is_eq(n, 4n))
-    && stdreply_fields_ok(msg_param(m, 0n), msg_param(m, 1n), msg_last(m))
+def stdreply_ok.parts(got: Nat & String, +ps: List<&2, String>) -> Bool:
+  match got:
+    case (+n, +last):
+      (Nat.is_eq(n, 3n) || Nat.is_eq(n, 4n))
+        && stdreply_fields_ok(param_at(ps, 0n), param_at(ps, 1n), last)
 
-def stdreply_context.pick(is4: Bool, +m: Message) -> String:
+def stdreply_ok(+m: Message) -> Bool:
+  match m:
+    case Message{_, _, _, _, +ps}:
+      stdreply_ok.parts(stdreply_parts.go(ps, 0n, ""), ps)
+
+def stdreply_context.is4(is4: Bool, +ps: List<&2, String>) -> String:
   match is4:
-    case True{}: msg_param(m, 2n)
+    case True{}: param_at(ps, 2n)
     case False{}: ""
 
+def stdreply_context.parts(got: Nat & String, +ps: List<&2, String>) -> String:
+  match got:
+    case (+n, _):
+      stdreply_context.is4(Nat.is_eq(n, 4n), ps)
+
 def stdreply_context(+m: Message) -> String:
-  stdreply_context.pick(Nat.is_eq(stdreply_len(m), 4n), m)
+  match m:
+    case Message{_, _, _, _, +ps}:
+      stdreply_context.parts(stdreply_parts.go(ps, 0n, ""), ps)
 
 def stdreply_ctx_text.empty(empty: Bool, +context: String) -> String:
   match empty:
@@ -1136,9 +1221,9 @@ def stdreply_parse(+line: String) -> Message:
   stdreply_parse.on(parse(line))
 
 def stdreply_laws_ok() -> Bool:
-  String.eq(stdreply_kind(cls_lookup(cls_rows(), "FAIL")), "FAIL")
-    && String.eq(stdreply_kind(cls_lookup(cls_rows(), "warn")), "WARN")
-    && String.eq(stdreply_kind(cls_lookup(cls_rows(), "Note")), "NOTE")
+  String.eq(stdreply_kind(cls_lookup(cls_rows(), rfc1459("FAIL"))), "FAIL")
+    && String.eq(stdreply_kind(cls_lookup(cls_rows(), rfc1459("warn"))), "WARN")
+    && String.eq(stdreply_kind(cls_lookup(cls_rows(), rfc1459("Note"))), "NOTE")
     && String.eq(stdreply_kind(cls_lookup(cls_rows(), "PRIVMSG")), "")
     && stdreply_ok(stdreply_parse(":s FAIL PRIVMSG BAD #c :gone"))
     && stdreply_ok(stdreply_parse(":s WARN PRIVMSG BAD :slow"))
@@ -1418,17 +1503,55 @@ def has_sasl_cap(xs: List<&2, String>) -> Bool:
     case Con{+h, t}:
       ieq(h, "sasl") || String.starts_with(h, "sasl=") || has_sasl_cap(t)
 
+def sasl_event.cap_nak(nak: Bool) -> SaslEvent:
+  match nak:
+    case True{}: SaslNak{}
+    case False{}: SaslOther{}
+
+def sasl_event.cap_ack(+m: Message, ack: Bool) -> SaslEvent:
+  match ack:
+    case True{}: SaslAck{}
+    case False{}: sasl_event.cap_nak(ieq(msg_param(m, 1n), "NAK"))
+
+def sasl_event.cap_has(+m: Message, has: Bool) -> SaslEvent:
+  match has:
+    case True{}: sasl_event.cap_ack(m, ieq(msg_param(m, 1n), "ACK"))
+    case False{}: SaslOther{}
+
 def sasl_event.cap(+m: Message) -> SaslEvent:
-  Bool.pick(SaslEvent, has_sasl_cap(String.split(msg_param(m, 2n), Chr{32})),
-    Bool.pick(SaslEvent, ieq(msg_param(m, 1n), "ACK"), SaslAck{},
-      Bool.pick(SaslEvent, ieq(msg_param(m, 1n), "NAK"), SaslNak{}, SaslOther{})), SaslOther{})
+  sasl_event.cap_has(m, has_sasl_cap(String.split(msg_param(m, 2n), Chr{32})))
+
+def sasl_event.nreg(+num: U32, hit: Bool) -> SaslEvent:
+  match hit:
+    case True{}: SaslRegistered{}
+    case False{}: SaslOther{}
+
+def sasl_event.nfail(+num: U32, hit: Bool) -> SaslEvent:
+  match hit:
+    case True{}: SaslFailure{}
+    case False{}: sasl_event.nreg(num, U32.is_eq(num, 1))
+
+def sasl_event.n903(+num: U32, hit: Bool) -> SaslEvent:
+  match hit:
+    case True{}: SaslSuccess{}
+    case False{}: sasl_event.nfail(num, U32.is_eq(num, 902) || (U32.is_ge(num, 904) && U32.is_le(num, 907)))
+
+def sasl_event.num(+num: U32) -> SaslEvent:
+  sasl_event.n903(num, U32.is_eq(num, 903))
+
+def sasl_event.is_plus(plus: Bool, +num: U32) -> SaslEvent:
+  match plus:
+    case True{}: SaslPlus{}
+    case False{}: sasl_event.num(num)
+
+def sasl_event.is_cap(+m: Message, cap: Bool) -> SaslEvent:
+  match cap:
+    case True{}: sasl_event.cap(m)
+    case False{}:
+      sasl_event.is_plus(ieq(msg_command(m), "AUTHENTICATE") && String.eq(msg_param(m, 0n), "+") && Nat.is_eq(List.length(&2, String, msg_params(m)), 1n), msg_num(m))
 
 def sasl_event(+m: Message) -> SaslEvent:
-  Bool.pick(SaslEvent, ieq(msg_command(m), "CAP"), sasl_event.cap(m),
-    Bool.pick(SaslEvent, ieq(msg_command(m), "AUTHENTICATE") && String.eq(msg_param(m, 0n), "+") && Nat.is_eq(List.length(&2, String, msg_params(m)), 1n), SaslPlus{},
-      Bool.pick(SaslEvent, U32.is_eq(msg_num(m), 903), SaslSuccess{},
-        Bool.pick(SaslEvent, U32.is_eq(msg_num(m), 902) || (U32.is_ge(msg_num(m), 904) && U32.is_le(msg_num(m), 907)), SaslFailure{},
-          Bool.pick(SaslEvent, U32.is_eq(msg_num(m), 1), SaslRegistered{}, SaslOther{})))))
+  sasl_event.is_cap(m, ieq(msg_command(m), "CAP"))
 
 def sasl_event.line(m: Maybe<&2, Message>) -> SaslEvent:
   match m:
@@ -1493,17 +1616,18 @@ def extract_lag_token.on(+tok: String, is_birc: Bool) -> Maybe<&2, U32>:
 def extract_lag_token(+tok: String) -> Maybe<&2, U32>:
   extract_lag_token.on(tok, String.starts_with(tok, "birc_"))
 
-def extract_pong_lag.on(cand: Maybe<&2, U32>, cont: Maybe<&2, U32>) -> Maybe<&2, U32>:
+# Tail walk behind the miss arm: a birc_ hit returns without walking.
+def extract_pong_lag.step(cand: Maybe<&2, U32>, k: Unit -> Maybe<&2, U32>) -> Maybe<&2, U32>:
   match cand:
     case Some{n}: Some{n}
-    case None{}: cont
+    case None{}: k(Unit{})
 
 def extract_pong_lag.ps(ps: List<&2, String>) -> Maybe<&2, U32>:
   match ps:
     case Nil{}:
       None{}
     case Con{+h, t}:
-      extract_pong_lag.on(extract_lag_token(h), extract_pong_lag.ps(t))
+      extract_pong_lag.step(extract_lag_token(h), _ => extract_pong_lag.ps(t))
 
 def extract_pong_lag.is_pong(+ps: List<&2, String>, is_p: Bool) -> Maybe<&2, U32>:
   match is_p:

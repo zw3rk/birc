@@ -150,8 +150,13 @@ def name_at.got(got: Maybe<&2, Cl.Buffer>) -> String:
       match b:
         case Cl.Buffer{+name, _, _, _, _, _, _, _}: name
 
+def name_at.zero(zero: Bool, +cl: Cl.Client, +i: Nat) -> String:
+  match zero:
+    case True{}: "*server*"
+    case False{}: name_at.got(Cl.nth_buf(Cl.client_bufs(cl), i))
+
 def name_at(+cl: Cl.Client, +i: Nat) -> String:
-  Bool.pick(String, Nat.is_eq(i, 0n), "*server*", name_at.got(Cl.nth_buf(Cl.client_bufs(cl), i)))
+  name_at.zero(Nat.is_eq(i, 0n), cl, i)
 
 def default_target.active(+active: Nat) -> Maybe<&2, Nat>:
   match active:
@@ -348,12 +353,62 @@ def set_active_named.got(+cl: Cl.Client, got: Maybe<&2, Nat>) -> Cl.Client:
 def set_active_named(+cl: Cl.Client, +name: String) -> Cl.Client:
   set_active_named_cm(Cl.dflt_cm(), cl, name)
 
+# Single index+buffer pass for the F6 flip: one spine walk resolves the
+# flip target's index and stored name, and install reuses both, so the
+# flip pays no second find/fetch walk. A missing target keeps cl, matching
+# set_active_named.got_cm's None arm. Index 0 (*server*) needs no walk,
+# matching named_idx.server; other names search from index 1, matching
+# buf_find_cm.skip0.
+def toggle_find.hit(hit: Bool, +i: Nat, +n: String, miss: String -> Maybe<&2, Nat> & String) -> Maybe<&2, Nat> & String:
+  match hit:
+    case True{}: (Some{i}, n)
+    case False{}: miss(n)
+
+def toggle_find.go(+xs: List<&2, Cl.Buffer>, +cm: String, +name: String, +i: Nat) -> Maybe<&2, Nat> & String:
+  match xs:
+    case Nil{}: (None{}, name)
+    case Con{+h, +t}:
+      match h:
+        case Cl.Buffer{+n, _, _, _, _, _, _, _}:
+          toggle_find.hit(Cl.buf_eq_cm(cm, n, name), i, n, _ => toggle_find.go(t, cm, name, Nat.add(i, 1n)))
+
+def toggle_find.skip0(+xs: List<&2, Cl.Buffer>, +cm: String, +name: String) -> Maybe<&2, Nat> & String:
+  match xs:
+    case Nil{}: (None{}, name)
+    case Con{_, +t}: toggle_find.go(t, cm, name, 1n)
+
+def toggle_find.server(is_server: Bool, +cm: String, +cl: Cl.Client, +name: String) -> Maybe<&2, Nat> & String:
+  match is_server:
+    case True{}: (Some{0n}, name)
+    case False{}: toggle_find.skip0(Cl.client_bufs(cl), cm, name)
+
+def toggle_find.target(+cm: String, +cl: Cl.Client, +name: String) -> Maybe<&2, Nat> & String:
+  toggle_find.server(String.eq(name, "*server*"), cm, cl, name)
+
+# Install mirrors Cl.set_active_cm exactly (index-0 skips the unread
+# clearing; other indices clear the fetched stored name), reusing the
+# single pass's index and name instead of re-walking with nth_buf.
+def toggle_install.stg(control: Bool, +cm: String, +stg: Cl.Settings, +name: String) -> Cl.Settings:
+  match control:
+    case True{}: stg
+    case False{}: Cl.set_unreads(stg, Cl.del_unread_items_cm(cm, Cl.settings_unreads(stg), name))
+
+def toggle_install.at(+cm: String, +cl: Cl.Client, axis: Axis, +first: String, +second: String, +next: U32, +i: Nat, +n: String) -> Cl.Client & State:
+  match cl:
+    case Cl.Client{+nick, +server, +bufs, _, +now, +stg, +auth, +log_seq, welcomed}:
+      (Cl.Client{nick, server, bufs, i, now, toggle_install.stg(Nat.is_eq(i, 0n), cm, stg, n), auth, log_seq, welcomed}, On{axis, first, second, next})
+
+def toggle_install.got(+cm: String, +cl: Cl.Client, axis: Axis, +first: String, +second: String, +next: U32, pair: Maybe<&2, Nat> & String) -> Cl.Client & State:
+  match pair:
+    case (None{}, _): (cl, On{axis, first, second, next})
+    case (Some{+i}, +n): toggle_install.at(cm, cl, axis, first, second, next, i, n)
+
 def toggle_cm(+cm: String, +cl: Cl.Client, st: State) -> Cl.Client & State:
   match st:
     case Off{}: (cl, Off{})
     case On{axis, +first, +second, focus}:
       +next = toggle_focus(focus)
-      (set_active_named_cm(cm, cl, focus_name(first, second, next)), On{axis, first, second, next})
+      toggle_install.got(cm, cl, axis, first, second, next, toggle_find.target(cm, cl, focus_name(first, second, next)))
 
 def toggle(+cl: Cl.Client, st: State) -> Cl.Client & State:
   toggle_cm(Cl.dflt_cm(), cl, st)

@@ -799,18 +799,25 @@ def strip_go(+sig: String, +s: String) -> String:
 def strip(+st: State, +s: String) -> String:
   strip_go(strip_set(st), s)
 
-def index_first(+parts: List<&2, String>) -> Nat:
-  match parts:
-    case Nil{}: 0n
-    case Con{+h, _}: String.length(h)
+# Single-scan index: the old has_char + split + length-head triple walk is
+# one early-exit pass that stops at the first hit. The mode_class chain
+# already gates each class walk behind the previous miss, so it is left.
+def index_of.step(hit: Bool, +i: Nat, k: Unit -> Maybe<&2, Nat>) -> Maybe<&2, Nat>:
+  match hit:
+    case True{}: Some{i}
+    case False{}: k(Unit{})
 
-def index_of.member(+s: String, +c: Char, member: Bool) -> Maybe<&2, Nat>:
-  match member:
-    case False{}: None{}
-    case True{}: Some{index_first(String.split(s, c))}
+def index_of.go(fuel: Nat, +s: String, +c: Char, +i: Nat) -> Maybe<&2, Nat>:
+  match fuel:
+    case 0n: None{}
+    case 1n+p:
+      match s:
+        case SNil{}: None{}
+        case SCon{+h, +t}:
+          index_of.step(Char.is_eq(h, c), i, _ => index_of.go(p, t, c, Nat.add(i, 1n)))
 
 def index_of(+s: String, +c: Char) -> Maybe<&2, Nat>:
-  index_of.member(s, c, has_char(s, c))
+  index_of.go(Nat.add(1n, String.length(s)), s, c, 0n)
 
 def char_at(+s: String, +i: Nat) -> String:
   String.take(String.drop(s, i), 1n)
@@ -1038,8 +1045,22 @@ def key_done(+w: Walk, +nargs: Nat) -> Maybe<&2, Nat>:
 def key_index(+st: State, +flags: String, +args: List<&2, String>) -> Maybe<&2, Nat>:
   key_done(walk_flags(st, flags, Walk{True{}, 0n, None{}, True{}}), List.length(&2, String, args))
 
+# Single indexed pass: the old take + drop + append walked the spine three
+# times for one element. Out-of-range appends v, matching the old take/drop
+# behavior exactly (take keeps all, drop yields Nil).
+def replace_at.go(fuel: Nat, xs: List<&2, String>, +i: Nat, +v: String) -> List<&2, String>:
+  match fuel:
+    case 0n: xs
+    case 1n+p:
+      match xs:
+        case Nil{}: v <> Nil{}
+        case Con{+h, t}:
+          match i:
+            case 0n: v <> t
+            case 1n+q: h <> replace_at.go(p, t, q, v)
+
 def replace_at(+xs: List<&2, String>, +i: Nat, +v: String) -> List<&2, String>:
-  List.append(&2, String, List.take(&2, String, xs, i), v <> List.drop(&2, String, xs, Nat.add(i, 1n)))
+  replace_at.go(Nat.add(1n, Nat.add(List.length(&2, String, xs), i)), xs, i, v)
 
 def redact.known(+args: List<&2, String>, +idx: Maybe<&2, Nat>) -> List<&2, String>:
   match idx:

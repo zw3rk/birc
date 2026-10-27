@@ -10,23 +10,26 @@ def finish(+head: String, +chunks: List<&2, String>) -> Maybe<&2, List<&2, Strin
     Bool.pick(List<&2, String>, String.is_empty(head) && Bool.not(List.is_empty(&2, String, chunks)),
       chunks, String.reverse(head) <> chunks))}
 
-def piece.fits(fits: Bool, +cap: Nat, +used: Nat, +source: String, +text: String, tail: String, head: String, chunks: List<&2, String>, +bound: Nat, k: String -> Nat -> String -> List<&2, String> -> Nat -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
-  match fits:
-    case True{}:
-      k(tail, Nat.add(used, Irc.utf8_len(text)), String.reverse(text) ++ head, chunks, Nat.sub(bound, String.length(text)))
+# One utf8_len per cluster (D239): the cluster is sized once per call and the
+# checks below reuse that size instead of re-walking the text per check.
+def piece.sized_used(fitsok: Bool, +used: Nat, source: String, +text: String, tail: String, head: String, chunks: List<&2, String>, +bound: Nat, k: String -> Nat -> String -> List<&2, String> -> Nat -> Maybe<&2, List<&2, String>>, +size: Nat) -> Maybe<&2, List<&2, String>>:
+  match fitsok:
     case False{}:
       k(source, 0n, "", String.reverse(head) <> chunks, bound)
+    case True{}:
+      k(tail, Nat.add(used, size), String.reverse(text) ++ head, chunks, Nat.sub(bound, String.length(text)))
 
-def piece.valid(valid: Bool, +cap: Nat, +used: Nat, source: String, +text: String, tail: String, head: String, chunks: List<&2, String>, +bound: Nat, k: String -> Nat -> String -> List<&2, String> -> Nat -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
-  match valid:
+def piece.sized_cap(ok: Bool, +cap: Nat, +used: Nat, source: String, +text: String, tail: String, head: String, chunks: List<&2, String>, +bound: Nat, k: String -> Nat -> String -> List<&2, String> -> Nat -> Maybe<&2, List<&2, String>>, +size: Nat) -> Maybe<&2, List<&2, String>>:
+  match ok:
     case False{}: None{}
     case True{}:
-      piece.fits(Nat.is_le(Nat.add(used, Irc.utf8_len(text)), cap), cap, used, source, text, tail, head, chunks, bound, k)
+      piece.sized_used(Nat.is_le(Nat.add(used, size), cap), used, source, text, tail, head, chunks, bound, k, size)
 
 def piece(+cap: Nat, used: Nat, source: String, cut: Columns.Cut, head: String, chunks: List<&2, String>, +bound: Nat, k: String -> Nat -> String -> List<&2, String> -> Nat -> Maybe<&2, List<&2, String>>) -> Maybe<&2, List<&2, String>>:
   match cut:
     case Columns.Cut{+text, tail, _}:
-      piece.valid(Nat.is_le(Irc.utf8_len(text), cap), cap, used, source, text, tail, head, chunks, bound, k)
+      +size = Irc.utf8_len(text)
+      piece.sized_cap(Nat.is_le(size, cap), cap, used, source, text, tail, head, chunks, bound, k, size)
 
 # `bound` is the residual scalar count from the one String.length in split.
 # Each taken cluster shrinks it. A chunk break retries the same bound.
