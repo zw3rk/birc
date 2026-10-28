@@ -978,6 +978,37 @@ def on_fail(
     ts : String <- Clock.stamp()
     on_fail_go(Sess.session_fail(Sess.session_set_now(st, ts), msg), ui, evt, cmd, ack, gen, k)
 
+# Echo-only notice (writer Drop report): same echo path as on_fail but no
+# autoreconnect and no command emission, so the report terminates here. The
+# echo is computed in argument position: a strict let after a monadic bind
+# is rejected in do-blocks, so the continuation takes the echoed session.
+def on_notice.echoed(
+  +st2: Sess.Session,
+  ui: T.Ui,
+  +evt: Chan(Sess.UiMsg),
+  +cmd: Chan(Sess.NetCmd),
+  +ack: Chan(Unit),
+  +gen: U32,
+  k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)
+) -> IO(Unit):
+  do IO<Unit>:
+    got : T.Ui & T.UiKeys <- paint_session(ui, st2)
+    on_chunk.paint(got, st2, evt, cmd, ack, gen, k)
+
+def on_notice(
+  ui: T.Ui,
+  +st: Sess.Session,
+  +evt: Chan(Sess.UiMsg),
+  +cmd: Chan(Sess.NetCmd),
+  +ack: Chan(Unit),
+  +gen: U32,
+  +msg: String,
+  k: (T.Ui & Sess.Session & U32 & Bool) -> IO(Unit)
+) -> IO(Unit):
+  do IO<Unit>:
+    ts : String <- Clock.stamp()
+    on_notice.echoed(Sess.session_error(Sess.session_set_now(st, ts), msg), ui, evt, cmd, ack, gen, k)
+
 def on_evt(
   e: Sess.NetEvt,
   ui: T.Ui,
@@ -999,6 +1030,8 @@ def on_evt(
       k((ui, st, gen, False{}))
     case Sess.NetFail{+msg}:
       on_fail(ui, st, evt, cmd, ack, gen, "disconnected: " ++ msg, k)
+    case Sess.Notice{+msg}:
+      on_notice(ui, st, evt, cmd, ack, gen, msg, k)
     case Sess.InitialFail{+msg}:
       shutdown_failed(ui, cmd, ack, msg)
 

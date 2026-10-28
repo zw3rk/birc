@@ -257,6 +257,10 @@ type NetEvt is Data:
   WriterDone{}
   Up{}
   NetFail{msg: String}
+  # Echo-only failure notice: the UI echoes without autoreconnect and emits
+  # no command, so a writer-side Drop report cannot re-enter the fail path
+  # (a NetFail there would loop: Drop -> NetFail -> Drop with fixed gen).
+  Notice{msg: String}
   InitialFail{msg: String}
 
 # gen is the connection the UI bumped on this Dial. Stale FromNet is dropped.

@@ -1428,14 +1428,16 @@ def writer_command(c: Sess.NetCmd, st: Writer, +evt: Chan(Sess.UiMsg), +cmd: Cha
         case Writer{sock, +gen, +pending, +pending_txn, +next_txn, budget, +scheduled}:
           writer_pump(U32.is_eq(pgen, gen), Writer{sock, gen, pending, pending_txn, next_txn, budget, scheduled}, evt, cmd, next => k((next, scope)))
     # D261: a Drop without autoreconnect redial used to discard the queue
-    # silently; report the discarded count through writer_fail like the
-    # sibling fail arms (hangup/flush/overflow), even when it is zero.
+    # silently; report the discarded count through an echo-only Notice like
+    # the sibling fail arms (hangup/flush/overflow), even when it is zero.
+    # A NetFail here would loop (Drop -> NetFail -> Drop with fixed gen),
+    # so the report must not re-enter the fail path.
     case Sess.Drop{}:
       match st:
         case Writer{sock, +gen, +pending, _, +next_txn, budget, _}:
           do IO<Unit>:
             Unit <- close_socket(sock)
-            Unit <- IO.spawn(Unit, writer_fail(evt, gen, "disconnect; " ++ Nat.show(List.length(&2, String, pending)) ++ " queued lines were discarded without retry"))
+            Unit <- IO.spawn(Unit, post(evt, gen, Sess.Notice{"disconnect; " ++ Nat.show(List.length(&2, String, pending)) ++ " queued lines were discarded without retry"}))
             k((Writer{None{}, gen, Nil{}, Nil{}, next_txn, budget, False{}}, scope))
     case Sess.Hangup{}:
       match st:
