@@ -77,11 +77,11 @@ def remember.allowed_cm(allowed: Bool, state: State, +name: String, +key: String
 # Fail-fast membership (D103): a resident channel skips the length walk; only
 # a new name pays the capacity scan. Admission still gates both arms.
 # Single membership pass (D103): one walk rebuilds the list, reports whether
-# the name was already resident, and counts the post-insert length. The old
+# the name was already resident, and counts the pre-insert length. The old
 # shape paid a has_cm scan, a second List.length walk on the miss path, and
-# a third walk inside put_cm. Capacity compares against the post-insert
-# length (n <= MAX), which equals length-before < MAX on a miss and holds
-# trivially on a hit. Admission still gates both arms.
+# a third walk inside put_cm. Capacity admits on strict pre-insert
+# less-than (n < MAX on a miss, so post-insert stays <= MAX); a hit skips
+# the gate and never duplicates. Admission still gates both arms.
 type Inserted is Data:
   Inserted{rev: List<&2, Channel>, known: Bool, count: Nat}
 

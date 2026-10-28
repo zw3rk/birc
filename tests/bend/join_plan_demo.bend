@@ -135,9 +135,15 @@ def key_controls() -> IO(Unit):
     Unit <- E.must("explicit same-name key update advances revision", Nat.is_gt(P.revision(plan(P.outbound(state, "JOIN #one changed-key" <> Nil{}))), P.revision(state)))
     IO.pure(Unit, Unit{})
 
+def checked_controls() -> IO(Unit):
+  do IO<Unit>:
+    Unit <- E.must("checked_outbound_equiv", P.checked_outbound_ok())
+    IO.pure(Unit, Unit{})
+
 def main() -> IO(Unit):
   do IO<Unit>:
     Unit <- key_controls()
     Unit <- capacity_controls()
     Unit <- auth_controls()
+    Unit <- checked_controls()
     IO.print("join_plan_demo=ok")
