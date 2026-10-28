@@ -1471,7 +1471,7 @@ Method: ten residual lanes (error paths, CLI/config, log formatting, upload/card
   - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
   - Status 2026-10-27: OPEN — unfixable per in-code checker rejection (wsnet.bend:2421-2424: Workspace & Bool pair cannot be named and consumed twice).
   - Status 2026-10-28: OPEN — CONFIRMED-UNFIXABLE: wsnet.bend:2421-2426 affine rejection reproduced on project toolchain.
-  - Status 2026-10-28: FIXED (external review lead) — matching the `cycle_server` call result inline with one destructure (`match W.cycle_server(sized, typed): case (+ws2, +moved)`) never names the pair, so the checker sees a single consumption; same projections, one evaluation. Gate: `test-sessws-s1s5`=ok.
+  - Status 2026-10-28: FIXED (external review lead) — one `cycle_server` call, destructured once in `ws_f7.cycled`, with the pair traveling as an affine parameter (the `ws_act.gated` shape). Inline `match` on the call result is rejected (a match cannot scrutinize a computed value) and a `+pair` binder is rejected (the tuple is not Data); the affine parameter consumes it exactly once. Same projections, one evaluation. Gates: `test-sessws-s1s5`=ok, full `build/birc` links.
   - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [x] positive test: F7 cycles identically
   - [x] negative test: single evaluation per press
