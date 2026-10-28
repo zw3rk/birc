@@ -960,6 +960,7 @@ Method: ten parallel sweep lanes (history, lexer, paint, session, net, auth, med
   - Status 2026-10-28: OPEN — backoff count + DNS cache need Session shapes; static delay contradicts pinned 2s notice.
   - Status 2026-10-28: CONFIRMED — Reconnect/Intent/Dial payloads have zero spare fields for a backoff count; dns ns dies per dial_dual call (dns.bend:823-830), single-dial double-read already fixed by D156 threading.
   - Status 2026-10-28: CONFIRMED — no consecutive-failure counter exists anywhere and success resets nothing (on_up only reconnects+repaints, net.bend:903); the writer is equally blind to Up. Backoff count needs the same missing cross-event store as D149.
+  - Status 2026-10-28: external review narrows the shape — not blocked, but mechanical + product-coupled: `Reconnecting{}` is a zero-field constructor (`session.bend:321`), so an attempt field threads through ~30 sites; the pinned `reconnecting in 2s` text (`session.bend:2406`, `tests/pty/disconnect_cleanup.py:96-108`, `sessws_s1s5_demo.bend:1551`) must change with the delay; only the DNS cache genuinely needs new endpoint-scoped state. Deferred: user-visible timing + pinned-text updates need explicit product authorization.
   - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [ ] positive test: reconnect still recovers a flapping endpoint
   - [ ] negative test: dead endpoint backs off instead of hot-looping
@@ -982,6 +983,7 @@ Method: ten parallel sweep lanes (history, lexer, paint, session, net, auth, med
   - Fix direction: coalesce/dedup identical pending notices (generation + count key) instead of spawning per Cont.
   - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
   - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/actor.bend:618)
+  - Status 2026-10-28: external review residual recorded, behavior kept — a queue pinned full discards later batches with no further notice until it drains below the cap and refills (entry edge only, `Nat.is_lt(old, PENDING_CAP())`). Re-notifying per batch would reopen the per-heartbeat spam this ticket closed; a cumulative total would need a Writer shape change. The stall window is bounded by the fail path, which reports via D261's echo-only Notice.
   - Validated by: eighty-round-2 workflow net sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [ ] positive test: first overflow still notifies with the count
   - [ ] negative test: repeated Conts coalesce to one notice
@@ -1462,17 +1464,18 @@ Method: ten residual lanes (error paths, CLI/config, log formatting, upload/card
   - [ ] negative test: inbound chunk performs no length walk
   - [ ] regression test: existing wsnet/clock suites still pass
 
-- [ ] D189 — `src/bend/wsnet.bend:2383-2393` + `workspace.bend:1516-1549` — Low (rare, F7-only) — F7 evaluates `cycle_server` twice, discarding one full cycle
+- [x] D189 — `src/bend/wsnet.bend:2383-2393` + `workspace.bend:1516-1549` — Low (rare, F7-only) — F7 evaluates `cycle_server` twice, discarding one full cycle
   - Location: `+ws2 = cycle_ws(cycle_server(sized, typed))` (`:2387`) and `+moved = cycle_moved(cycle_server(sized, typed))` (`:2388`) are two strict bindings, each running `find_part.go`, `Drafts.set_cm`/`focus_admits_cm`/`get_cm`, `session_upload_draft` rebuild, and `replace_part.go` spine walk (`workspace.bend:1516-1549`). F7-only, so rare. Distinct from D22 (per-keystroke rebuild).
   - What/why: duplicate full cycle per F7 press.
   - Fix direction: bind once, derive both results from the single cycle.
   - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
   - Status 2026-10-27: OPEN — unfixable per in-code checker rejection (wsnet.bend:2421-2424: Workspace & Bool pair cannot be named and consumed twice).
   - Status 2026-10-28: OPEN — CONFIRMED-UNFIXABLE: wsnet.bend:2421-2426 affine rejection reproduced on project toolchain.
+  - Status 2026-10-28: FIXED (external review lead) — matching the `cycle_server` call result inline with one destructure (`match W.cycle_server(sized, typed): case (+ws2, +moved)`) never names the pair, so the checker sees a single consumption; same projections, one evaluation. Gate: `test-sessws-s1s5`=ok.
   - Validated by: eighty-round-4 workflow wsnet sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
-  - [ ] positive test: F7 cycles identically
-  - [ ] negative test: single evaluation per press
-  - [ ] regression test: existing wsnet/workspace suites still pass
+  - [x] positive test: F7 cycles identically
+  - [x] negative test: single evaluation per press
+  - [x] regression test: existing wsnet/workspace suites still pass
 
 - [x] D190 — `src/bend/dns_wire.bend:698,753` — Low (bounded) — O(AN × packet) bounds walk
   - Location: `read_rr` recomputes `U32.from_nat(List.length(pkt))` per call (`:698`) while `walk_an_go` AwLeft→AwGot arm calls `read_rr(pkt, off)` once per answer RR (`:753`) and `pkt` is passed unchanged through the walk, so the full-packet walk re-derives a constant per record. No D-entry or non-finding covers it (D85 is `read_name_go` re-drop, different function).
@@ -2138,6 +2141,7 @@ Method: ten residual lanes (cards pipeline, typing state, framer, feed paths, me
   - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
   - Status 2026-10-27: OPEN — free-before-malloc is use-after-free; needs ownership/streaming redesign.
   - Status 2026-10-28: OPEN — free-before-malloc is use-after-free; needs ownership/streaming redesign; ~4.8MiB/admission peak remains.
+  - Status 2026-10-28: external review narrows the fix — base64 output is always shorter than its input, so decode in place and transfer the text buffer's ownership to the decoded image: one signature change, no second allocation. Still unverifiable here: no C toolchain sees the Bend headers (`bend_cid.h` lives only in the Nix dev shell), so the change would ship without compile, ASan, or test evidence.
   - Validated by: eighty-round-5 workflow ffi sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [ ] positive test: admission still decodes identically
   - [ ] negative test: text freed before bytes malloc
@@ -2253,7 +2257,7 @@ Method: ten residual lanes (cards pipeline, typing state, framer, feed paths, me
   - [ ] negative test: denied path performs no projection
   - [ ] regression test: existing startup suites still pass
 
-- [x] D260 — `src/bend/workspace.bend:1208-1209` + `session.bend:2337-2344,2373-2379` + `wsnet.bend:471-477` — Low — multiserver double-fail, distinct-site twin of D149
+- [ ] D260 — `src/bend/workspace.bend:1208-1209` + `session.bend:2337-2344,2373-2379` + `wsnet.bend:471-477` — Low — multiserver double-fail, distinct-site twin of D149
   - Location: `live_on.routed` Eof/NetFail arms both call `live_failed(on_routed_fail(...))` unconditionally; True arm echoes error + `reconnecting in 2s` + diagnostic and re-arms a 2 s `redial_watch`; `reconnect_configured` returns True even while Reconnecting, so a second same-gen event re-emits cmd + intent; no gen bump at fail time (`on_redial` bumps only when the first `WsRedial` fires, so the second watch dies stale at `reconnect_ok`). Reachability is conditional on non-empty pending + failed send — the same conditional character D149 was accepted under. Distinct module/loop from D149 (`net.bend` vs `workspace.bend`+`wsnet.bend`); per-site precedent (D163–D168) supports a separate ticket.
   - What/why: duplicate failure notice plus stillborn redial per single outage on the routed path.
   - Fix direction: same-outage dedup via gen bump/pending-fail flag (D149's fix, new site).
@@ -2263,11 +2267,11 @@ Method: ten residual lanes (cards pipeline, typing state, framer, feed paths, me
   - Status 2026-10-28: CONFIRMED — no watch store in Workspace/Part; on_redial.emit passes the Reconnecting session through unchanged (workspace.bend:907-910), so a Reconnecting gate swallows post-redial failures identically to D149.
   - Status 2026-10-28: CONFIRMED — not transferable from any actor-side fix: the workspace path runs a different loop (wsnet.bend) with per-part gens owned solely by Workspace (workspace.bend:703), bumped only at on_redial.emit (workspace.bend:907), with Intent-carried gens and reconnect_ok staleness fencing. An actor-held flag in the single-server loop would not cover routed parts; it needs its own store at the on_redial/live_on.routed site.
   - Status 2026-10-28: CONFIRMED — echo-deferral fails the same three facts as D149 (no Connecting state exists; manual dials land on Reconnecting; immediacy pinned by disconnect_cleanup.py and sessws_s1s5_demo.bend:1551). Only double echo harm remains; dedup needs an on_redial-site last-fail store: none exists without shape changes.
-  - Status 2026-10-28: FIXED (render-side coalescing) — text-identical adjacent outage notices merge at the append choke point both arms share (`buffer.bend:1280-1295` `buf_append_line.tail`; predicate `outage_notice_row`/`outage_dup` at `:1257-1272`: same kind + identical text + exact notice strings only). True arm reaches it via `on_routed_fail.gated` → `Sess.session_fail` (`workspace.bend:866`); stale arm via `Sess.session_error` (`session.bend:2380`) → same `Sub.echo_err`. No shape/test changes. Gates: `test-buffer-spines` (new `outage_coalesce` assertions) =ok, `test-sessws-s1s5`=ok, `test-m21-session`=ok.
+  - Status 2026-10-28: REVERTED — the render-side coalescing tick was wrong: a double on_fail appends Error, System, Error, System (error row via `session.bend:2373`, reconnect row via `:2406`), so no adjacent pair is ever text-identical and the predicate could never fire on the real sequence; adjacent manual reconnect notices could have merged instead. Coalescing code and its test removed. Dedup still needs an on_redial-site last-fail store: none exists without shape changes.
   - Validated by: eighty-round-5 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
-  - [x] positive test: single outage posts one notice
-  - [x] negative test: distinct outages still post separately
-  - [x] regression test: existing workspace suites still pass
+  - [ ] positive test: single outage posts one notice
+  - [ ] negative test: distinct outages still post separately
+  - [ ] regression test: existing workspace suites still pass
 
 - [x] D261 — `src/bend/actor.bend:1414-1419` + `session.bend:2386-2400` + `net.bend:411-414,931-937` — Low (silent data loss) — Drop-arm queue discard with no `writer_fail` when autoreconnect is off/unconfigured
   - Location: `session_autoreconnect.chk` False arm and `dial` not-configured arm yield `(st, Drop{})`; `emit_fail_cmd` fallthrough delivers it via `emit_cmd` (Drop arm spawns no notice); the writer `Drop` arm closes the socket and replaces both queues with `Nil` with no `writer_fail`. `session_fail` echoes only the disconnect string, never a count — while every sibling fail path reports one (`writer_sent`, `writer_hangup_done`, `writer_dial_flushed`, overflow `:614`). Bound is `PENDING_CAP()=512`. D24/D27/D93 cover the bounded-with-notice, Sent-false-with-notice, and per-Cont-spam paths — none covers this arm.
@@ -2275,6 +2279,7 @@ Method: ten residual lanes (cards pipeline, typing state, framer, feed paths, me
   - Fix direction: emit the drop count through `writer_fail` like the sibling arms.
   - Status 2026-10-26: OPEN — confirmed, fix deferred (analysis-only round; no code touched).
   - Status 2026-10-27: FIXED (fix-lane): fix present in-tree (in-code marker at src/bend/actor.bend:1430)
+  - Status 2026-10-28: REWORKED (external review blocker) — the `writer_fail` report re-entered the fail path as `NetFail` and looped Drop -> NetFail -> Drop with fixed gen whenever autoreconnect is off/unconfigured (unbounded echo rows, no sleep). The Drop arm now posts echo-only `Sess.Notice` (`actor.bend:1434`); the UI echoes via `on_notice` (`net.bend:984-1000`) with no autoreconnect and no command, so the report terminates. Count semantics unchanged.
   - Validated by: eighty-round-5 workflow errors sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [ ] positive test: drop reports the discarded count
   - [ ] negative test: empty queue reports zero
@@ -2724,6 +2729,7 @@ Method: ten residual lanes (per-tick costs, startup, native, submit, search, vie
   - Status 2026-10-27: OPEN — OUT-OF-SCOPE: needs session.bend/chunk shapes.
   - Status 2026-10-28: OPEN — Chunk needs third field or xs/req repurpose; req load-bearing; ~20 test sites.
   - Status 2026-10-28: CONFIRMED — Chunk{xs,req} 2-field pinned (session.bend:255); 17 src constructor sites, 76 test sites across 9 files, 9 match sites; req is live PONG identity (workspace.bend:711-717, net.bend:887).
+  - Status 2026-10-28: external review narrows the shape — a sibling NetEvt constructor carrying framed lines beats widening Chunk: every `Chunk` constructor and test site stays valid, only the exhaustive match sites need a new arm. Still a shape change with new match arms across net/wsnet/tests; deferred as Low perf with no willing consumer.
   - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
   - [ ] positive test: inbound bytes frame identically
   - [ ] negative test: single-chunk path performs one framer pass
@@ -2740,7 +2746,7 @@ Method: ten residual lanes (per-tick costs, startup, native, submit, search, vie
   - [ ] negative test: read performs no length walk
   - [ ] regression test: existing actor suites still pass
 
-- [x] D149 — `src/bend/net.bend:995-1000,929-935` + `src/bend/session.bend:2337-2344,2386-2405,494-497` — Low (notice duplication) — one outage fires `on_fail` twice, no dedup
+- [ ] D149 — `src/bend/net.bend:995-1000,929-935` + `src/bend/session.bend:2337-2344,2386-2405,494-497` — Low (notice duplication) — one outage fires `on_fail` twice, no dedup
   - Location: `Eof` and `NetFail` arms both call `on_fail` unconditionally (`net.bend:995-1000`); `on_fail` always echoes via `session_fail` (`session.bend:2337-2344`) and always re-Dials when configured (`:2386-2405`), and `reconnect_configured` returns `True` even while `Reconnecting` (`:494-497`, `case _`). `emit_fail_cmd` spawns one 2 s `reconnect_watch` per call (`net.bend:929-935`), and `on_fail` does not bump `gen` (`:935`), so the second event passes the generation gate. Reachable orderings verified: recv-`Fail` posts `NetFail` (`actor.bend:244-247`) while empty-read posts `Eof` (`actor.bend:187-191`); clean-FIN death yields `Eof` then a failed writer send yields `NetFail`. Distinct from D91 (flat-2 s policy) and D93 (per-`Cont` overflow spam).
   - What/why: double failure notice plus double redial watch per single outage.
   - Fix direction: dedup same-outage fail events (generation bump or pending-fail flag).
@@ -2752,10 +2758,10 @@ Method: ten residual lanes (per-tick costs, startup, native, submit, search, vie
   - Status 2026-10-28: CONFIRMED — actor-held flag also impossible: failures are consumed by the UI loop (net.bend live_step/live_go/live_idle threading Ui&Session&U32&Bool), never by the actor — writer_loop consumes NetCmd only (actor.bend:1458), failures post one-way (actor.bend:88), readers terminate on failure (actor.bend:171,243). The UI tuple's Bool is the input-scheduler bit (net.bend:488); NetEvt/NetCmd/FromNet carry no fail bit (session.bend:253,274,287); Reconnect{gen} spawns after the echo (net.bend:916). Informing the actor needs a NetCmd shape change; widening the UI tuple touches ~30 continuation sites.
   - Status 2026-10-28: CONFIRMED — echo-deferral to watch-fire also fails three facts: fired redials keep net=Reconnecting (gen bump only; post-redial failure indistinguishable), manual same-endpoint dials yield Reconnecting via dialing_state.prior (session.bend:2522-2528), and immediacy is pinned (tests/pty/disconnect_cleanup.py:96-108 requires disconnect echo with autoreconn off where no watch ever fires; sessws_s1s5_demo.bend:1551 pins immediate stale-gen notice). Second watch provably stillborn; only double echo harm remains.
   - Validated by: eighty-round-3 workflow chan sweep + fresh sceptic (CONFIRMED) + parent-cited regions.
-  - Status 2026-10-28: FIXED (render-side coalescing) — text-identical adjacent outage notices merge at the append choke point both `on_fail` arms share (`buffer.bend:1280-1295` `buf_append_line.tail`; predicate `outage_notice_row`/`outage_dup` at `:1257-1272`: same kind + identical text + exact notice strings only). `Eof`/`NetFail` arms (`net.bend:997/1001`) reach it via `session_fail` (`session.bend:2375`) → `Sub.echo_err`. Adjacent duplicates were user-indistinguishable, so no information is lost; distinct notices and plain rows untouched. No shape/test changes; second watch still stillborn as proven. Gates: `test-buffer-spines` (new `outage_coalesce` assertions) =ok, `test-reconnect-recovery`=ok, `test-runtime-reconnect`=ok.
-  - [x] positive test: single outage posts one notice
-  - [x] negative test: distinct outages still post separately
-  - [x] regression test: existing net suites still pass
+  - Status 2026-10-28: REVERTED — the render-side coalescing tick was wrong: a double on_fail appends Error, System, Error, System (error row via `session_fail`, reconnect row via `session_autoreconnect.st` at `session.bend:2406`), so no adjacent pair is ever text-identical and the predicate could never fire on the real sequence; adjacent manual reconnect notices could have merged instead. Coalescing code and its test removed. Dedup still needs a last-fail store at the on_evt site: none exists without a Session/Part shape change.
+  - [ ] positive test: single outage posts one notice
+  - [ ] negative test: distinct outages still post separately
+  - [ ] regression test: existing net suites still pass
 
 - [x] D150 — `src/bend/session.bend:410-442,437` + `tests/bend/submit_demo.bend:263-272` — Cosmetic (dead policy) — `hold_cmd` has zero production callers
   - Location: policy defined at `:410-442`; repo-wide grep shows only the internal `hold_cmd.outs` self-use (`:437`) plus four test pins (`tests/bend/submit_demo.bend:263-272`). Live path gates offline output elsewhere (`submit_offline`). Distinct from D2/D72 (dead `Bool` splits in other modules) and D39 (`transport.bend` helpers). Harmless but confusing surface.
