@@ -1251,58 +1251,8 @@ def buf_push(+b: Buffer, +line: Line, +cap: Nat) -> Buffer:
     case Buffer{+name, +ch, +topic, +lines, +nicks, +scroll, +newest, +count}:
       buf_push.over(Nat.is_ge(count, cap), name, ch, topic, lines, nicks, scroll, newest, count, line, cap)
 
-# Outage-notice coalescing: a repeated identical Eof / NetFail echo
-# ("disconnected", "disconnected: <reason>") or the "reconnecting in 2s"
-# follow-up merges with the tail row instead of appending a duplicate row.
-# Only these exact notice strings coalesce, only against a text-identical
-# tail row of the same kind, and only at append time.
-def outage_notice_row(kind: LineKind, +text: String) -> Bool:
-  match kind:
-    case Error{}:
-      String.eq(text, "disconnected") || String.starts_with(text, "disconnected: ")
-    case System{}:
-      String.starts_with(text, "reconnecting in 2s to ")
-    case _: False{}
-
-def outage_dup(old: Line, new: Line) -> Bool:
-  match old new:
-    case Line{+ok, _, +otext, _, _} Line{+nk, _, +ntext, _, _}:
-      kind_eq(ok, nk) && String.eq(otext, ntext) && outage_notice_row(nk, ntext)
-
-def buf_tail_line.last(lines: List<&2, Line>) -> Maybe<&2, Line>:
-  match lines:
-    case Nil{}: None{}
-    case Con{+h, Nil{}}: Some{h}
-    case Con{_, +t}: buf_tail_line.last(t)
-
-def buf_tail_line.newest(newest: List<&2, Line>) -> Maybe<&2, Line>:
-  match newest:
-    case Nil{}: None{}
-    case Con{+h, _}: Some{h}
-
-def buf_tail_line.pick(has_new: Bool, +newest: List<&2, Line>, +lines: List<&2, Line>) -> Maybe<&2, Line>:
-  match has_new:
-    case True{}: buf_tail_line.newest(newest)
-    case False{}: buf_tail_line.last(lines)
-
-# Head of the newest-first mirror, else the last sealed line. Empty is None.
-def buf_tail_line(+b: Buffer) -> Maybe<&2, Line>:
-  match b:
-    case Buffer{_, _, _, +lines, _, _, +newest, _}:
-      buf_tail_line.pick(Bool.not(List.is_empty(&2, Line, newest)), newest, lines)
-
-def buf_append_line.dup(+b: Buffer, +line: Line, dup: Bool) -> Buffer:
-  match dup:
-    case True{}: b
-    case False{}: buf_push(b, line, SCROLL_CAP())
-
-def buf_append_line.tail(+b: Buffer, +line: Line, +tail: Maybe<&2, Line>) -> Buffer:
-  match tail:
-    case None{}: buf_push(b, line, SCROLL_CAP())
-    case Some{t}: buf_append_line.dup(b, line, outage_dup(t, line))
-
 def buf_append_line(+b: Buffer, +line: Line) -> Buffer:
-  buf_append_line.tail(b, line, buf_tail_line(b))
+  buf_push(b, line, SCROLL_CAP())
 
 # History load keeps one bounded tail per buffer. `lines` is the oldest
 # prefix and `newest` is only the newer suffix, so a push is a cons.

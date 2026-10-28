@@ -145,32 +145,6 @@ def view_structure() -> IO(Unit):
     Unit <- E.must("active name still server", String.eq(Cl.active_buf_name(closed), "server"))
     IO.pure(Unit, Unit{})
 
-def outage_base() -> Cl.Buffer:
-  Cl.empty_buf("server", False{})
-
-def outage_count(+b: Cl.Buffer) -> Nat:
-  match b:
-    case Cl.Buffer{_, _, _, _, _, _, _, +count}: count
-
-# Append-time outage coalescing: identical adjacent Eof / NetFail echoes and
-# the reconnecting follow-up append once; distinct notices, plain rows, and
-# non-adjacent repeats are untouched.
-def outage_coalesce() -> IO(Unit):
-  +dup_disc = Cl.buf_log(Cl.buf_log(outage_base(), Cl.Error{}, "disconnected"), Cl.Error{}, "disconnected")
-  +dup_reason = Cl.buf_log(Cl.buf_log(outage_base(), Cl.Error{}, "disconnected: boom"), Cl.Error{}, "disconnected: boom")
-  +dup_recon = Cl.buf_log(Cl.buf_log(outage_base(), Cl.System{}, "reconnecting in 2s to h:6697..."), Cl.System{}, "reconnecting in 2s to h:6697...")
-  +distinct = Cl.buf_log(Cl.buf_log(outage_base(), Cl.Error{}, "disconnected"), Cl.Error{}, "disconnected: boom")
-  +plain = Cl.buf_log(Cl.buf_log(outage_base(), Cl.Msg{}, "hi"), Cl.Msg{}, "hi")
-  +after_other = Cl.buf_log(Cl.buf_log(Cl.buf_log(outage_base(), Cl.Error{}, "disconnected"), Cl.Error{}, "other"), Cl.Error{}, "disconnected")
-  do IO<Unit>:
-    Unit <- E.must("identical disconnect appends once", Nat.is_eq(outage_count(dup_disc), 1n))
-    Unit <- E.must("identical disconnect-reason appends once", Nat.is_eq(outage_count(dup_reason), 1n))
-    Unit <- E.must("identical reconnecting appends once", Nat.is_eq(outage_count(dup_recon), 1n))
-    Unit <- E.must("distinct notices append twice", Nat.is_eq(outage_count(distinct), 2n))
-    Unit <- E.must("identical plain rows still append twice", Nat.is_eq(outage_count(plain), 2n))
-    Unit <- E.must("notice after other row appends", Nat.is_eq(outage_count(after_other), 3n))
-    IO.pure(Unit, Unit{})
-
 def main() -> IO(Unit):
   do IO<Unit>:
     Unit <- spines_controls()
@@ -180,5 +154,6 @@ def main() -> IO(Unit):
     Unit <- ascii_nick_focus()
     Unit <- ascii_part_feed()
     Unit <- view_structure()
-    Unit <- outage_coalesce()
+    Unit <- E.must("buffer_lane_c_laws", Cl.buffer_lane_c_laws_ok())
+    Unit <- E.must("client_lane_c_laws", Feed.client_lane_c_laws_ok())
     IO.print("buffer_spines=ok")
