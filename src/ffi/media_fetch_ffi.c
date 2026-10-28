@@ -707,7 +707,9 @@ static void birc_mf_scan_headers(const char *headers, BircMfHeaders *out) {
   memset(out, 0, sizeof *out);
   while (*p) {
     const char *eol = strstr(p, "\r\n");
-    const char *colon = strchr(p, ':');
+    /* Bound the colon search to the current line: a colon-free line must
+     * not scan to the end of the block (quadratic on hostile input). */
+    const char *colon = memchr(p, ':', (size_t)(eol - p));
     const char *v;
     size_t vlen;
     char *dst = NULL;
