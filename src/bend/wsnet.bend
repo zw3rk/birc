@@ -2418,17 +2418,16 @@ def ws_f7(+loop: WsLoop, ui: T.Ui, +typed: String, +rows: U32, +cols: U32, +more
   match loop:
     case WsLoop{+ws, +bell, +scheduled, +ctx, +media, +owner, +ups, +notify, +cards, +begun}:
       +sized = W.set_current_size(ws, rows, cols)
-      # D189 NOT fixed: sharing one cycle_server result between cycle_ws
-      # and cycle_moved is rejected by the checker (expected Data,
-      # observed Type at ws_f7): the Workspace & Bool pair cannot be named
-      # and consumed twice; each projection must consume its own call.
-      +ws2 = W.cycle_ws(W.cycle_server(sized, typed))
-      +moved = W.cycle_moved(W.cycle_server(sized, typed))
-      do IO<Unit>:
-        Unit <- ws_emit(ws_f7.rc(ws2), cmds, evts)
-        Unit <- Net.ack_key(is_key, ack)
-        got : T.Ui & W.Workspace & PrefLive.Context & Maybe<&2, WsMedia> & Maybe<&2, WsLease> & List<&2, WsLease> & WsCardsAll & Bool <- ws_post(ui, ws, ws_upload.presented(ws, ws2), W.ws_current(ws2), evts, pevts, ctx, media, owner, ups, cards, False{})
-        ws_f7.posted(got, more, moved, main, scheduled, consumed, bell, notify, begun, k)
+      # D189: one cycle_server call, destructured once inline (the pair is
+      # never named, so the checker sees a single consumption; each
+      # component is used from the match binders only).
+      match W.cycle_server(sized, typed):
+        case (+ws2, +moved):
+          do IO<Unit>:
+            Unit <- ws_emit(ws_f7.rc(ws2), cmds, evts)
+            Unit <- Net.ack_key(is_key, ack)
+            got : T.Ui & W.Workspace & PrefLive.Context & Maybe<&2, WsMedia> & Maybe<&2, WsLease> & List<&2, WsLease> & WsCardsAll & Bool <- ws_post(ui, ws, ws_upload.presented(ws, ws2), W.ws_current(ws2), evts, pevts, ctx, media, owner, ups, cards, False{})
+            ws_f7.posted(got, more, moved, main, scheduled, consumed, bell, notify, begun, k)
 
 def ws_act.go(+loop: WsLoop, ui: T.Ui, +typed: String, +enter: Bool, +rows: U32, +cols: U32, +click: U32, +key: U32, +mods: U32, +codepoint: U32, +wheel: U32, +more: Bool, +restore: Bool, +is_key: Bool, +main: Chan(WsMsg), +cmds: WsCmds, +evts: WsEvts, +pevts: Chan(Sess.UiMsg), +ack: Chan(Unit), +consumed: Bool, f7: Bool, k: (T.Ui & WsLoop & Bool) -> IO(Unit)) -> IO(Unit):
   match loop:
