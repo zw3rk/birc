@@ -506,7 +506,8 @@ def take_on_aaaa(ok: Bool, +id: U32, +qhost: String, xs: List<&2, U32>) -> Wire.
     case True{}:
       take_parse_aaaa(parse_aaaa(id, qhost, xs))
 
-# Same peer/miss rules as Wire.take_pkt; TCP framing reuses Wire.tcp_packet.
+# Same peer/miss rules as Wire.take_pkt; TCP framing now accumulates through
+# the cons-style TcpAcc reassembly in dns.bend.
 def take_pkt_aaaa(
   +ns: String,
   +id: U32,

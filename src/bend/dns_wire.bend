@@ -382,32 +382,6 @@ def tcp_frame(+q: List<&2, U32>) -> List<&2, U32>:
   +n = U32.from_nat(List.length(&2, U32, q))
   u8(U32.shrn(n, 8n)) <> u8(n) <> q
 
-type TcpFrame is Data:
-  TcpMore{}
-  TcpInvalid{}
-  TcpPayload{xs: List<&2, U32>}
-
-def tcp_body_size(order: Cmp, +body: List<&2, U32>) -> TcpFrame:
-  match order:
-    case LT{}: TcpMore{}
-    case EQ{}: TcpPayload{body}
-    case GT{}: TcpInvalid{}
-
-def tcp_length(valid: Bool, +n: U32, +body: List<&2, U32>) -> TcpFrame:
-  match valid:
-    case False{}: TcpInvalid{}
-    case True{}:
-      tcp_body_size(Nat.cmp(List.length(&2, U32, body), U32.to_nat(n)), body)
-
-# A DNS header needs twelve bytes. A TCP length is at most 65535 bytes;
-# never parse a partial body or ignore a length/trailing-byte mismatch.
-def tcp_packet(xs: List<&2, U32>) -> TcpFrame:
-  match xs:
-    case Con{+hi, Con{+lo, +body}}:
-      +n = u16_of(hi, lo)
-      tcp_length(U32.is_le(hi, 255) && U32.is_le(lo, 255) && U32.is_ge(n, 12), n, body)
-    case _: TcpMore{}
-
 # ---- Data cursor (copyable). Pairs are affine; a do-block needs Data. --
 
 type Cur is Data:

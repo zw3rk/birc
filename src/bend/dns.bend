@@ -394,17 +394,24 @@ def tcp_ready(+hdr: List<&2, U32>, +have: U32) -> TcpReady:
 def tcp_acc.zero() -> TcpAcc:
   TcpAcc{Nil{}, 0, Nil{}}
 
-def tcp_acc.add(+acc: TcpAcc, +xs: List<&2, U32>) -> TcpAcc:
-  match acc:
-    case TcpAcc{+rev, +have, +hdr}:
-      TcpAcc{tcp_cons(xs, rev), U32.add(have, U32.from_nat(List.length(&2, U32, xs))), tcp_hdr.go(hdr, xs)}
+# DNS-over-TCP frames carry a 2-byte length prefix the message parser must
+# not see: rev accumulates every received byte including the prefix, so the
+# wire-order body drops it before parse. Short input yields Nil and the
+# parser fails closed.
+def tcp_body.drop2(+xs: List<&2, U32>) -> List<&2, U32>:
+  match xs:
+    case Con{_, Con{_, +t}}: t
+    case _: Nil{}
+
+def tcp_body(+rev: List<&2, U32>) -> List<&2, U32>:
+  tcp_body.drop2(List.reverse(&2, U32, rev))
 
 def tcp_frame.full(sock: Socket, +id: U32, +host: String, +acc: TcpAcc, +aaaa: Bool) -> IO(Result<&1, &1, U32 & String, String>):
   match acc:
     case TcpAcc{+rev, +dropped_have, +dropped_hdr}:
       do IO<Result<&1, &1, U32 & String, String>>:
         Unit <- Socket.close(sock)
-        return Dq.tcp_parse(aaaa, id, host, List.reverse(&2, U32, rev))
+        return Dq.tcp_parse(aaaa, id, host, tcp_body(rev))
 
 def tcp_frame(sock: Socket, +id: U32, +host: String, +acc: TcpAcc, +aaaa: Bool, ready: TcpReady, k: Socket -> TcpAcc -> IO(Result<&1, &1, U32 & String, String>)) -> IO(Result<&1, &1, U32 & String, String>):
   match ready:
