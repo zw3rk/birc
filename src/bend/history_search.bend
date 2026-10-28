@@ -1636,9 +1636,27 @@ def hist_collect_step.done(+cm: String, done: Bool, +closed: ChatBatch, +batch: 
 # Cheap pre-gate shared by the idle and active-collect paths: lines without
 # tags and without BATCH can never open, close, or suppress. The
 # tag-presence scan (starts_with "@") and the BATCH token scan are O(prefix)
-# while Irc.parse + tag_value walk the whole line.
+# while Irc.parse + tag_value walk the whole line. The token scan is
+# case-insensitive: the close parser compares commands with Irc.ieq, so an
+# exact-case substring gate would skip a lowercase batch control line the
+# parser would act on.
+def batch_head5(+s: String) -> Bool:
+  String.eq(String.to_lower(String.take(s, 5n)), "batch")
+
+# Lazy tail (same Unit->thunk idiom as str_mentions.rest): the recursive call
+# rides a thunk so no arm names a definition that is still unfilled below.
+def batch_window(hit: Bool, +t: String, k: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}: True{}
+    case False{}: k(Unit{})
+
+def line_has_batch(+s: String) -> Bool:
+  match s:
+    case SNil{}: False{}
+    case SCon{+h, +t}: batch_window(batch_head5(SCon{h, t}), t, _ => line_has_batch(t))
+
 def line_maybe_batch(+line: String) -> Bool:
-  String.starts_with(line, "@") || String.contains(line, "BATCH")
+  String.starts_with(line, "@") || line_has_batch(line)
 
 # Active-collect lines pay a close parse plus claim/suppressed work. A close
 # is always an uppercase BATCH command from the server; lines without that
@@ -1662,7 +1680,7 @@ def hist_collect_step.open(maybe: Bool, +cm: String, +batch: ChatBatch, +self: S
       hist_collect_step.unclaimed(cm, batch_claims(batch, line), line_maybe_batch(line), batch, self, line, server)
 
 def hist_collect_step(+cm: String, +batch: ChatBatch, +self: String, +server: String, +line: String) -> ChatBatch & Bool:
-  hist_collect_step.open(String.contains(line, "BATCH"), cm, batch, self, line, server)
+  hist_collect_step.open(line_has_batch(line), cm, batch, self, line, server)
 
 def hist_idle_step.quiet(pair: ChatBatch & Bool) -> ChatBatch & Bool & Maybe<&2, Nat>:
   match pair:

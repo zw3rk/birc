@@ -180,13 +180,24 @@ def search_loop(fuel: Nat, f: File, +query: Hs.DiskQuery, +endpoint: String, +cu
       search_loop.read(Nat.is_eq(remaining, 0n), f, query, endpoint, cursor, state, remaining,
         f2 => st2 => rest => search_loop(p, f2, query, endpoint, cursor, st2, rest))
 
+# The production chunked loop inherits the snapshot path's cap: past
+# SCAN_NATIVE_CAP the scan refuses closed like the native EFBIG refusal
+# instead of walking the whole file with an unbounded remaining budget.
+def search_size.capped(big: Bool, f: File, +size: Nat, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
+  match big:
+    case True{}:
+      do IO<Hs.DiskResult>:
+        Unit <- File.close(f)
+        return Hs.DiskFailed{"history search refused: file too large"}
+    case False{}: search_loop(1n+size, f, query, endpoint, cursor, Hs.scan_initial(), size)
+
 def search_size.over(moved: Bool, f: File, +size: Nat, +query: Hs.DiskQuery, +endpoint: String, +cursor: Nat) -> IO(Hs.DiskResult):
   match moved:
     case True{}:
       do IO<Hs.DiskResult>:
         Unit <- File.close(f)
         return Hs.DiskFailed{Hs.scan_changed_text()}
-    case False{}: search_loop(1n+size, f, query, endpoint, cursor, Hs.scan_initial(), size)
+    case False{}: search_size.capped(Nat.is_gt(size, U32.to_nat(SCAN_NATIVE_CAP())), f, size, query, endpoint, cursor)
 
 # One U32->Nat conversion shared by the cursor check and the scan fuel
 # (was computed twice in the Done arm).
