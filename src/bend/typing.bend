@@ -124,12 +124,21 @@ def remove_all_cm(+cm: String, xs: List<&2, Entry>, +nick: String) -> List<&2, E
     case Con{+h, t}:
       remove_all.keep_cm(cm, h, remove_all_cm(cm, t, nick), nick)
 
+# At cap the oldest entry is evicted, not the newcomer: presence is
+# recency-weighted (active expires in 6 s), and the chunk-end retain drops
+# unopened queries anyway. Dropping the newcomer would lose a legitimate
+# open-query event behind slots the retain was about to discard.
+def append_evict(+xs: List<&2, Entry>, +e: Entry) -> List<&2, Entry>:
+  match xs:
+    case Nil{}: e <> Nil{}
+    case Con{_, +t}: List.append(&2, Entry, t, e <> Nil{})
+
 def append_new(+xs: List<&2, Entry>, +e: Entry, room: Bool) -> List<&2, Entry>:
   match room:
     case True{}:
       List.append(&2, Entry, xs, e <> Nil{})
     case False{}:
-      xs
+      append_evict(xs, e)
 
 def upsert.pick(+rest: List<&2, Entry>, +e: Entry, existed: Bool) -> List<&2, Entry>:
   match existed:

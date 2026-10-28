@@ -451,6 +451,9 @@ def accept(state: State, +client: Cl.Client, +gen: Nat, +ticket: Nat, +url: Stri
 
 # Accepted completions always occupy their identity, even with empty fields,
 # so helper failures cannot cause retry loops. Stale results only release.
+# The fresh entry replaces any same-identity ready row: manual retries skip
+# the ready_without invalidation on enqueue, so a plain prepend would stack
+# a duplicate toward the cap on every completion.
 def complete.on(hit: Bool, accepted: Bool, +state: State, +fields: Fields) -> State:
   match hit:
     case False{}: state
@@ -460,7 +463,7 @@ def complete.on(hit: Bool, accepted: Bool, +state: State, +fields: Fields) -> St
           match fields:
             case Fields{+title, +desc, +image}:
               State{on, gen, ticket, None{}, pending, Bool.pick(List<&2, CardReady>, accepted,
-                List.take(&2, CardReady, CardReady{target, url, title, desc, image} <> ready, CAP()), ready)}
+                List.take(&2, CardReady, CardReady{target, url, title, desc, image} <> ready_without(ready, target, url), CAP()), ready)}
         case _: state
 
 def complete(+state: State, +client: Cl.Client, +gen: Nat, +ticket: Nat, +url: String, +payload: String) -> State:

@@ -125,10 +125,10 @@ def post_on_failure(diag: Maybe<&2, String>, notice: Maybe<&2, Chan(Sess.UiMsg)>
 
 # Single-worker body: deliver every handed job in FIFO order on one
 # detached worker, reusing the bounded run and stage-label-only diagnostics.
-# D210: fuel was a full `List.length` walk over a queue that is bounded by
-# QUEUE_CAP by construction (`enqueue` rejects past the cap; staged reqs are
-# admitted only alongside queue room, at most one per queued slot). Seeding
-# fuel at the cap provably suffices and performs no walk.
+# Fuel is the handed list length, not QUEUE_CAP: drained-retained plus staged
+# admits can exceed the cap (stage_admitted's full arm still appends reqs),
+# and cap fuel would silently drop the tail while its at-most-once marks are
+# already consumed and NotifyDone is still posted.
 # D211: the helper basename was re-split per job (N+1 splits per handoff).
 # The base is resolved once per handoff and threaded through; the full helper
 # path is still threaded separately for the spawn.
@@ -145,7 +145,7 @@ def run_jobs.go(fuel: Nat, +helper: String, +base: String, +jobs: List<&2, Notif
             run_jobs.go(p, helper, base, t, notice)
 
 def run_jobs(+helper: String, +jobs: List<&2, Notify.Req>, +notice: Maybe<&2, Chan(Sess.UiMsg)>) -> IO(Unit):
-  run_jobs.go(Notify.QUEUE_CAP(), helper, base_of(helper), jobs, notice)
+  run_jobs.go(List.length(&2, Notify.Req, jobs), helper, base_of(helper), jobs, notice)
 
 def post_done(notice: Maybe<&2, Chan(Sess.UiMsg)>, +ticket: Nat, +endpoint: String) -> IO(Unit):
   match notice:
